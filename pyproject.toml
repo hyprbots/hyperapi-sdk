@@ -7,7 +7,6 @@ name = "hyperapi"
 version = "0.1.0"
 description = "HyperAPI Python SDK - Financial document processing APIs"
 readme = "README.md"
-license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
     {name = "HyperAPI", email = "research@hyperbots.com"}
