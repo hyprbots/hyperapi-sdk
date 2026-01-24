@@ -28,8 +28,6 @@ class HyperAPIClient:
         print(fields["data"])
     """
 
-    DEFAULT_BASE_URL = ""
-
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -55,7 +53,6 @@ class HyperAPIClient:
         self.base_url = (
             base_url
             or os.environ.get("HYPERAPI_URL")
-            or self.DEFAULT_BASE_URL
         )
         self.timeout = timeout
         self._client = httpx.Client(timeout=timeout)
