@@ -10,7 +10,7 @@
 
 ---
 
-**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Split(coming soon), Classify(coming soon), Layout(coming soon), Verify(coming soon), Omni(coming soon), Redact(coming soon), Summarise(coming soon), and Sheets APIs(coming soon). Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
+**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Split(coming soon), Classify(coming soon), Layout(coming soon), Verify(coming soon), Omni(coming soon), Redact(coming soon), Summarise(coming soon), and Sheets(coming soon) APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
 
 ## Why Choose HyperAPI?
 
