@@ -68,9 +68,9 @@ print(result["data"]["total"])           # "$1,800.00"
 For more control, use parse and extract separately:
 
 ```python
-# Step 1: Parse document to OCR
+# Step 1: Parse document
 ocr_result = client.parse("invoice.png")
-print(ocr_result["ocr"])  # Markdown-formatted OCR text
+print(ocr_result["ocr"])  # Markdown-formatted text
 
 # Step 2: Extract structured fields with validation
 fields = client.extract(ocr_result["ocr"])
@@ -93,8 +93,8 @@ client = HyperAPIClient(
 
 | Method | Input | Output | Description |
 |--------|-------|--------|-------------|
-| `parse(image_path)` | Path to image | `{"type": "layout", "ocr": "..."}` | OCR extraction |
-| `extract(ocr_text)` | OCR string | `{"type": "extract", "data": {...}}` | Structured extraction |
+| `parse(image_path)` | Path to image | `{"type": "layout", "ocr": "..."}` | Parse Document into text |
+| `extract(ocr_text)` | Parse Document string | `{"type": "extract", "data": {...}}` | Structured extraction |
 | `process(image_path)` | Path to image | `{"ocr": "...", "data": {...}}` | Combined pipeline |
 
 ### Supported Formats
