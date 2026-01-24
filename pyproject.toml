@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hyperapi"
+name = "hyperapi-sdk"
 version = "0.1.0"
 description = "HyperAPI Python SDK - Financial document processing APIs"
 readme = "README.md"
@@ -11,9 +11,11 @@ requires-python = ">=3.9"
 authors = [
     {name = "HyperAPI", email = "research@hyperbots.com"}
 ]
+license = {text = "MIT"}
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -36,6 +38,7 @@ dev = [
 [project.urls]
 Homepage = "https://apis.hyperbots.com"
 Repository = "https://github.com/hyperapi/hyperapi-sdk"
+Issues = "https://github.com/hyperapi/hyperapi-sdk/issues"
 
 [tool.setuptools.packages.find]
 include = ["hyperapi*"]

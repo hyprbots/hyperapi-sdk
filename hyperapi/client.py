@@ -1,6 +1,7 @@
 """
 HyperAPI Client
 """
+
 import os
 from pathlib import Path
 from typing import Union, Optional
@@ -71,7 +72,7 @@ class HyperAPIClient:
         Returns:
             dict with keys:
                 - type: "layout"
-                - ocr: Extracted text in markdown format
+                - ocr: Extracted text
 
         Raises:
             FileNotFoundError: If image file doesn't exist
@@ -140,7 +141,85 @@ class HyperAPIClient:
             response = self._client.post(
                 f"{self.base_url}/extract",
                 data={"ocr_text": ocr_text},
-                headers=self._get_headers()
+                headers=self._get_headers(),
+                timeout=600.0  # LLM calls can take longer
+            )
+
+            if response.status_code == 401:
+                raise AuthenticationError("Invalid API key", status_code=401)
+
+            if response.status_code != 200:
+                raise ExtractError(
+                    f"Extract failed: {response.text}",
+                    status_code=response.status_code
+                )
+
+            return response.json()
+
+        except httpx.TimeoutException:
+            raise ExtractError("Request timed out", status_code=504)
+        except httpx.RequestError as e:
+            raise ExtractError(f"Request failed: {str(e)}")
+
+    def extract_lineitems(self, ocr_text: str) -> dict:
+        """
+        Extract line items with validation-aware extraction.
+
+        Uses LLM to extract line items and validates quantity × rate = amount.
+        This catches OCR errors like "0.15" vs "0:15" time format issues.
+
+        Args:
+            ocr_text: OCR text from parsed document
+
+        Returns:
+            dict with keys:
+                - type: "lineitems"
+                - data: {"line_items": [...], "summary": {...}}
+        """
+        try:
+            response = self._client.post(
+                f"{self.base_url}/extract-lineitems",
+                data={"ocr_text": ocr_text},
+                headers=self._get_headers(),
+                timeout=600.0
+            )
+
+            if response.status_code == 401:
+                raise AuthenticationError("Invalid API key", status_code=401)
+
+            if response.status_code != 200:
+                raise ExtractError(
+                    f"Extract failed: {response.text}",
+                    status_code=response.status_code
+                )
+
+            return response.json()
+
+        except httpx.TimeoutException:
+            raise ExtractError("Request timed out", status_code=504)
+        except httpx.RequestError as e:
+            raise ExtractError(f"Request failed: {str(e)}")
+
+    def extract_entities(self, ocr_text: str) -> dict:
+        """
+        Extract document entities (invoice number, dates, vendor info, etc.)
+
+        Uses LLM with few-shot learning for intelligent extraction.
+
+        Args:
+            ocr_text: OCR text from parsed document
+
+        Returns:
+            dict with keys:
+                - type: "entities"
+                - data: Extracted entity fields
+        """
+        try:
+            response = self._client.post(
+                f"{self.base_url}/extract-entities",
+                data={"ocr_text": ocr_text},
+                headers=self._get_headers(),
+                timeout=600.0
             )
 
             if response.status_code == 401:
