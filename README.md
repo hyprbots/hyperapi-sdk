@@ -10,7 +10,7 @@
 
 ---
 
-**HyperAPI-SDK** is a document intelligence framework composed of Parse, Split, Classify, Layout, Extract, Verify, Omni, Redact, Summarise, and Sheets APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
+**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Split(coming soon), Classify(coming soon), Layout(coming soon), Verify(coming soon), Omni(coming soon), Redact(coming soon), Summarise(coming soon), and Sheets APIs(coming soon). Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
 
 ## Why Choose HyperAPI?
 
@@ -110,7 +110,7 @@ client = HyperAPIClient(
 | [`tutorial/The_Billing_Typo.ipynb`](tutorial/The_Billing_Typo.ipynb) | Compare HyperAPI vs GPT-4, Claude, Gemini on extraction task when typos are present|
 
 ## Papers
-If you use **HyperAPI** or ideas related to its document intelligence and validation pipeline in your research, please cite the following paper:
+If you use **HyperAPI** or ideas related to its document intelligence and validation pipeline in your research, please cite the following papers:
 
 ```bibtex
 @inproceedings{haq2026breaking,
