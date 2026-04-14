@@ -10,7 +10,44 @@
 
 ---
 
-**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Split(coming soon), Classify(coming soon), Layout(coming soon), Verify(coming soon), Omni(coming soon), Redact(coming soon), Summarise(coming soon), and Sheets(coming soon) APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
+**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Classify, Split, and more APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
+
+## Architecture
+
+HyperAPI uses a **two-stage pipeline** for document processing:
+
+```
+                          ┌─────────────────┐
+                          │  Upload Document │
+                          └────────┬────────┘
+                                   │
+                    ┌──────────────▼──────────────┐
+                    │     Stage 1: OCR Engine      │
+                    │                              │
+                    │  ┌──────────┐ ┌───────────┐  │
+                    │  │ paddle   │ │ doc-intent │  │
+                    │  │ (default)│ │ (alt)      │  │
+                    │  └──────────┘ └───────────┘  │
+                    └──────────────┬──────────────┘
+                                   │ ocr_pages + ocr_text
+                    ┌──────────────▼──────────────┐
+                    │     Stage 2: Task LLM        │
+                    │                              │
+                    │  parse → (skip, OCR only)    │
+                    │  extract → extract-service   │
+                    │  classify → classifier       │
+                    │  split → classifier-splitter │
+                    └─────────────────────────────┘
+```
+
+**Stage 1** runs OCR via one of two engines (configurable per-request). **Stage 2** routes the OCR output to a task-specific LLM service. For `parse`, Stage 2 is skipped — you get the raw OCR result directly.
+
+### OCR Engines
+
+| Engine | Parameter Value | Best For |
+|--------|----------------|----------|
+| **Paddle OCR** | `"paddle"` (default) | General documents, invoices, receipts |
+| **Doc-Intent** | `"doc-intent"` | Complex layouts, multi-column, tables |
 
 ## Why Choose HyperAPI?
 
@@ -49,13 +86,13 @@ pip install -e .
 from hyperapi import HyperAPIClient
 
 # Initialize with your API key
-client = HyperAPIClient(api_key="your-key", base_url="hyperapi-base-url")
+client = HyperAPIClient(api_key="hk_live_your_key")
 
 # Or use environment variable
-# export HYPERAPI_KEY="your-key" HYPERAPI_URL="hyperapi-base-url"
+# export HYPERAPI_KEY="hk_live_your_key"
 client = HyperAPIClient()
 
-# Process a financial document
+# Process a financial document (parse + extract in one call)
 result = client.process("invoice.png")
 
 print(result["data"]["invoice_number"])  # "7816"
@@ -68,13 +105,30 @@ print(result["data"]["total"])           # "$1,800.00"
 For more control, use parse and extract separately:
 
 ```python
-# Step 1: Parse document
+# Step 1: Parse document (OCR)
 ocr_result = client.parse("invoice.png")
 print(ocr_result["ocr"])  # Markdown-formatted text
 
-# Step 2: Extract structured fields with validation
+# Step 2: Extract structured fields
 fields = client.extract(ocr_result["ocr"])
 print(fields["data"]["line_items"])
+
+# Use alternative OCR engine
+ocr_result = client.parse("complex_table.pdf", ocr_engine="doc-intent")
+```
+
+## Async Processing
+
+For large documents or batch workloads, use async mode:
+
+```python
+# Submit async job
+job = client.parse("large_document.pdf", async_mode=True)
+job_id = job["job_id"]
+
+# Poll until complete
+result = client.poll_job(job_id, poll_interval=2.0, max_wait=300)
+print(result["status"])  # "completed"
 ```
 
 ## API Reference
@@ -84,18 +138,30 @@ print(fields["data"]["line_items"])
 ```python
 client = HyperAPIClient(
     api_key: str = None,      # API key (or set HYPERAPI_KEY env var)
-    base_url: str = None,     # API endpoint (or set HYPERAPI_URL)
+    base_url: str = None,     # API endpoint (default: https://apis.hyperbots.com)
     timeout: float = 120.0    # Request timeout in seconds
 )
 ```
 
 ### Methods
 
-| Method | Input | Output | Description |
-|--------|-------|--------|-------------|
-| `parse(image_path)` | Path to image | `{"type": "layout", "ocr": "..."}` | Parse Document into text |
-| `extract(ocr_text)` | Parse Document string | `{"type": "extract", "data": {...}}` | Structured extraction |
-| `process(image_path)` | Path to image | `{"ocr": "...", "data": {...}}` | Combined pipeline |
+| Method | Input | Pipeline | Description |
+|--------|-------|----------|-------------|
+| `parse(file)` | File path or bytes | OCR only | Parse document into structured text |
+| `extract(file)` | File path or bytes | OCR → extract-service | Extract structured fields with validation |
+| `classify(file)` | File path or bytes | OCR → classifier | Classify document type |
+| `split(file)` | File path or bytes | OCR → classifier-splitter | Split multi-document binders |
+| `process(file)` | File path or bytes | OCR → extract | Combined parse + extract pipeline |
+| `poll_job(job_id)` | Job ID string | — | Poll async job until completion |
+
+### Common Parameters
+
+| Parameter | Type | Default | Available On |
+|-----------|------|---------|-------------|
+| `ocr_engine` | `"paddle"` \| `"doc-intent"` | `"paddle"` | All methods |
+| `mode` | `str` | `None` | extract, classify, split |
+| `async_mode` | `bool` | `False` | All methods |
+| `use_presigned` | `bool` | `False` | All methods (S3 presigned upload) |
 
 ### Supported Formats
 
