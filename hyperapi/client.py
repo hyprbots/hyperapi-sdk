@@ -197,7 +197,7 @@ class HyperAPIClient:
         except httpx.RequestError as e:
             raise DocumentUploadError(f"S3 upload failed: {str(e)}")
 
-        if s3_resp.status_code != 200:
+        if s3_resp.status_code not in (200, 204):
             raise DocumentUploadError(
                 f"S3 PUT failed (status {s3_resp.status_code}). "
                 "Ensure x-amz-server-side-encryption: AES256 is present.",
@@ -276,7 +276,7 @@ class HyperAPIClient:
         *,
         error_cls: type,
         ocr_engine: OCREngine = "paddle",
-        mode: str = "default",
+        mode: Optional[str] = None,
         use_presigned: bool = True,
         async_mode: bool = False,
         timeout: Optional[float] = None,
@@ -286,7 +286,9 @@ class HyperAPIClient:
         all four endpoints. Returns the parsed JSON response.
         """
         request_timeout = timeout or self.timeout
-        params = {"ocr_engine": ocr_engine, "mode": mode}
+        params: dict = {"ocr_engine": ocr_engine}
+        if mode is not None:
+            params["mode"] = mode
 
         try:
             if use_presigned:
@@ -387,7 +389,6 @@ class HyperAPIClient:
             "/v1/parse", path,
             error_cls=ParseError,
             ocr_engine=ocr_engine,
-            mode="default",
             use_presigned=use_presigned,
             async_mode=async_mode,
         )
@@ -546,15 +547,22 @@ class HyperAPIClient:
         content_type = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
         document_key = self.upload_document(path, content_type=content_type)
 
-        params = {"ocr_engine": ocr_engine, "mode": "default"}
+        parse_params = {"ocr_engine": ocr_engine}
+        extract_params = {"ocr_engine": ocr_engine, "mode": "default"}
         headers = self._get_headers()
 
         parse_response = self._client.post(
             f"{self.base_url}/v1/parse",
             data={"document_key": document_key},
-            params=params,
+            params=parse_params,
             headers=headers,
         )
+        if parse_response.status_code == 401:
+            raise AuthenticationError("Invalid API key", status_code=401)
+        if parse_response.status_code == 402:
+            raise ParseError("Insufficient credits", status_code=402)
+        if parse_response.status_code == 429:
+            raise ParseError("Rate limit exceeded", status_code=429)
         if parse_response.status_code != 200:
             raise ParseError(
                 f"Parse failed: {parse_response.text}",
@@ -564,10 +572,16 @@ class HyperAPIClient:
         extract_response = self._client.post(
             f"{self.base_url}/v1/extract",
             data={"document_key": document_key},
-            params=params,
+            params=extract_params,
             headers=self._get_headers(),
             timeout=_EXTRACT_TIMEOUT,
         )
+        if extract_response.status_code == 401:
+            raise AuthenticationError("Invalid API key", status_code=401)
+        if extract_response.status_code == 402:
+            raise ExtractError("Insufficient credits", status_code=402)
+        if extract_response.status_code == 429:
+            raise ExtractError("Rate limit exceeded", status_code=429)
         if extract_response.status_code != 200:
             raise ExtractError(
                 f"Extract failed: {extract_response.text}",

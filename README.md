@@ -109,9 +109,9 @@ For more control, use parse and extract separately:
 ocr_result = client.parse("invoice.png")
 print(ocr_result["ocr"])  # Markdown-formatted text
 
-# Step 2: Extract structured fields
-fields = client.extract(ocr_result["ocr"])
-print(fields["data"]["line_items"])
+# Step 2: Extract structured fields (from the same file)
+fields = client.extract("invoice.png")
+print(fields["result"])
 
 # Use alternative OCR engine
 ocr_result = client.parse("complex_table.pdf", ocr_engine="doc-intent")
@@ -159,9 +159,9 @@ client = HyperAPIClient(
 | Parameter | Type | Default | Available On |
 |-----------|------|---------|-------------|
 | `ocr_engine` | `"paddle"` \| `"doc-intent"` | `"paddle"` | All methods |
-| `mode` | `str` | `None` | extract, classify, split |
+| `mode` | `str` | `"default"` | extract, classify, split |
 | `async_mode` | `bool` | `False` | All methods |
-| `use_presigned` | `bool` | `False` | All methods (S3 presigned upload) |
+| `use_presigned` | `bool` | `True` | All methods (S3 presigned upload) |
 
 ### Supported Formats
 
