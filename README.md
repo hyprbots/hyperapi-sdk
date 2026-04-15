@@ -70,7 +70,7 @@ Invoice Line Item:
 ## Installation
 
 ```bash
-pip install hyperapi
+pip install hyperapi-sdk
 ```
 
 Or install from source:
@@ -117,20 +117,6 @@ print(fields["result"])
 ocr_result = client.parse("complex_table.pdf", ocr_engine="doc-intent")
 ```
 
-## Async Processing
-
-For large documents or batch workloads, use async mode:
-
-```python
-# Submit async job
-job = client.parse("large_document.pdf", async_mode=True)
-job_id = job["job_id"]
-
-# Poll until complete
-result = client.poll_job(job_id, poll_interval=2.0, max_wait=300)
-print(result["status"])  # "completed"
-```
-
 ## API Reference
 
 ### `HyperAPIClient`
@@ -147,20 +133,17 @@ client = HyperAPIClient(
 
 | Method | Input | Pipeline | Description |
 |--------|-------|----------|-------------|
-| `parse(file)` | File path or bytes | OCR only | Parse document into structured text |
-| `extract(file)` | File path or bytes | OCR → extract-service | Extract structured fields with validation |
-| `classify(file)` | File path or bytes | OCR → classifier | Classify document type |
-| `split(file)` | File path or bytes | OCR → classifier-splitter | Split multi-document binders |
-| `process(file)` | File path or bytes | OCR → extract | Combined parse + extract pipeline |
-| `poll_job(job_id)` | Job ID string | — | Poll async job until completion |
-
+| `parse(file)` | File path | OCR only | Parse document into structured text |
+| `extract(file)` | File path | OCR → extract-service | Extract structured fields with validation |
+| `classify(file)` | File path | OCR → classifier | Classify document type |
+| `split(file)` | File path | OCR → classifier-splitter | Split multi-document binders |
+| `process(file)` | File path | OCR → extract | Combined parse + extract pipeline |
 ### Common Parameters
 
 | Parameter | Type | Default | Available On |
 |-----------|------|---------|-------------|
 | `ocr_engine` | `"paddle"` \| `"doc-intent"` | `"paddle"` | All methods |
 | `mode` | `str` | `"default"` | extract, classify, split |
-| `async_mode` | `bool` | `False` | All methods |
 | `use_presigned` | `bool` | `True` | All methods (S3 presigned upload) |
 
 ### Supported Formats

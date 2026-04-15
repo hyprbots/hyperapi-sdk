@@ -22,7 +22,6 @@ doc-intent  Doc-Intent VLM — vision-language model, better on complex layouts
 """
 
 import os
-import time
 import uuid
 from pathlib import Path
 from typing import Union, Optional, Literal
@@ -55,8 +54,6 @@ OCREngine = Literal["paddle", "doc-intent"]
 
 _DEFAULT_TIMEOUT = 120.0
 _EXTRACT_TIMEOUT = 600.0
-_JOB_POLL_INTERVAL = 2.0
-_JOB_POLL_MAX_WAIT = 600.0
 
 
 class HyperAPIClient:
@@ -80,9 +77,8 @@ class HyperAPIClient:
         fields = client.extract("invoice.pdf")
         print(fields["result"])
 
-        # Async processing — returns immediately, poll for result
-        job = client.parse("invoice.pdf", async_mode=True)
-        result = client.poll_job(job["job_id"])
+        # Close when done
+        client.close()
     """
 
     def __init__(
@@ -117,15 +113,12 @@ class HyperAPIClient:
         self.timeout = timeout
         self._client = httpx.Client(timeout=timeout)
 
-    def _get_headers(self, async_mode: bool = False) -> dict:
+    def _get_headers(self) -> dict:
         """Get request headers with API key and a unique request ID for tracing."""
-        headers = {
+        return {
             "X-API-Key": self.api_key,
             "X-Request-ID": str(uuid.uuid4()),
         }
-        if async_mode:
-            headers["X-Async"] = "true"
-        return headers
 
     # ── Upload ───────────────────────────────────────────────────────────
 
@@ -206,67 +199,6 @@ class HyperAPIClient:
 
         return document_key
 
-    # ── Job polling (async mode) ─────────────────────────────────────────
-
-    def poll_job(
-        self,
-        job_id: str,
-        *,
-        poll_interval: float = _JOB_POLL_INTERVAL,
-        max_wait: float = _JOB_POLL_MAX_WAIT,
-    ) -> dict:
-        """
-        Poll an async job until it completes or times out.
-
-        When you call any endpoint with ``async_mode=True``, the API returns
-        a job_id immediately. Use this method to poll until the result is ready.
-
-        Args:
-            job_id: The job ID returned from the async call.
-            poll_interval: Seconds between polls (default: 2s).
-            max_wait: Maximum total wait time in seconds (default: 600s).
-
-        Returns:
-            The completed job result dict (same shape as a synchronous response).
-
-        Raises:
-            HyperAPIError: If the job fails or polling times out.
-        """
-        start = time.time()
-        while True:
-            elapsed = time.time() - start
-            if elapsed >= max_wait:
-                raise HyperAPIError(
-                    f"Job {job_id} did not complete within {max_wait}s",
-                    status_code=504,
-                )
-
-            try:
-                resp = self._client.get(
-                    f"{self.base_url}/v1/jobs/{job_id}",
-                    headers=self._get_headers(),
-                )
-            except httpx.RequestError as e:
-                raise HyperAPIError(f"Failed to poll job {job_id}: {str(e)}")
-
-            if resp.status_code != 200:
-                raise HyperAPIError(
-                    f"Job poll failed: {resp.text}",
-                    status_code=resp.status_code,
-                )
-
-            data = resp.json()
-            status = data.get("status")
-
-            if status == "completed":
-                return data.get("result", data)
-            if status == "failed":
-                raise HyperAPIError(
-                    f"Job {job_id} failed: {data.get('error', 'Unknown error')}",
-                )
-
-            time.sleep(poll_interval)
-
     # ── Core helpers ─────────────────────────────────────────────────────
 
     def _call_endpoint(
@@ -278,7 +210,6 @@ class HyperAPIClient:
         ocr_engine: OCREngine = "paddle",
         mode: Optional[str] = None,
         use_presigned: bool = True,
-        async_mode: bool = False,
         timeout: Optional[float] = None,
     ) -> dict:
         """
@@ -298,7 +229,7 @@ class HyperAPIClient:
                     f"{self.base_url}{endpoint}",
                     data={"document_key": document_key},
                     params=params,
-                    headers=self._get_headers(async_mode=async_mode),
+                    headers=self._get_headers(),
                     timeout=request_timeout,
                 )
             else:
@@ -309,7 +240,7 @@ class HyperAPIClient:
                         f"{self.base_url}{endpoint}",
                         files=files,
                         params=params,
-                        headers=self._get_headers(async_mode=async_mode),
+                        headers=self._get_headers(),
                         timeout=request_timeout,
                     )
 
@@ -359,7 +290,6 @@ class HyperAPIClient:
         image_path: Union[str, Path] = None,
         ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
-        async_mode: bool = False,
     ) -> dict:
         """
         Parse a document using OCR.
@@ -375,11 +305,9 @@ class HyperAPIClient:
             image_path: Deprecated alias for file_path.
             ocr_engine: OCR engine to use — "paddle" (default) or "doc-intent".
             use_presigned: Upload via S3 presigned URL (default True).
-            async_mode: If True, returns a job_id immediately. Poll with poll_job().
 
         Returns:
-            Synchronous: response envelope with ``result["result"]["ocr"]``.
-            Async: ``{"job_id": "...", "status": "pending", "poll_url": "..."}``.
+            Response envelope with ``result["result"]["ocr"]``.
 
         Raises:
             ParseError: If parsing fails or times out.
@@ -390,7 +318,6 @@ class HyperAPIClient:
             error_cls=ParseError,
             ocr_engine=ocr_engine,
             use_presigned=use_presigned,
-            async_mode=async_mode,
         )
 
     def extract(
@@ -400,7 +327,6 @@ class HyperAPIClient:
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         use_presigned: bool = True,
-        async_mode: bool = False,
     ) -> dict:
         """
         Extract structured data from a document (entities + line items).
@@ -415,12 +341,10 @@ class HyperAPIClient:
             ocr_engine: OCR engine — "paddle" (default) or "doc-intent".
             mode: Processing mode (default: "default").
             use_presigned: Upload via S3 presigned URL (default True).
-            async_mode: If True, returns a job_id immediately. Poll with poll_job().
 
         Returns:
-            Synchronous: response envelope with ``result["result"]`` containing
-            entities and line items, plus ``result["ocr_text"]`` with the raw OCR.
-            Async: ``{"job_id": "...", "status": "pending", "poll_url": "..."}``.
+            Response envelope with ``result["result"]`` containing entities
+            and line items, plus ``result["ocr_text"]`` with the raw OCR.
 
         Raises:
             ExtractError: If extraction fails or times out.
@@ -432,7 +356,6 @@ class HyperAPIClient:
             ocr_engine=ocr_engine,
             mode=mode,
             use_presigned=use_presigned,
-            async_mode=async_mode,
             timeout=_EXTRACT_TIMEOUT,
         )
 
@@ -443,7 +366,6 @@ class HyperAPIClient:
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         use_presigned: bool = True,
-        async_mode: bool = False,
     ) -> dict:
         """
         Classify a document type (invoice, contract, receipt, etc.).
@@ -458,11 +380,9 @@ class HyperAPIClient:
             ocr_engine: OCR engine — "paddle" (default) or "doc-intent".
             mode: Processing mode (default: "default").
             use_presigned: Upload via S3 presigned URL (default True).
-            async_mode: If True, returns a job_id immediately. Poll with poll_job().
 
         Returns:
-            Synchronous: response envelope with classification result.
-            Async: ``{"job_id": "...", "status": "pending", "poll_url": "..."}``.
+            Response envelope with classification result.
 
         Raises:
             ClassifyError: If classification fails or times out.
@@ -474,7 +394,6 @@ class HyperAPIClient:
             ocr_engine=ocr_engine,
             mode=mode,
             use_presigned=use_presigned,
-            async_mode=async_mode,
         )
 
     def split(
@@ -484,7 +403,6 @@ class HyperAPIClient:
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         use_presigned: bool = True,
-        async_mode: bool = False,
     ) -> dict:
         """
         Split a multi-document PDF into individual document segments.
@@ -499,11 +417,9 @@ class HyperAPIClient:
             ocr_engine: OCR engine — "paddle" (default) or "doc-intent".
             mode: Processing mode (default: "default").
             use_presigned: Upload via S3 presigned URL (default True).
-            async_mode: If True, returns a job_id immediately. Poll with poll_job().
 
         Returns:
-            Synchronous: response envelope with ``result["result"]["segments"]``.
-            Async: ``{"job_id": "...", "status": "pending", "poll_url": "..."}``.
+            Response envelope with ``result["result"]["segments"]``.
 
         Raises:
             SplitError: If splitting fails or times out.
@@ -515,7 +431,6 @@ class HyperAPIClient:
             ocr_engine=ocr_engine,
             mode=mode,
             use_presigned=use_presigned,
-            async_mode=async_mode,
         )
 
     def process(
