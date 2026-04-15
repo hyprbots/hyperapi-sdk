@@ -1,0 +1,38 @@
+# qa-manifest.yaml — QA agent configuration for hyperapi-sdk
+# See: hyperapi-documentation-internal/architecture/qa-agent-design-decisions.md
+#
+# WARNING: SDK is stale — may not match current backend API.
+# Treat as contract test target, not unit test subject.
+# Skip unit tests until SDK is updated to match current API.
+
+service:
+  name: hyperapi-sdk
+  type: library
+  language: python
+  framework: none
+  status: stale
+
+dependencies:
+  system: []
+  services:
+    - hyperapi-backend  # SDK tests should run against live backend
+  start_command: "echo 'SDK — no service to start'"
+  health_check: "echo 'skipped — library'"
+
+testing:
+  framework: pytest
+  install: "pip install -e '.[dev]'"
+  run: "pytest tests/ -v"
+  min_coverage: 80
+  source_dirs:
+    - hyperapi/
+  test_dir: tests/
+  # SDK testing strategy:
+  # 1. Skip unit tests until SDK is updated to match current API
+  # 2. Use SDK as E2E contract validator: run SDK methods against staging backend
+  # 3. When backend endpoints change, flag SDK as needing update in QA report
+  contract_test_against: "http://localhost:8000"
+
+ci:
+  dev_branch: preproduction
+  prod_branch: production
