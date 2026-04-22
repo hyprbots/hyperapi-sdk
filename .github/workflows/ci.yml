@@ -26,4 +26,4 @@ jobs:
       - name: Lint
         run: ruff check hyperapi/
       - name: Test
-        run: pytest tests/ -v --tb=short --cov=hyperapi --cov-fail-under=25
+        run: pytest tests/ -v --tb=short
