@@ -32,7 +32,17 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "ruff>=0.8.0",
+    "pre-commit>=4.0.0",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
 
 [project.urls]
 Homepage = "https://apis.hyperbots.com"
