@@ -24,18 +24,17 @@ doc-intent  Doc-Intent VLM — vision-language model, better on complex layouts
 import os
 import uuid
 from pathlib import Path
-from typing import Union, Optional, Literal
+from typing import Literal, Optional, Union
 
 import httpx
 
 from .exceptions import (
     AuthenticationError,
-    ParseError,
-    ExtractError,
     ClassifyError,
-    SplitError,
     DocumentUploadError,
-    HyperAPIError,
+    ExtractError,
+    ParseError,
+    SplitError,
 )
 
 
@@ -285,9 +284,9 @@ class HyperAPIClient:
 
     def parse(
         self,
-        file_path: Union[str, Path] = None,
+        file_path: Union[str, Path, None] = None,
         *,
-        image_path: Union[str, Path] = None,
+        image_path: Union[str, Path, None] = None,
         ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
     ) -> dict:
@@ -435,9 +434,9 @@ class HyperAPIClient:
 
     def process(
         self,
-        file_path: Union[str, Path] = None,
+        file_path: Union[str, Path, None] = None,
         *,
-        image_path: Union[str, Path] = None,
+        image_path: Union[str, Path, None] = None,
         ocr_engine: OCREngine = "paddle",
     ) -> dict:
         """
