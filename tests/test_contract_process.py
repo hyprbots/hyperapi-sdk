@@ -1,8 +1,9 @@
-"""Contract: process() — uploads once, then calls parse + extract sharing the document_key.
+"""Contract: process() — uploads once, submits parse + extract concurrently
+(sharing the document_key for the router OCR cache), polls both via wait_for_jobs.
 
 This is the user-visible router-OCR-cache optimization: parse runs OCR, extract
-re-uses it via Redis cache. The SDK side just makes the calls in order; we assert
-both calls land with the same document_key.
+re-uses it via Redis. The SDK uploads once, submits both legs async, then
+polls them round-robin.
 """
 
 import httpx
@@ -11,43 +12,56 @@ import pytest
 from hyperapi import ExtractError, ParseError
 
 
-PARSE_RESPONSE = {"request_id": "p", "result": {"ocr": "Hello world", "pages": 1}}
-EXTRACT_RESPONSE = {"request_id": "e", "result": {"entities": {"foo": "bar"}}}
-
-
 def _seed_upload(mock_backend, key="doc_proc"):
     mock_backend.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
-            "document_key": key, "upload_url": f"https://s3.local/{key}?sig=x", "expires_in": 600,
+            "document_key": key,
+            "upload_url": f"https://s3.local/{key}?sig=x",
+            "expires_in": 600,
         }),
     )
     mock_backend.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
 
 
-def test_process_uploads_once_then_calls_parse_and_extract(mock_backend, client, tiny_pdf):
+def test_process_uploads_once_then_submits_both_legs_async(mock_backend, client, tiny_pdf):
     upload_route = mock_backend.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
-            "document_key": "doc_once", "upload_url": "https://s3.local/once?sig=x",
+            "document_key": "doc_once",
+            "upload_url": "https://s3.local/once?sig=x",
             "expires_in": 600,
         }),
     )
     s3_route = mock_backend.put("https://s3.local/once?sig=x").mock(
         return_value=httpx.Response(200),
     )
-    parse_route = mock_backend.post("/v1/parse").mock(
-        return_value=httpx.Response(200, json=PARSE_RESPONSE),
+    parse_submit = mock_backend.post("/v1/parse").mock(
+        return_value=httpx.Response(202, json={
+            "job_id": "parse_J", "status": "pending", "poll_url": "/v1/jobs/parse_J",
+        }),
     )
-    extract_route = mock_backend.post("/v1/extract").mock(
-        return_value=httpx.Response(200, json=EXTRACT_RESPONSE),
+    extract_submit = mock_backend.post("/v1/extract").mock(
+        return_value=httpx.Response(202, json={
+            "job_id": "extract_J", "status": "pending", "poll_url": "/v1/jobs/extract_J",
+        }),
     )
+    mock_backend.get("/v1/jobs/parse_J").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": {"ocr": "Hello world"}},
+    ))
+    mock_backend.get("/v1/jobs/extract_J").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": {"entities": {"foo": "bar"}}},
+    ))
 
     result = client.process(tiny_pdf)
 
-    # Both calls used the same document_key (this is the whole point of process())
-    parse_body = parse_route.calls[0].request.read()
-    extract_body = extract_route.calls[0].request.read()
+    # Both legs submitted with the SAME document_key
+    parse_body = parse_submit.calls[0].request.read()
+    extract_body = extract_submit.calls[0].request.read()
     assert b"document_key=doc_once" in parse_body
     assert b"document_key=doc_once" in extract_body
+
+    # Both legs sent X-Async: true (so neither blocks under CloudFront)
+    assert parse_submit.calls[0].request.headers["X-Async"] == "true"
+    assert extract_submit.calls[0].request.headers["X-Async"] == "true"
 
     # Upload happened exactly once
     assert upload_route.call_count == 1
@@ -55,13 +69,23 @@ def test_process_uploads_once_then_calls_parse_and_extract(mock_backend, client,
 
     # Output shape: {ocr, data}
     assert result["ocr"] == "Hello world"
-    assert result["data"]["entities"] == {"foo": "bar"}
+    assert result["data"] == {"entities": {"foo": "bar"}}
 
 
 def test_process_parse_failure_surfaces_parse_error(mock_backend, client, tiny_pdf):
     _seed_upload(mock_backend)
-    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(500, text="upstream"))
-    mock_backend.post("/v1/extract").mock(return_value=httpx.Response(200, json=EXTRACT_RESPONSE))
+    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(202, json={
+        "job_id": "p", "status": "pending", "poll_url": "/v1/jobs/p",
+    }))
+    mock_backend.post("/v1/extract").mock(return_value=httpx.Response(202, json={
+        "job_id": "e", "status": "pending", "poll_url": "/v1/jobs/e",
+    }))
+    mock_backend.get("/v1/jobs/p").mock(return_value=httpx.Response(
+        200, json={"status": "failed", "error": "ocr failed", "error_status_code": 500},
+    ))
+    mock_backend.get("/v1/jobs/e").mock(return_value=httpx.Response(
+        200, json={"status": "pending"},
+    ))
 
     with pytest.raises(ParseError):
         client.process(tiny_pdf)
@@ -69,8 +93,18 @@ def test_process_parse_failure_surfaces_parse_error(mock_backend, client, tiny_p
 
 def test_process_extract_failure_surfaces_extract_error(mock_backend, client, tiny_pdf):
     _seed_upload(mock_backend)
-    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(200, json=PARSE_RESPONSE))
-    mock_backend.post("/v1/extract").mock(return_value=httpx.Response(500))
+    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(202, json={
+        "job_id": "p", "status": "pending", "poll_url": "/v1/jobs/p",
+    }))
+    mock_backend.post("/v1/extract").mock(return_value=httpx.Response(202, json={
+        "job_id": "e", "status": "pending", "poll_url": "/v1/jobs/e",
+    }))
+    mock_backend.get("/v1/jobs/p").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": {"ocr": "ok"}},
+    ))
+    mock_backend.get("/v1/jobs/e").mock(return_value=httpx.Response(
+        200, json={"status": "failed", "error": "extract crashed"},
+    ))
 
     with pytest.raises(ExtractError):
         client.process(tiny_pdf)

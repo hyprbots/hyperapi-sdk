@@ -1,80 +1,102 @@
-"""Contract: parse() — request shape, response parsing, error mapping."""
+"""Contract: parse() — submit (X-Async:true) + poll until completed.
+
+Covers:
+  - Default convenience method submits with X-Async: true and polls under the hood
+  - Per-call ocr_engine and use_presigned overrides propagate to the submit POST
+  - submit_parse() returns a Job and does NOT poll
+  - Error mapping on submit (401 → AuthenticationError, 5xx → ParseError)
+"""
 
 import httpx
 import pytest
 
-from hyperapi import AuthenticationError, ParseError
+from hyperapi import AuthenticationError, Job, ParseError
 
 
-PARSE_RESPONSE = {
-    "request_id": "req_parse_1",
-    "result": {"ocr": "Invoice #12345\nTotal: $1,234.00", "pages": 1},
-}
-
-
-def _seed_presigned(mock_backend):
+def _seed_presigned(mock_backend, *, key="doc_parse"):
     mock_backend.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
-            "document_key": "doc_parse",
-            "upload_url": "https://s3.local/parse?sig=x",
+            "document_key": key,
+            "upload_url": f"https://s3.local/{key}?sig=x",
             "expires_in": 600,
         }),
     )
-    mock_backend.put("https://s3.local/parse?sig=x").mock(return_value=httpx.Response(200))
+    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
 
 
-def test_parse_default_uses_presigned_path(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    parse_route = mock_backend.post("/v1/parse").mock(
-        return_value=httpx.Response(200, json=PARSE_RESPONSE),
+def _seed_submit(mock_backend, *, job_id="job_parse_1"):
+    return mock_backend.post("/v1/parse").mock(
+        return_value=httpx.Response(202, json={
+            "job_id": job_id,
+            "status": "pending",
+            "poll_url": f"/v1/jobs/{job_id}",
+        }),
     )
+
+
+def _seed_completed(mock_backend, *, job_id="job_parse_1", ocr="Hello"):
+    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+        return_value=httpx.Response(200, json={
+            "status": "completed",
+            "result": {"ocr": ocr, "pages": 1},
+            "request_id": "req-x",
+            "duration_ms": 1234,
+        }),
+    )
+
+
+def test_parse_submits_with_x_async_then_polls(mock_backend, client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit_route = _seed_submit(mock_backend)
+    poll_route = _seed_completed(mock_backend, ocr="Invoice #12345")
 
     result = client.parse(tiny_pdf)
 
-    assert result == PARSE_RESPONSE
-    assert parse_route.called
-    req = parse_route.calls[0].request
-    assert req.method == "POST"
-    assert req.headers["X-API-Key"] == "hk_test_unit"
-    assert b"document_key=doc_parse" in req.read()
-    assert req.url.params["ocr_engine"] == "paddle"
+    assert result["ocr"] == "Invoice #12345"
+    # Submit happened with X-Async: true
+    submit_req = submit_route.calls[0].request
+    assert submit_req.headers["X-Async"] == "true"
+    assert submit_req.url.params["ocr_engine"] == "paddle"
+    assert b"document_key=doc_parse" in submit_req.read()
+    # Poll happened
+    assert poll_route.called
 
 
-def test_parse_with_doc_intent_engine_propagates_param(mock_backend, client, tiny_pdf):
+def test_parse_with_doc_intent_engine(mock_backend, client, tiny_pdf):
     _seed_presigned(mock_backend)
-    route = mock_backend.post("/v1/parse").mock(
-        return_value=httpx.Response(200, json=PARSE_RESPONSE),
-    )
+    submit_route = _seed_submit(mock_backend)
+    _seed_completed(mock_backend)
 
     client.parse(tiny_pdf, ocr_engine="doc-intent")
 
-    assert route.calls[0].request.url.params["ocr_engine"] == "doc-intent"
-
-
-def test_parse_use_presigned_false_sends_multipart(mock_backend, client, tiny_pdf):
-    route = mock_backend.post("/v1/parse").mock(
-        return_value=httpx.Response(200, json=PARSE_RESPONSE),
-    )
-
-    client.parse(tiny_pdf, use_presigned=False)
-
-    req = route.calls[0].request
-    assert "multipart/form-data" in req.headers["content-type"]
-    body = req.read()
-    assert b"doc.pdf" in body
-    assert b"application/pdf" in body
+    assert submit_route.calls[0].request.url.params["ocr_engine"] == "doc-intent"
 
 
 def test_parse_image_path_alias_still_works(mock_backend, client, tiny_png):
     _seed_presigned(mock_backend)
-    mock_backend.post("/v1/parse").mock(
-        return_value=httpx.Response(200, json=PARSE_RESPONSE),
-    )
+    _seed_submit(mock_backend)
+    _seed_completed(mock_backend, ocr="image text")
+
     result = client.parse(image_path=tiny_png)
-    assert result["result"]["pages"] == 1
+
+    assert result["ocr"] == "image text"
 
 
-def test_parse_401_raises_authentication_error(mock_backend, client, tiny_pdf):
+def test_parse_use_presigned_false_sends_multipart(mock_backend, client, tiny_pdf):
+    submit_route = _seed_submit(mock_backend)
+    _seed_completed(mock_backend)
+
+    client.parse(tiny_pdf, use_presigned=False)
+
+    req = submit_route.calls[0].request
+    assert "multipart/form-data" in req.headers["content-type"]
+    body = req.read()
+    assert b"doc.pdf" in body
+    assert b"application/pdf" in body
+    assert req.headers["X-Async"] == "true"
+
+
+def test_parse_submit_401_raises_authentication_error(mock_backend, client, tiny_pdf):
     _seed_presigned(mock_backend)
     mock_backend.post("/v1/parse").mock(return_value=httpx.Response(401))
 
@@ -83,41 +105,71 @@ def test_parse_401_raises_authentication_error(mock_backend, client, tiny_pdf):
     assert ei.value.status_code == 401
 
 
-@pytest.mark.parametrize("status,attr", [(402, "Insufficient credits"), (429, "Rate limit")])
-def test_parse_402_429_raises_parse_error_with_status(mock_backend, client, tiny_pdf, status, attr):
+def test_parse_submit_500_raises_parse_error(mock_backend, client, tiny_pdf):
     _seed_presigned(mock_backend)
-    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(status))
+    mock_backend.post("/v1/parse").mock(
+        return_value=httpx.Response(500, json={"message": "service down"}),
+    )
 
     with pytest.raises(ParseError) as ei:
         client.parse(tiny_pdf)
-    assert ei.value.status_code == status
+    assert ei.value.status_code == 500
 
 
-def test_parse_5xx_raises_parse_error(mock_backend, client, tiny_pdf):
+def test_parse_failed_job_raises_parse_error(mock_backend, client, tiny_pdf):
     _seed_presigned(mock_backend)
-    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(503, text="upstream down"))
+    _seed_submit(mock_backend)
+    mock_backend.get("/v1/jobs/job_parse_1").mock(
+        return_value=httpx.Response(200, json={
+            "status": "failed",
+            "error": "OCR pipeline failed",
+            "error_status_code": 500,
+            "request_id": "req-x",
+        }),
+    )
 
     with pytest.raises(ParseError) as ei:
         client.parse(tiny_pdf)
-    assert ei.value.status_code == 503
+    assert "OCR pipeline failed" in str(ei.value)
 
 
-def test_parse_request_timeout_raises_parse_error_504(mock_backend, client, tiny_pdf):
+def test_submit_parse_returns_job_no_polling(mock_backend, client, tiny_pdf):
+    """submit_parse should return immediately with a Job; never call /v1/jobs/."""
     _seed_presigned(mock_backend)
-    mock_backend.post("/v1/parse").mock(side_effect=httpx.TimeoutException("timed out"))
+    submit_route = _seed_submit(mock_backend, job_id="my_job_id")
+    poll_route = mock_backend.get("/v1/jobs/my_job_id")
 
-    with pytest.raises(ParseError) as ei:
-        client.parse(tiny_pdf)
-    assert ei.value.status_code == 504
+    job = client.submit_parse(tiny_pdf)
+
+    assert isinstance(job, Job)
+    assert job.job_id == "my_job_id"
+    assert job.op == "parse"
+    assert job.status == "pending"
+    assert submit_route.called
+    assert not poll_route.called  # NO polling happened
+
+
+def test_parse_per_call_poll_overrides_propagate(mock_backend, client, tiny_pdf):
+    """Per-call poll_timeout should override the constructor's value."""
+    _seed_presigned(mock_backend)
+    _seed_submit(mock_backend)
+    mock_backend.get("/v1/jobs/job_parse_1").mock(
+        return_value=httpx.Response(200, json={"status": "pending"}),
+    )
+
+    # Use a tiny per-call timeout to force fast JobTimeoutError
+    from hyperapi import JobTimeoutError
+    with pytest.raises(JobTimeoutError):
+        client.parse(tiny_pdf, poll_timeout=0.05, poll_interval=0.01)
 
 
 def test_parse_each_call_has_unique_request_id(mock_backend, client, tiny_pdf):
     _seed_presigned(mock_backend)
-    route = mock_backend.post("/v1/parse").mock(
-        return_value=httpx.Response(200, json=PARSE_RESPONSE),
-    )
+    submit_route = _seed_submit(mock_backend)
+    _seed_completed(mock_backend)
+
     client.parse(tiny_pdf)
     client.parse(tiny_pdf)
 
-    ids = {c.request.headers["X-Request-ID"] for c in route.calls}
+    ids = {c.request.headers["X-Request-ID"] for c in submit_route.calls}
     assert len(ids) == 2  # two distinct UUIDs

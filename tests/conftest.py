@@ -47,7 +47,29 @@ def _clean_env(monkeypatch):
 
 @pytest.fixture
 def client():
-    c = HyperAPIClient(api_key=TEST_API_KEY, base_url=TEST_BASE_URL)
+    """Default client with poll_interval=0 + small poll_timeout so tests don't actually sleep."""
+    c = HyperAPIClient(
+        api_key=TEST_API_KEY,
+        base_url=TEST_BASE_URL,
+        poll_interval=0.0,
+        poll_timeout=5.0,
+        poll_max_transient_retries=2,
+    )
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def slow_poll_client():
+    """Client with a short positive poll_interval, for tests that need to assert
+    the SDK actually sleeps between polls."""
+    c = HyperAPIClient(
+        api_key=TEST_API_KEY,
+        base_url=TEST_BASE_URL,
+        poll_interval=0.05,
+        poll_timeout=5.0,
+        poll_max_transient_retries=2,
+    )
     yield c
     c.close()
 

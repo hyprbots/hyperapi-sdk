@@ -117,41 +117,156 @@ print(fields["result"])
 ocr_result = client.parse("complex_table.pdf", ocr_engine="doc-intent")
 ```
 
+## How It Works (Submit + Poll)
+
+Every long-running operation (`parse`, `extract`, `classify`, `split`, `process`) submits asynchronously and polls a job-status endpoint under the hood. From the caller's perspective the SDK looks synchronous — `result = client.extract(file)` blocks until the result is ready — but **each individual HTTP request stays sub-second**, so the SDK is timeout-immune at any CDN edge.
+
+```
+client.extract(file)
+   │
+   ├─ POST /v1/documents/upload  (presigned S3 URL)
+   ├─ PUT  <S3 URL>              (upload bytes directly)
+   ├─ POST /v1/extract  X-Async: true  →  { job_id, poll_url }
+   ├─ GET  /v1/jobs/{id}  (every 3 s, retries on 5xx)
+   ├─ GET  /v1/jobs/{id}  …
+   └─ GET  /v1/jobs/{id}  →  { status: "completed", result: {...} }
+```
+
+This is the pattern used by [LlamaParse](https://docs.llamaindex.ai/en/stable/llama_cloud/llama_parse/) and [Reducto](https://docs.reducto.ai/) for the same reason.
+
+### Advanced: explicit submit + poll
+
+If you want fire-and-forget semantics (e.g., to integrate with your own job queue or render a custom progress UI), use `submit_<op>(...)` to get a `Job` handle, then `wait_for_job(...)` or `get_job(...)` yourself:
+
+```python
+from hyperapi import HyperAPIClient
+
+client = HyperAPIClient(api_key="hk_live_your_key")
+
+# Submit and walk away
+job = client.submit_extract("contract.pdf")
+print(job.job_id)
+
+# … later, in a different process ...
+status = client.get_job(job.job_id)            # one-shot poll, no waiting
+if status["status"] == "completed":
+    print(status["result"])
+
+# or block until done with full control over cadence
+result = client.wait_for_job(job, timeout=600, interval=5)
+```
+
+`submit_parse`, `submit_extract`, `submit_classify`, and `submit_split` are all available.
+
+### Polling configuration
+
+Polling cadence is configurable on the constructor (defaults match the platform playground):
+
+```python
+client = HyperAPIClient(
+    api_key="hk_live_…",
+    poll_interval=3.0,            # seconds between polls (default 3)
+    poll_timeout=1800.0,          # max wait per job in seconds (default 1800)
+    poll_max_transient_retries=3, # per-poll retries on transient 5xx (default 3)
+)
+```
+
+Or per-call:
+
+```python
+result = client.extract("scan.pdf", poll_timeout=600, poll_interval=5)
+```
+
 ## API Reference
 
 ### `HyperAPIClient`
 
 ```python
 client = HyperAPIClient(
-    api_key: str = None,      # API key (or set HYPERAPI_KEY env var)
-    base_url: str = None,     # API endpoint (default: https://apis.hyperbots.com)
-    timeout: float = 120.0    # Request timeout in seconds
+    api_key: str = None,                # API key (or set HYPERAPI_KEY env var)
+    base_url: str = None,               # API endpoint (default: https://apis.hyperbots.com)
+    timeout: float = 120.0,             # per-HTTP-call timeout (NOT total job time)
+    poll_interval: float = 3.0,         # seconds between job-status polls
+    poll_timeout: float = 1800.0,       # max wall-clock seconds to wait for a job
+    poll_max_transient_retries: int = 3,# transient-5xx retries on a single poll
 )
 ```
 
 ### Methods
 
-| Method | Input | Pipeline | Description |
-|--------|-------|----------|-------------|
-| `upload_document(file)` | File path | presigned S3 | Upload file, returns `document_key` (valid 24 h) |
-| `parse(file)` | File path | OCR only | Parse document into structured text |
-| `extract(file)` | File path | OCR → extract-service | Extract structured fields with validation |
-| `classify(file)` | File path | OCR → classifier | Classify document type |
-| `split(file)` | File path | OCR → classifier-splitter | Split multi-document binders |
-| `process(file)` | File path | OCR → extract | Combined parse + extract in one call (single upload) |
+| Method | Pipeline | Description |
+|--------|----------|-------------|
+| `upload_document(file)` | presigned S3 | Upload file, returns `document_key` (valid 24 h). Direct sync. |
+| `parse(file)` | OCR only | Parse document into structured text. Submit + poll under the hood. |
+| `extract(file)` | OCR → extract-service | Extract structured fields with validation. Submit + poll. |
+| `classify(file)` | OCR → classifier | Classify document type. Submit + poll. |
+| `split(file)` | OCR → classifier-splitter | Split multi-document binders. Submit + poll. |
+| `process(file)` | OCR → parse + extract | Combined parse + extract sharing one upload. Submit + poll on both legs. |
+| `submit_parse / submit_extract / submit_classify / submit_split` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
+| `get_job(job_id)` | — | One-shot status poll. No waiting, no retry. |
+| `wait_for_job(job, *, timeout=None, interval=None)` | — | Block until the job completes, fails, or `timeout` elapses. |
+| `wait_for_jobs([job1, job2], …)` | — | Round-robin poll across multiple jobs concurrently. |
+
 ### Common Parameters
 
 | Parameter | Type | Default | Available On |
 |-----------|------|---------|-------------|
-| `ocr_engine` | `"paddle"` \| `"doc-intent"` | `"paddle"` | All methods |
-| `mode` | `str` | `"default"` | extract, classify, split |
-| `use_presigned` | `bool` | `True` | All methods (S3 presigned upload) |
+| `ocr_engine` | `"paddle"` \| `"doc-intent"` | `"paddle"` | parse / extract / classify / split / process |
+| `mode` | `str` | `"default"` | extract / classify / split |
+| `use_presigned` | `bool` | `True` | parse / extract / classify / split |
+| `poll_timeout` | `float` | constructor's | parse / extract / classify / split / process |
+| `poll_interval` | `float` | constructor's | parse / extract / classify / split / process |
+
+### Exceptions
+
+| Class | Raised on |
+|---|---|
+| `HyperAPIError` | Base — anything not specifically classified |
+| `AuthenticationError` | 401 from server, missing API key |
+| `RateLimitError` | 429 from server (carries `retry_after`, `tier`, `limit`) |
+| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` | The corresponding op fails |
+| `DocumentUploadError` | Presigned-URL flow or S3 PUT fails |
+| `JobTimeoutError` | `wait_for_job` exceeded its timeout (job still running on server) |
+
+Every exception carries `status_code` (HTTP status if applicable) and `request_id` (the `X-Request-ID` we sent — paste it into a support ticket).
 
 ### Supported Formats
 
 - PNG, JPG, JPEG
 - TIFF, WEBP, GIF
 - PDF
+
+## Operational Notes
+
+### Threading
+`HyperAPIClient` is **not thread-safe** (httpx.Client isn't either). Construct one client per worker thread, or use `threading.local()`.
+
+### Corporate proxy / custom CA
+Standard httpx env vars are honored — `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`. To pin a custom CA bundle:
+
+```bash
+export SSL_CERT_FILE=/path/to/corporate-ca.pem
+```
+
+### SOCKS proxy
+If your environment routes through a SOCKS proxy, install the socks extra:
+
+```bash
+pip install hyperapi-sdk[socks]
+```
+
+### Logging
+Customers opt into SDK logs at any level:
+
+```python
+import logging
+logging.getLogger("hyperapi").setLevel(logging.INFO)
+```
+
+The SDK never logs API keys, file contents, or presigned-URL signatures.
+
+### Idempotency
+The SDK does **not** auto-retry submit POSTs. Resubmitting after a transient failure would create a duplicate job and bill twice. Customers wrap their own retry logic if needed; the polling loop already retries transient failures during `GET /v1/jobs/{id}`.
 
 ## Tutorials
 

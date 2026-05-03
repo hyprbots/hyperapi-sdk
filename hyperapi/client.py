@@ -1,16 +1,28 @@
-"""
-HyperAPI Client
+"""HyperAPI Client.
 
-Request flow
+Architecture
 ============
-Every endpoint follows the same two-stage pipeline inside the inference router:
+Every long-running pipeline op (`parse`, `extract`, `classify`, `split`,
+`process`) goes through **submit + poll** under the hood:
+
+    1. POST /v1/<op>           with X-Async: true  →  202 {job_id, poll_url}
+    2. GET  /v1/jobs/{job_id}  (every poll_interval) →  {status, result?, error?}
+
+This keeps every individual HTTP request short (sub-second), so the SDK is
+**timeout-immune** at any edge — works behind CloudFront's 30 s
+`origin_response_timeout`, Cloudflare's 100 s, a raw ALB, or no edge at all.
+The convenience methods (``parse(...)``, ``extract(...)``, ...) hide the
+``job_id`` from callers; advanced users who want fire-and-forget or custom
+progress UIs can call ``submit_<op>(...)`` and ``wait_for_job(...)`` directly.
+
+Pipeline (server-side, unchanged):
 
     Stage 1 — OCR (always runs)
         Upload → doc-processor /convert → page images
         → OCR engine (paddle-ocr or doc-intent) → full_text + page_texts
 
     Stage 2 — Task-specific LLM (skipped for parse)
-        parse:      returns OCR text directly (no Stage 2)
+        parse:      OCR text only (no Stage 2)
         extract:    OCR output → extract-service /v2/extract
         classify:   OCR output → classifier-splitter /v2/classify
         split:      OCR output → classifier-splitter /v2/split
@@ -21,10 +33,17 @@ paddle      PaddleOCR (default) — fast, high-throughput production OCR
 doc-intent  Doc-Intent VLM — vision-language model, better on complex layouts
 """
 
+from __future__ import annotations
+
+import json
+import logging
 import os
+import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Any, Literal
+from collections.abc import Iterable
 
 import httpx
 
@@ -33,8 +52,12 @@ from .exceptions import (
     ClassifyError,
     DocumentUploadError,
     ExtractError,
+    HyperAPIError,
+    JobTimeoutError,
     ParseError,
+    RateLimitError,
     SplitError,
+    _strip_api_key,
 )
 
 
@@ -51,52 +74,155 @@ CONTENT_TYPES = {
 
 OCREngine = Literal["paddle", "doc-intent"]
 
+# Per-HTTP-call defaults — single submit / single poll, NOT total job time.
 _DEFAULT_TIMEOUT = 120.0
-_EXTRACT_TIMEOUT = 600.0
 
+# Polling defaults — match the playground (hyperapi/src/app/(dashboard)/dashboard/playground/page.tsx)
+# so operational characteristics are identical to what the team has already validated in production.
+_DEFAULT_POLL_INTERVAL_S = 3.0           # POLL_INTERVAL_MS = 3000 in the playground
+_DEFAULT_POLL_TIMEOUT_S = 1800.0         # HARD_TIMEOUT_MS = 1_800_000
+_DEFAULT_POLL_MAX_TRANSIENT_RETRIES = 3
+_DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S = 0.5
+
+
+logger = logging.getLogger("hyperapi")
+
+
+# Ops the SDK can submit asynchronously. Used as the per-op error class registry.
+_OP_TO_ERROR: dict[str, type] = {
+    "parse": ParseError,
+    "extract": ExtractError,
+    "classify": ClassifyError,
+    "split": SplitError,
+}
+
+
+@dataclass
+class Job:
+    """Handle returned by ``client.submit_<op>(...)``.
+
+    Pass to :py:meth:`HyperAPIClient.wait_for_job` to block until the job is
+    done, or to :py:meth:`HyperAPIClient.get_job` for a single-shot status
+    check. The ``op`` field is what tells :py:meth:`wait_for_job` which typed
+    exception to raise on ``status: "failed"``.
+    """
+
+    job_id: str
+    status: str
+    poll_url: str
+    op: str  # "parse" | "extract" | "classify" | "split"
+    submitted_at: float = field(default_factory=time.monotonic)
+
+
+# ── Helpers (module-private) ────────────────────────────────────────────────
+
+def _parse_retry_after(value: str | None, *, default: int = 60) -> int:
+    """Parse a `Retry-After` header. Server emits seconds-since-now."""
+    if not value:
+        return default
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_text(response: httpx.Response) -> str:
+    """Return the response body as a string with API keys scrubbed."""
+    try:
+        return _strip_api_key(response.text) or ""
+    except Exception:  # noqa: BLE001 — defensive; never let serialization crash error path
+        return ""
+
+
+def _server_message(response: httpx.Response, fallback: str) -> str:
+    """Pull a human-readable message out of a server response.
+
+    Prefers the JSON ``message`` field when present, falls back to the body
+    text, and finally to the supplied fallback. Always API-key-scrubbed.
+    """
+    body = _safe_text(response)
+    try:
+        parsed = json.loads(body)
+        if isinstance(parsed, dict):
+            for key in ("message", "detail", "error"):
+                if key in parsed and parsed[key]:
+                    return str(parsed[key])
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return body or fallback
+
+
+def _request_id_of(response: httpx.Response, sent: str | None = None) -> str | None:
+    """Best-effort extraction of the request id we should attach to errors."""
+    return response.headers.get("x-request-id") or response.headers.get("x-correlation-id") or sent
+
+
+# ── Client ─────────────────────────────────────────────────────────────────
 
 class HyperAPIClient:
-    """
-    Client for interacting with HyperAPI.
+    """Client for the HyperAPI document intelligence platform.
 
-    Usage::
+    Quickstart::
 
         from hyperapi import HyperAPIClient
 
-        client = HyperAPIClient(api_key="hk_live_...")
-
-        # Parse a document (OCR via paddle-ocr by default)
-        result = client.parse("invoice.pdf")
-        print(result["result"]["ocr"])
-
-        # Use doc-intent engine for complex layouts
-        result = client.parse("invoice.pdf", ocr_engine="doc-intent")
-
-        # Extract structured fields (runs OCR → extract-service)
-        fields = client.extract("invoice.pdf")
-        print(fields["result"])
-
-        # Close when done
+        client = HyperAPIClient(api_key="hk_live_…")
+        result = client.extract("invoice.pdf")
+        print(result["result"])
         client.close()
+
+    Or as a context manager::
+
+        with HyperAPIClient(api_key="hk_live_…") as client:
+            print(client.parse("invoice.pdf")["result"]["ocr"])
+
+    Threading
+    ---------
+    ``HyperAPIClient`` is **not** thread-safe (httpx.Client isn't either).
+    Construct one client per thread, or use ``threading.local()``.
+
+    Polling
+    -------
+    Long-running ops (parse/extract/classify/split/process) submit to the
+    server with ``X-Async: true`` and poll ``/v1/jobs/{job_id}`` until done.
+    Each individual HTTP request is sub-second so the SDK is edge-timeout
+    immune. Override the polling cadence per-call:
+
+        client.extract("scan.pdf", poll_timeout=600, poll_interval=5)
+
+    Or globally on the constructor (defaults match the platform playground).
     """
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
+        *,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL_S,
+        poll_timeout: float = _DEFAULT_POLL_TIMEOUT_S,
+        poll_max_transient_retries: int = _DEFAULT_POLL_MAX_TRANSIENT_RETRIES,
     ):
-        """
-        Initialize HyperAPI client.
+        """Initialize a HyperAPI client.
 
         Args:
-            api_key: API key for authentication. If not provided, reads from
-                     HYPERAPI_KEY environment variable.
-            base_url: Base URL for the API. If not provided, reads from
-                      HYPERAPI_URL environment variable, then falls back to
-                      the production URL.
-            timeout: Default request timeout in seconds (default: 120s).
-                     Extract uses 600s by default due to LLM processing time.
+            api_key: API key for authentication. Falls back to ``HYPERAPI_KEY``
+                environment variable. Required.
+            base_url: API base URL. Falls back to ``HYPERAPI_URL`` env var,
+                then ``https://apis.hyperbots.com``.
+            timeout: Per-HTTP-call timeout in seconds (NOT the total time
+                allowed for an entire job — see ``poll_timeout`` for that).
+                Default 120 s, which generously covers a single submit or
+                a single status poll on production traffic.
+            poll_interval: Seconds between successive polls of
+                ``/v1/jobs/{id}``. Default 3.0 (matches the platform
+                playground).
+            poll_timeout: Total wall-clock seconds the SDK will wait for a
+                single job to complete. Raises ``JobTimeoutError`` past this.
+                Default 1800.0 (30 min, matches playground).
+            poll_max_transient_retries: How many times to retry a single
+                ``/v1/jobs/{id}`` GET if it returns 5xx or has a connection
+                error. Default 3. Fast-fails on 401/404.
         """
         self.api_key = api_key or os.environ.get("HYPERAPI_KEY")
         if not self.api_key:
@@ -110,41 +236,76 @@ class HyperAPIClient:
             or "https://apis.hyperbots.com"
         ).rstrip("/")
         self.timeout = timeout
-        self._client = httpx.Client(timeout=timeout)
+        self._poll_interval = poll_interval
+        self._poll_timeout = poll_timeout
+        self._poll_max_transient_retries = poll_max_transient_retries
 
-    def _get_headers(self) -> dict:
-        """Get request headers with API key and a unique request ID for tracing."""
-        return {
+        from . import __version__  # local import to avoid circular at module load
+        self._user_agent = f"hyperapi-sdk-python/{__version__}"
+        self._client = httpx.Client(
+            timeout=timeout,
+            headers={"User-Agent": self._user_agent},
+        )
+
+    # ── Repr ─────────────────────────────────────────────────────────────
+
+    def __repr__(self) -> str:
+        tail = self.api_key[-4:] if self.api_key else ""
+        return f"HyperAPIClient(api_key='hk_***{tail}', base_url='{self.base_url}')"
+
+    # ── Headers ──────────────────────────────────────────────────────────
+
+    def _get_headers(self, *, async_mode: bool = False) -> dict[str, str]:
+        """Per-request headers. Generates a fresh X-Request-ID per call so
+        every request can be correlated end-to-end across the platform."""
+        headers = {
             "X-API-Key": self.api_key,
             "X-Request-ID": str(uuid.uuid4()),
         }
+        if async_mode:
+            headers["X-Async"] = "true"
+        return headers
+
+    # ── Path helpers ─────────────────────────────────────────────────────
+
+    def _resolve_path(
+        self,
+        file_path: str | Path | None,
+        image_path: str | Path | None = None,
+    ) -> Path:
+        """Resolve and validate file path."""
+        raw = file_path or image_path
+        if raw is None:
+            raise ValueError("file_path is required")
+        path = Path(raw)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        return path
 
     # ── Upload ───────────────────────────────────────────────────────────
 
     def upload_document(
         self,
-        file_path: Union[str, Path],
-        content_type: Optional[str] = None,
+        file_path: str | Path,
+        content_type: str | None = None,
     ) -> str:
-        """
-        Upload a document to S3 via the presigned URL flow and return its document_key.
+        """Upload a document via the presigned-URL flow and return its document_key.
 
-        This executes steps 1 and 2 of the 3-step upload flow:
-          1. POST /v1/documents/upload  → {document_key, upload_url, expires_in}
-          2. PUT {upload_url}           → file bytes direct to S3 (bypasses Kong)
-
-        The returned document_key is then passed to parse/extract/classify/split (step 3).
+        Performs the two HTTP hops (presigned-URL fetch + S3 PUT) so the
+        returned ``document_key`` can be reused across subsequent calls
+        without re-uploading the file.
 
         Args:
             file_path: Path to the file to upload.
-            content_type: MIME type. Auto-detected from file extension if not provided.
+            content_type: MIME type. Auto-detected from the extension if omitted.
 
         Returns:
-            document_key string to use in subsequent API calls.
+            The ``document_key`` to pass to inference endpoints.
 
         Raises:
             FileNotFoundError: If the file does not exist.
-            DocumentUploadError: If the presigned URL request or S3 PUT fails.
+            AuthenticationError: 401 from the server.
+            DocumentUploadError: Any other failure on the presigned fetch or S3 PUT.
         """
         path = Path(file_path)
         if not path.exists():
@@ -153,29 +314,39 @@ class HyperAPIClient:
         if content_type is None:
             content_type = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
 
-        # Step 1 — get presigned upload URL
+        headers = self._get_headers()
+        request_id = headers["X-Request-ID"]
+
+        # Step 1 — get presigned upload URL (goes through Kong + auth)
         try:
             resp = self._client.post(
                 f"{self.base_url}/v1/documents/upload",
                 json={"filename": path.name, "content_type": content_type},
-                headers=self._get_headers(),
+                headers=headers,
             )
         except httpx.RequestError as e:
-            raise DocumentUploadError(f"Failed to get upload URL: {str(e)}")
+            raise DocumentUploadError(
+                f"Failed to get upload URL: {e}", request_id=request_id
+            ) from e
 
-        if resp.status_code == 401:
-            raise AuthenticationError("Invalid API key", status_code=401)
+        self._raise_for_known_status(
+            resp,
+            request_id=request_id,
+            error_cls=DocumentUploadError,
+            op_name="upload",
+        )
         if resp.status_code != 200:
             raise DocumentUploadError(
-                f"Upload URL request failed: {resp.text}",
+                _server_message(resp, "Upload URL request failed"),
                 status_code=resp.status_code,
+                request_id=_request_id_of(resp, request_id),
             )
 
         upload_data = resp.json()
         document_key = upload_data["document_key"]
         upload_url = upload_data["upload_url"]
 
-        # Step 2 — PUT file bytes directly to S3
+        # Step 2 — PUT bytes directly to S3 (bypasses Kong; S3 validates the presigned URL)
         try:
             with open(path, "rb") as f:
                 s3_resp = self._client.put(
@@ -187,337 +358,631 @@ class HyperAPIClient:
                     },
                 )
         except httpx.RequestError as e:
-            raise DocumentUploadError(f"S3 upload failed: {str(e)}")
+            raise DocumentUploadError(f"S3 upload failed: {e}", request_id=request_id) from e
 
         if s3_resp.status_code not in (200, 204):
             raise DocumentUploadError(
                 f"S3 PUT failed (status {s3_resp.status_code}). "
                 "Ensure x-amz-server-side-encryption: AES256 is present.",
                 status_code=s3_resp.status_code,
+                request_id=request_id,
             )
 
+        logger.info(
+            "document_uploaded",
+            extra={"request_id": request_id, "document_key": document_key},
+        )
         return document_key
 
-    # ── Core helpers ─────────────────────────────────────────────────────
+    # ── HTTP error classification ────────────────────────────────────────
 
-    def _call_endpoint(
+    def _raise_for_known_status(
+        self,
+        resp: httpx.Response,
+        *,
+        request_id: str | None,
+        error_cls: type,
+        op_name: str,
+    ) -> None:
+        """Raise the appropriate typed exception for well-known HTTP statuses.
+
+        Returns silently for 200/202 (success) and any other status that the
+        caller wants to handle explicitly.
+        """
+        sc = resp.status_code
+        rid = _request_id_of(resp, request_id)
+
+        if sc == 401:
+            raise AuthenticationError(
+                "Invalid API key. Get a key from https://apis.hyperbots.com/dashboard.",
+                status_code=401,
+                request_id=rid,
+            )
+        if sc == 402:
+            raise error_cls(
+                "Insufficient credits. Add credits at https://apis.hyperbots.com/dashboard/billing.",
+                status_code=402,
+                request_id=rid,
+            )
+        if sc == 429:
+            retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+            tier = None
+            limit = None
+            try:
+                body = resp.json()
+                if isinstance(body, dict):
+                    tier = body.get("tier")
+                    limit = body.get("limit")
+            except (json.JSONDecodeError, ValueError):
+                pass
+            raise RateLimitError(
+                _server_message(resp, "Rate limit exceeded"),
+                retry_after=retry_after,
+                tier=tier,
+                limit=limit,
+                status_code=429,
+                request_id=rid,
+            )
+        if sc == 413:
+            raise DocumentUploadError(
+                _server_message(resp, "File exceeds upload size limit"),
+                status_code=413,
+                request_id=rid,
+            )
+        if sc == 415:
+            raise DocumentUploadError(
+                _server_message(resp, "Unsupported file type"),
+                status_code=415,
+                request_id=rid,
+            )
+        if sc == 408:
+            raise error_cls(
+                _server_message(resp, "Service deadline exceeded"),
+                status_code=408,
+                request_id=rid,
+            )
+        if sc == 403:
+            raise HyperAPIError(
+                _server_message(resp, "Forbidden"),
+                status_code=403,
+                request_id=rid,
+            )
+
+    # ── Async submission (X-Async: true) ─────────────────────────────────
+
+    def _submit_via_path(
         self,
         endpoint: str,
+        op_name: str,
         file_path: Path,
         *,
-        error_cls: type,
-        ocr_engine: OCREngine = "paddle",
-        mode: Optional[str] = None,
-        use_presigned: bool = True,
-        timeout: Optional[float] = None,
-    ) -> dict:
-        """
-        Internal helper that handles the upload + API call pattern shared by
-        all four endpoints. Returns the parsed JSON response.
-        """
+        params: dict[str, Any],
+        use_presigned: bool,
+        timeout: float | None = None,
+    ) -> Job:
+        """Submit a pipeline op asynchronously. Returns a Job handle."""
         request_timeout = timeout or self.timeout
-        params: dict = {"ocr_engine": ocr_engine}
-        if mode is not None:
-            params["mode"] = mode
+        error_cls = _OP_TO_ERROR[op_name]
+        content_type = CONTENT_TYPES.get(
+            file_path.suffix.lower(), "application/octet-stream"
+        )
+        headers = self._get_headers(async_mode=True)
+        request_id = headers["X-Request-ID"]
 
         try:
             if use_presigned:
-                content_type = CONTENT_TYPES.get(file_path.suffix.lower(), "application/octet-stream")
                 document_key = self.upload_document(file_path, content_type=content_type)
                 response = self._client.post(
                     f"{self.base_url}{endpoint}",
                     data={"document_key": document_key},
                     params=params,
-                    headers=self._get_headers(),
+                    headers=headers,
                     timeout=request_timeout,
                 )
             else:
-                content_type = CONTENT_TYPES.get(file_path.suffix.lower(), "application/octet-stream")
                 with open(file_path, "rb") as f:
                     files = {"file": (file_path.name, f, content_type)}
                     response = self._client.post(
                         f"{self.base_url}{endpoint}",
                         files=files,
                         params=params,
-                        headers=self._get_headers(),
+                        headers=headers,
                         timeout=request_timeout,
                     )
+        except httpx.TimeoutException as e:
+            raise error_cls(
+                "Request timed out",
+                status_code=504,
+                request_id=request_id,
+            ) from e
+        except httpx.RequestError as e:
+            raise error_cls(f"Request failed: {e}", request_id=request_id) from e
 
-            if response.status_code == 401:
-                raise AuthenticationError("Invalid API key", status_code=401)
-            if response.status_code == 402:
-                raise error_cls("Insufficient credits", status_code=402)
-            if response.status_code == 429:
-                raise error_cls("Rate limit exceeded", status_code=429)
-            if response.status_code != 200:
-                raise error_cls(
-                    f"{endpoint} failed: {response.text}",
-                    status_code=response.status_code,
+        self._raise_for_known_status(
+            response, request_id=request_id, error_cls=error_cls, op_name=op_name
+        )
+        if response.status_code not in (200, 202):
+            raise error_cls(
+                _server_message(response, f"{op_name} submission failed"),
+                status_code=response.status_code,
+                request_id=_request_id_of(response, request_id),
+            )
+
+        envelope = response.json()
+        return self._job_from_envelope(envelope, op=op_name)
+
+    def _submit_via_doc_key(
+        self,
+        endpoint: str,
+        op_name: str,
+        document_key: str,
+        *,
+        params: dict[str, Any],
+        timeout: float | None = None,
+    ) -> Job:
+        """Submit a pipeline op asynchronously when the document_key is already
+        in hand (used by ``process()`` to share one upload between parse + extract)."""
+        request_timeout = timeout or self.timeout
+        error_cls = _OP_TO_ERROR[op_name]
+        headers = self._get_headers(async_mode=True)
+        request_id = headers["X-Request-ID"]
+
+        try:
+            response = self._client.post(
+                f"{self.base_url}{endpoint}",
+                data={"document_key": document_key},
+                params=params,
+                headers=headers,
+                timeout=request_timeout,
+            )
+        except httpx.TimeoutException as e:
+            raise error_cls(
+                "Request timed out", status_code=504, request_id=request_id
+            ) from e
+        except httpx.RequestError as e:
+            raise error_cls(f"Request failed: {e}", request_id=request_id) from e
+
+        self._raise_for_known_status(
+            response, request_id=request_id, error_cls=error_cls, op_name=op_name
+        )
+        if response.status_code not in (200, 202):
+            raise error_cls(
+                _server_message(response, f"{op_name} submission failed"),
+                status_code=response.status_code,
+                request_id=_request_id_of(response, request_id),
+            )
+
+        return self._job_from_envelope(response.json(), op=op_name)
+
+    @staticmethod
+    def _job_from_envelope(envelope: dict, *, op: str) -> Job:
+        return Job(
+            job_id=envelope["job_id"],
+            status=envelope.get("status", "pending"),
+            poll_url=envelope.get("poll_url", f"/v1/jobs/{envelope['job_id']}"),
+            op=op,
+        )
+
+    # ── Polling ──────────────────────────────────────────────────────────
+
+    def get_job(self, job_id: str) -> dict:
+        """Single-shot poll. No retry, no waiting. Raises on 4xx; returns the
+        raw envelope on 200 (``{status, result?, error?, ...}``)."""
+        headers = self._get_headers()
+        request_id = headers["X-Request-ID"]
+
+        try:
+            resp = self._client.get(
+                f"{self.base_url}/v1/jobs/{job_id}", headers=headers
+            )
+        except httpx.RequestError as e:
+            raise HyperAPIError(
+                f"Job poll failed: {e}", request_id=request_id
+            ) from e
+
+        if resp.status_code == 401:
+            raise AuthenticationError(
+                "Invalid API key.", status_code=401, request_id=request_id
+            )
+        if resp.status_code == 404:
+            raise HyperAPIError(
+                "Job not found or expired.",
+                status_code=404,
+                request_id=request_id,
+            )
+        if resp.status_code >= 400:
+            raise HyperAPIError(
+                _server_message(resp, f"Poll failed (HTTP {resp.status_code})"),
+                status_code=resp.status_code,
+                request_id=_request_id_of(resp, request_id),
+            )
+        return resp.json()
+
+    def _poll_with_retry(self, job_id: str) -> dict:
+        """Poll one time, retrying on transient failures (5xx, connection errors).
+
+        Fast-fails on 401 (bad key) and 404 (job missing / org mismatch). Bounds
+        the retry budget so a single poll attempt can't dominate poll_timeout.
+        """
+        last_err: Exception | None = None
+        for attempt in range(self._poll_max_transient_retries + 1):
+            try:
+                envelope = self.get_job(job_id)
+                return envelope
+            except (AuthenticationError, RateLimitError):
+                # Don't retry — caller's key/credit problem.
+                raise
+            except HyperAPIError as e:
+                if e.status_code == 404:
+                    # Job genuinely doesn't exist — no point retrying.
+                    raise
+                last_err = e
+                if attempt < self._poll_max_transient_retries:
+                    logger.info(
+                        "poll_transient_retry",
+                        extra={
+                            "job_id": job_id,
+                            "attempt": attempt + 1,
+                            "error": str(e)[:200],
+                        },
+                    )
+                    time.sleep(_DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S)
+                    continue
+                raise
+        # Unreachable in practice; mypy comfort.
+        if last_err:
+            raise last_err
+        raise HyperAPIError("Poll exhausted retries with no response")
+
+    def wait_for_job(
+        self,
+        job: Job | str,
+        *,
+        timeout: float | None = None,
+        interval: float | None = None,
+    ) -> dict:
+        """Poll a job until it completes, fails, or the timeout elapses.
+
+        Args:
+            job: A :py:class:`Job` returned by ``submit_<op>`` (preferred — the
+                ``op`` field lets us raise the right typed exception on
+                failure), or a raw ``job_id`` string (falls back to generic
+                ``HyperAPIError`` on failure).
+            timeout: Total wall-clock seconds. Defaults to the constructor's
+                ``poll_timeout``.
+            interval: Seconds between polls. Defaults to the constructor's
+                ``poll_interval``.
+
+        Returns:
+            The final ``result`` envelope from the server when ``status=completed``.
+
+        Raises:
+            JobTimeoutError: If ``timeout`` elapses with the job still pending.
+            HyperAPIError (or subclass): If the job ends with ``status=failed``,
+                or the poll itself fails after exhausting transient retries.
+        """
+        if isinstance(job, Job):
+            job_id = job.job_id
+            op = job.op
+        else:
+            job_id = job
+            op = "unknown"
+
+        deadline = time.monotonic() + (timeout if timeout is not None else self._poll_timeout)
+        wait_s = interval if interval is not None else self._poll_interval
+
+        while True:
+            envelope = self._poll_with_retry(job_id)
+            status = envelope.get("status")
+            if status == "completed":
+                logger.info(
+                    "job_completed",
+                    extra={
+                        "job_id": job_id,
+                        "op": op,
+                        "duration_ms": envelope.get("duration_ms"),
+                    },
+                )
+                return envelope.get("result", envelope)
+            if status == "failed":
+                raise self._exception_for_failed_job(op, envelope, job_id)
+
+            if time.monotonic() >= deadline:
+                elapsed = time.monotonic() - (deadline - (timeout or self._poll_timeout))
+                raise JobTimeoutError(
+                    (
+                        f"Job {job_id} did not complete within "
+                        f"{timeout or self._poll_timeout}s. Pass a larger poll_timeout "
+                        "or use submit_<op>+wait_for_job to manage polling yourself."
+                    ),
+                    job_id=job_id,
+                    elapsed_s=elapsed,
                 )
 
-            return response.json()
+            # Sleep, but never past the deadline.
+            remaining = deadline - time.monotonic()
+            time.sleep(min(wait_s, max(0.0, remaining)))
 
-        except (AuthenticationError, DocumentUploadError):
-            raise
-        except error_cls:
-            raise
-        except httpx.TimeoutException:
-            raise error_cls("Request timed out", status_code=504)
-        except httpx.RequestError as e:
-            raise error_cls(f"Request failed: {str(e)}")
-
-    def _resolve_path(
+    def wait_for_jobs(
         self,
-        file_path: Union[str, Path, None],
-        image_path: Union[str, Path, None] = None,
-    ) -> Path:
-        """Resolve and validate file path."""
-        raw = file_path or image_path
-        if raw is None:
-            raise ValueError("file_path is required")
-        path = Path(raw)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-        return path
+        jobs: Iterable[Job],
+        *,
+        timeout: float | None = None,
+        interval: float | None = None,
+    ) -> list[dict]:
+        """Poll multiple jobs concurrently (round-robin).
 
-    # ── Public API ───────────────────────────────────────────────────────
+        Returns the results in the same order as ``jobs``. Single shared
+        deadline. Raises on the first failed job (other in-flight jobs continue
+        running on the server but are abandoned by the SDK). Useful for
+        ``process()`` to collapse parse + extract polling overhead.
+        """
+        jobs_list = list(jobs)
+        if not jobs_list:
+            return []
+
+        deadline = time.monotonic() + (timeout if timeout is not None else self._poll_timeout)
+        wait_s = interval if interval is not None else self._poll_interval
+        results: list[dict | None] = [None] * len(jobs_list)
+        pending: list[int] = list(range(len(jobs_list)))
+
+        while pending:
+            still_pending: list[int] = []
+            for idx in pending:
+                envelope = self._poll_with_retry(jobs_list[idx].job_id)
+                status = envelope.get("status")
+                if status == "completed":
+                    results[idx] = envelope.get("result", envelope)
+                elif status == "failed":
+                    raise self._exception_for_failed_job(
+                        jobs_list[idx].op, envelope, jobs_list[idx].job_id
+                    )
+                else:
+                    still_pending.append(idx)
+            pending = still_pending
+
+            if not pending:
+                break
+            if time.monotonic() >= deadline:
+                pending_ids = ",".join(jobs_list[i].job_id for i in pending)
+                raise JobTimeoutError(
+                    (
+                        f"Jobs [{pending_ids}] did not complete within "
+                        f"{timeout or self._poll_timeout}s."
+                    ),
+                    job_id=pending_ids,
+                    elapsed_s=time.monotonic() - (deadline - (timeout or self._poll_timeout)),
+                )
+            remaining = deadline - time.monotonic()
+            time.sleep(min(wait_s, max(0.0, remaining)))
+
+        # All jobs completed; results filled in order.
+        return [r for r in results if r is not None]
+
+    def _exception_for_failed_job(
+        self, op: str, envelope: dict, job_id: str
+    ) -> HyperAPIError:
+        """Build the right typed exception for a ``status: failed`` envelope."""
+        message = envelope.get("error") or "Job failed"
+        message = _strip_api_key(message) or message
+        status_code = envelope.get("error_status_code")
+        request_id = envelope.get("request_id")
+        cls = _OP_TO_ERROR.get(op, HyperAPIError)
+        if cls is HyperAPIError:
+            return HyperAPIError(message, status_code=status_code, request_id=request_id)
+        return cls(message, status_code=status_code, request_id=request_id)
+
+    # ── Public submit_<op> methods ───────────────────────────────────────
+
+    def submit_parse(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        image_path: str | Path | None = None,
+        ocr_engine: OCREngine = "paddle",
+        use_presigned: bool = True,
+    ) -> Job:
+        """Submit a parse job asynchronously and return immediately."""
+        path = self._resolve_path(file_path, image_path)
+        return self._submit_via_path(
+            "/v1/parse", "parse", path,
+            params={"ocr_engine": ocr_engine},
+            use_presigned=use_presigned,
+        )
+
+    def submit_extract(
+        self,
+        file_path: str | Path,
+        *,
+        ocr_engine: OCREngine = "paddle",
+        mode: str = "default",
+        use_presigned: bool = True,
+    ) -> Job:
+        """Submit an extract job asynchronously and return immediately."""
+        path = self._resolve_path(file_path)
+        return self._submit_via_path(
+            "/v1/extract", "extract", path,
+            params={"ocr_engine": ocr_engine, "mode": mode},
+            use_presigned=use_presigned,
+        )
+
+    def submit_classify(
+        self,
+        file_path: str | Path,
+        *,
+        ocr_engine: OCREngine = "paddle",
+        mode: str = "default",
+        use_presigned: bool = True,
+    ) -> Job:
+        """Submit a classify job asynchronously and return immediately."""
+        path = self._resolve_path(file_path)
+        return self._submit_via_path(
+            "/v1/classify", "classify", path,
+            params={"ocr_engine": ocr_engine, "mode": mode},
+            use_presigned=use_presigned,
+        )
+
+    def submit_split(
+        self,
+        file_path: str | Path,
+        *,
+        ocr_engine: OCREngine = "paddle",
+        mode: str = "default",
+        use_presigned: bool = True,
+    ) -> Job:
+        """Submit a split job asynchronously and return immediately."""
+        path = self._resolve_path(file_path)
+        return self._submit_via_path(
+            "/v1/split", "split", path,
+            params={"ocr_engine": ocr_engine, "mode": mode},
+            use_presigned=use_presigned,
+        )
+
+    # ── Public convenience methods (submit + wait) ───────────────────────
 
     def parse(
         self,
-        file_path: Union[str, Path, None] = None,
+        file_path: str | Path | None = None,
         *,
-        image_path: Union[str, Path, None] = None,
+        image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
     ) -> dict:
-        """
-        Parse a document using OCR.
-
-        Pipeline: file → doc-processor → OCR engine → raw text
-
-        The OCR engine determines how the document is read:
-        - ``"paddle"`` (default): PaddleOCR — fast, high-throughput
-        - ``"doc-intent"``: Doc-Intent VLM — better on complex/noisy layouts
+        """Parse a document using OCR. Submits asynchronously and polls until done.
 
         Args:
             file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF, GIF).
             image_path: Deprecated alias for file_path.
-            ocr_engine: OCR engine to use — "paddle" (default) or "doc-intent".
-            use_presigned: Upload via S3 presigned URL (default True).
+            ocr_engine: ``"paddle"`` (default) or ``"doc-intent"``.
+            use_presigned: Use the presigned-S3 upload flow (default True).
+            poll_timeout: Override the constructor's poll_timeout for this call.
+            poll_interval: Override the constructor's poll_interval for this call.
 
         Returns:
-            Response envelope with ``result["result"]["ocr"]``.
-
-        Raises:
-            ParseError: If parsing fails or times out.
+            Response envelope with ``result["ocr"]``.
         """
-        path = self._resolve_path(file_path, image_path)
-        return self._call_endpoint(
-            "/v1/parse", path,
-            error_cls=ParseError,
+        job = self.submit_parse(
+            file_path=file_path,
+            image_path=image_path,
             ocr_engine=ocr_engine,
             use_presigned=use_presigned,
         )
+        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
 
     def extract(
         self,
-        file_path: Union[str, Path],
+        file_path: str | Path,
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         use_presigned: bool = True,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
     ) -> dict:
-        """
-        Extract structured data from a document (entities + line items).
+        """Extract structured data (entities + line items) from a document.
 
-        Pipeline: file → OCR engine → extract-service → structured fields
-
-        The OCR stage runs first (same as parse), then the OCR output is sent
-        to the extract service which returns entities and line items.
-
-        Args:
-            file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF).
-            ocr_engine: OCR engine — "paddle" (default) or "doc-intent".
-            mode: Processing mode (default: "default").
-            use_presigned: Upload via S3 presigned URL (default True).
+        Submits asynchronously and polls until done. Bypasses any edge-timeout
+        ceiling because each individual HTTP request stays sub-second.
 
         Returns:
-            Response envelope with ``result["result"]`` containing entities
-            and line items, plus ``result["ocr_text"]`` with the raw OCR.
-
-        Raises:
-            ExtractError: If extraction fails or times out.
+            Response envelope with ``result`` containing entities and line items,
+            and ``result["ocr_text"]`` with the raw OCR.
         """
-        path = self._resolve_path(file_path)
-        return self._call_endpoint(
-            "/v1/extract", path,
-            error_cls=ExtractError,
+        job = self.submit_extract(
+            file_path,
             ocr_engine=ocr_engine,
             mode=mode,
             use_presigned=use_presigned,
-            timeout=_EXTRACT_TIMEOUT,
         )
+        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
 
     def classify(
         self,
-        file_path: Union[str, Path],
+        file_path: str | Path,
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         use_presigned: bool = True,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
     ) -> dict:
-        """
-        Classify a document type (invoice, contract, receipt, etc.).
-
-        Pipeline: file → OCR engine → classifier-splitter /v2/classify
-
-        The OCR stage runs first, then the OCR output is sent to the
-        classifier-splitter service for document type classification.
-
-        Args:
-            file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF).
-            ocr_engine: OCR engine — "paddle" (default) or "doc-intent".
-            mode: Processing mode (default: "default").
-            use_presigned: Upload via S3 presigned URL (default True).
-
-        Returns:
-            Response envelope with classification result.
-
-        Raises:
-            ClassifyError: If classification fails or times out.
-        """
-        path = self._resolve_path(file_path)
-        return self._call_endpoint(
-            "/v1/classify", path,
-            error_cls=ClassifyError,
+        """Classify a document type (invoice, contract, receipt, etc.)."""
+        job = self.submit_classify(
+            file_path,
             ocr_engine=ocr_engine,
             mode=mode,
             use_presigned=use_presigned,
         )
+        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
 
     def split(
         self,
-        file_path: Union[str, Path],
+        file_path: str | Path,
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         use_presigned: bool = True,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
     ) -> dict:
-        """
-        Split a multi-document PDF into individual document segments.
-
-        Pipeline: file → OCR engine → classifier-splitter /v2/split
-
-        The OCR stage runs first, then the OCR output is sent to the
-        classifier-splitter service to detect document boundaries.
-
-        Args:
-            file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF).
-            ocr_engine: OCR engine — "paddle" (default) or "doc-intent".
-            mode: Processing mode (default: "default").
-            use_presigned: Upload via S3 presigned URL (default True).
-
-        Returns:
-            Response envelope with ``result["result"]["segments"]``.
-
-        Raises:
-            SplitError: If splitting fails or times out.
-        """
-        path = self._resolve_path(file_path)
-        return self._call_endpoint(
-            "/v1/split", path,
-            error_cls=SplitError,
+        """Split a multi-document PDF into individual document segments."""
+        job = self.submit_split(
+            file_path,
             ocr_engine=ocr_engine,
             mode=mode,
             use_presigned=use_presigned,
         )
+        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
 
     def process(
         self,
-        file_path: Union[str, Path, None] = None,
+        file_path: str | Path | None = None,
         *,
-        image_path: Union[str, Path, None] = None,
+        image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
     ) -> dict:
-        """
-        Parse and extract in one call.
+        """Parse and extract in one call.
 
-        Uploads the document once, then calls parse and extract using the
-        same document_key (avoiding a second upload). Note that extract runs
-        its own OCR stage internally, but the router's Redis OCR cache
-        deduplicates the second OCR run for the same file.
-
-        Args:
-            file_path: Path to the file (PDF, PNG, JPG, etc.)
-            image_path: Deprecated alias for file_path.
-            ocr_engine: OCR engine — "paddle" (default) or "doc-intent".
+        Uploads the document once, then submits parse + extract concurrently
+        on the backend (sharing the document_key so the router's OCR cache is
+        hit on extract). Polls both jobs round-robin via ``wait_for_jobs``.
 
         Returns:
-            dict with keys:
-                - ocr: Raw OCR text from parse
-                - data: Extracted structured fields from extract
+            ``{"ocr": <parse text>, "data": <extract structured fields>}``
         """
         path = self._resolve_path(file_path, image_path)
-        content_type = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
-        document_key = self.upload_document(path, content_type=content_type)
-
-        parse_params = {"ocr_engine": ocr_engine}
-        extract_params = {"ocr_engine": ocr_engine, "mode": "default"}
-        headers = self._get_headers()
-
-        parse_response = self._client.post(
-            f"{self.base_url}/v1/parse",
-            data={"document_key": document_key},
-            params=parse_params,
-            headers=headers,
+        document_key = self.upload_document(path)
+        parse_job = self._submit_via_doc_key(
+            "/v1/parse", "parse", document_key,
+            params={"ocr_engine": ocr_engine},
         )
-        if parse_response.status_code == 401:
-            raise AuthenticationError("Invalid API key", status_code=401)
-        if parse_response.status_code == 402:
-            raise ParseError("Insufficient credits", status_code=402)
-        if parse_response.status_code == 429:
-            raise ParseError("Rate limit exceeded", status_code=429)
-        if parse_response.status_code != 200:
-            raise ParseError(
-                f"Parse failed: {parse_response.text}",
-                status_code=parse_response.status_code,
-            )
-
-        extract_response = self._client.post(
-            f"{self.base_url}/v1/extract",
-            data={"document_key": document_key},
-            params=extract_params,
-            headers=self._get_headers(),
-            timeout=_EXTRACT_TIMEOUT,
+        extract_job = self._submit_via_doc_key(
+            "/v1/extract", "extract", document_key,
+            params={"ocr_engine": ocr_engine, "mode": "default"},
         )
-        if extract_response.status_code == 401:
-            raise AuthenticationError("Invalid API key", status_code=401)
-        if extract_response.status_code == 402:
-            raise ExtractError("Insufficient credits", status_code=402)
-        if extract_response.status_code == 429:
-            raise ExtractError("Rate limit exceeded", status_code=429)
-        if extract_response.status_code != 200:
-            raise ExtractError(
-                f"Extract failed: {extract_response.text}",
-                status_code=extract_response.status_code,
-            )
-
-        parse_result = parse_response.json()
-        extract_result = extract_response.json()
-
+        results = self.wait_for_jobs(
+            [parse_job, extract_job],
+            timeout=poll_timeout,
+            interval=poll_interval,
+        )
+        parse_result, extract_result = results
         return {
-            "ocr": parse_result["result"]["ocr"],
-            "data": extract_result.get("result", {}),
+            "ocr": parse_result.get("ocr") if isinstance(parse_result, dict) else None,
+            "data": extract_result if isinstance(extract_result, dict) else {},
         }
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
-    def close(self):
-        """Close the HTTP client."""
+    def close(self) -> None:
+        """Close the underlying HTTP client and release its connection pool."""
         self._client.close()
 
-    def __enter__(self):
+    def __enter__(self) -> HyperAPIClient:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
