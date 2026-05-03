@@ -32,8 +32,15 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "respx>=0.20.0",
     "ruff==0.8.6",
     "pre-commit>=4.0.0",
+]
+sim = [
+    "reportlab>=4.0.0",
+    "Pillow>=10.0.0",
+    "pypdf>=4.0.0",
 ]
 
 [tool.ruff]

@@ -1,0 +1,144 @@
+name: Customer Simulator (preprod)
+
+# Behaves like a real customer: real auth, real backend, real documents.
+# Runs against the preproduction cluster only — never production.
+
+on:
+  schedule:
+    # Nightly at 02:00 UTC. preprod traffic is lowest then.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: "smoke"
+        type: choice
+        options: [smoke, full, error-paths, soak]
+      workers:
+        description: "Concurrent customers"
+        required: true
+        default: "1"
+      duration:
+        description: "Soak minutes (soak mode only)"
+        required: false
+        default: "10"
+      update_baseline:
+        description: "Overwrite baseline.json with this run's summary"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  simulate:
+    name: Run customer simulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HYPERAPI_KEY: ${{ secrets.HYPERAPI_KEY_PREPROD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SDK + sim deps
+        run: pip install -e ".[dev,sim]"
+
+      - name: Verify preprod is reachable
+        run: |
+          curl -sSf -o /dev/null -w "preprod /health: %{http_code}\n" \
+            https://hyperapi-production-12097051.us-east-1.elb.amazonaws.com/health \
+            || (echo "preprod unreachable; aborting" && exit 1)
+
+      - name: Build fixture corpus (cached on disk)
+        run: python -m tests.customer_sim.corpus
+
+      - name: Run simulator
+        id: sim
+        run: |
+          MODE="${{ github.event.inputs.mode || 'smoke' }}"
+          WORKERS="${{ github.event.inputs.workers || '2' }}"
+          DURATION="${{ github.event.inputs.duration || '10' }}"
+          UPDATE_BASELINE="${{ github.event.inputs.update_baseline || 'false' }}"
+
+          ARGS=(--target preprod --mode "$MODE" --workers "$WORKERS")
+          if [ "$MODE" = "soak" ]; then ARGS+=(--duration "$DURATION"); fi
+          if [ "$UPDATE_BASELINE" = "true" ]; then ARGS+=(--update-baseline); fi
+
+          set +e
+          python -m tests.customer_sim "${ARGS[@]}"
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Locate latest report dir
+        id: report
+        if: always()
+        run: |
+          DIR=$(ls -dt tests/customer_sim/reports/*/ | head -1)
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Report: $DIR"
+
+      - name: Append summary to job
+        if: always() && steps.report.outputs.dir != ''
+        run: |
+          cat "${{ steps.report.outputs.dir }}/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+          if [ -f "${{ steps.report.outputs.dir }}/findings.md" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat "${{ steps.report.outputs.dir }}/findings.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: customer-sim-${{ github.run_id }}
+          path: tests/customer_sim/reports/
+          retention-days: 30
+
+      - name: Open or update sdk-drift issue on failure
+        if: steps.sim.outputs.exit_code != '0' && (github.event_name == 'schedule' || github.ref == 'refs/heads/preproduction')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const dir = '${{ steps.report.outputs.dir }}';
+            let body = `### Customer simulator run failed\n\n` +
+                       `- workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n` +
+                       `- mode: ${{ github.event.inputs.mode || 'smoke' }}\n`;
+            try {
+              if (dir && fs.existsSync(`${dir}/summary.md`)) {
+                body += `\n#### Summary\n\n` + fs.readFileSync(`${dir}/summary.md`, 'utf8');
+              }
+              if (dir && fs.existsSync(`${dir}/findings.md`)) {
+                body += `\n#### Findings\n\n` + fs.readFileSync(`${dir}/findings.md`, 'utf8');
+              }
+            } catch (e) { body += `\n(could not attach run artifacts: ${e.message})`; }
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'sdk-drift',
+            });
+            if (issues.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issues[0].number, body,
+              });
+              core.notice(`Commented on existing issue #${issues[0].number}`);
+            } else {
+              const { data: created } = await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: 'SDK drift: customer simulator failing',
+                body, labels: ['sdk-drift', 'priority:high'],
+              });
+              core.notice(`Opened new issue #${created.number}`);
+            }
+
+      - name: Fail job if simulator failed
+        if: steps.sim.outputs.exit_code != '0'
+        run: |
+          echo "Simulator exited with ${{ steps.sim.outputs.exit_code }}"
+          exit ${{ steps.sim.outputs.exit_code }}

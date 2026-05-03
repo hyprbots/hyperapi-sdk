@@ -1,0 +1,161 @@
+{
+  "run_id": "20260503T133643Z-2cef",
+  "target": "custom",
+  "base_url": "https://apis.hyperbots.com",
+  "host": "Damans-MacBook-Pro.local",
+  "started_at": "2026-05-03T13:36:43.607205+00:00",
+  "ended_at": "2026-05-03T13:56:20.666935+00:00",
+  "total_calls": 17,
+  "success_calls": 6,
+  "error_calls": 11,
+  "error_rate": 0.6470588235294118,
+  "overall_latency_ms": {
+    "p50": 8440.085312933661,
+    "p95": 12149.266614520457,
+    "p99": 12151.924789312761,
+    "max": 12152.589333010837
+  },
+  "ocr_keyword_recall_mean": 0.0,
+  "groups": [
+    {
+      "op": "classify",
+      "size_bucket": "tiny",
+      "count": 3,
+      "success_count": 1,
+      "error_count": 2,
+      "error_rate": 0.6666666666666666,
+      "latency_ms": {
+        "p50": 11335.256791906431,
+        "p95": 11335.256791906431,
+        "p99": 11335.256791906431,
+        "max": 11335.256791906431,
+        "mean": 11335.256791906431
+      },
+      "ocr_keyword_recall_mean": 0.0,
+      "errors_by_type": {
+        "ClassifyError": 2
+      },
+      "errors_by_status": {
+        "429": 2,
+        "200": 1
+      }
+    },
+    {
+      "op": "extract",
+      "size_bucket": "tiny",
+      "count": 3,
+      "success_count": 0,
+      "error_count": 3,
+      "error_rate": 1.0,
+      "latency_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null
+      },
+      "ocr_keyword_recall_mean": null,
+      "errors_by_type": {
+        "ExtractError": 2,
+        "DocumentUploadError": 1
+      },
+      "errors_by_status": {
+        "504": 1,
+        "429": 1,
+        "500": 1
+      }
+    },
+    {
+      "op": "parse",
+      "size_bucket": "tiny",
+      "count": 3,
+      "success_count": 1,
+      "error_count": 2,
+      "error_rate": 0.6666666666666666,
+      "latency_ms": {
+        "p50": 12152.589333010837,
+        "p95": 12152.589333010837,
+        "p99": 12152.589333010837,
+        "max": 12152.589333010837,
+        "mean": 12152.589333010837
+      },
+      "ocr_keyword_recall_mean": 0.0,
+      "errors_by_type": {
+        "DocumentUploadError": 1,
+        "ParseError": 1
+      },
+      "errors_by_status": {
+        "200": 1,
+        "500": 1,
+        "429": 1
+      }
+    },
+    {
+      "op": "process",
+      "size_bucket": "tiny",
+      "count": 3,
+      "success_count": 0,
+      "error_count": 3,
+      "error_rate": 1.0,
+      "latency_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null,
+        "mean": null
+      },
+      "ocr_keyword_recall_mean": null,
+      "errors_by_type": {
+        "ParseError": 2,
+        "DocumentUploadError": 1
+      },
+      "errors_by_status": {
+        "500": 2,
+        "429": 1
+      }
+    },
+    {
+      "op": "split",
+      "size_bucket": "tiny",
+      "count": 2,
+      "success_count": 1,
+      "error_count": 1,
+      "error_rate": 0.5,
+      "latency_ms": {
+        "p50": 12139.298459049314,
+        "p95": 12139.298459049314,
+        "p99": 12139.298459049314,
+        "max": 12139.298459049314,
+        "mean": 12139.298459049314
+      },
+      "ocr_keyword_recall_mean": 0.0,
+      "errors_by_type": {
+        "DocumentUploadError": 1
+      },
+      "errors_by_status": {
+        "500": 1,
+        "200": 1
+      }
+    },
+    {
+      "op": "upload",
+      "size_bucket": "tiny",
+      "count": 3,
+      "success_count": 3,
+      "error_count": 0,
+      "error_rate": 0.0,
+      "latency_ms": {
+        "p50": 5264.332374907099,
+        "p95": 5516.855688055512,
+        "p99": 5539.302204779815,
+        "max": 5544.913833960891,
+        "mean": 5303.51981963031
+      },
+      "ocr_keyword_recall_mean": 0.0,
+      "errors_by_type": {},
+      "errors_by_status": {
+        "200": 3
+      }
+    }
+  ]
+}

@@ -107,7 +107,7 @@ For more control, use parse and extract separately:
 ```python
 # Step 1: Parse document (OCR)
 ocr_result = client.parse("invoice.png")
-print(ocr_result["ocr"])  # Markdown-formatted text
+print(ocr_result["result"]["ocr"])  # Markdown-formatted text
 
 # Step 2: Extract structured fields (from the same file)
 fields = client.extract("invoice.png")
@@ -133,11 +133,12 @@ client = HyperAPIClient(
 
 | Method | Input | Pipeline | Description |
 |--------|-------|----------|-------------|
+| `upload_document(file)` | File path | presigned S3 | Upload file, returns `document_key` (valid 24 h) |
 | `parse(file)` | File path | OCR only | Parse document into structured text |
 | `extract(file)` | File path | OCR → extract-service | Extract structured fields with validation |
 | `classify(file)` | File path | OCR → classifier | Classify document type |
 | `split(file)` | File path | OCR → classifier-splitter | Split multi-document binders |
-| `process(file)` | File path | OCR → extract | Combined parse + extract pipeline |
+| `process(file)` | File path | OCR → extract | Combined parse + extract in one call (single upload) |
 ### Common Parameters
 
 | Parameter | Type | Default | Available On |
@@ -149,8 +150,8 @@ client = HyperAPIClient(
 ### Supported Formats
 
 - PNG, JPG, JPEG
+- TIFF, WEBP, GIF
 - PDF
-- Excel
 
 ## Tutorials
 
@@ -176,6 +177,29 @@ If you use **HyperAPI** or ideas related to its document intelligence and valida
   author={Bhat, Akshata A and Naganna, Sharath and Haq, Saiful and Khatri, Prashant and Arun, Neha and Chhaya, Niyati and Pandey, Piyush and Bhattacharyya, Pushpak}
 }
 ```
+
+## Testing
+
+The SDK has a three-layer testing strategy that runs without human intervention:
+
+| Layer | Tool | Runs | Time | What it catches |
+|---|---|---|---|---|
+| **L1** Mocked contract | `pytest` + `respx` | Every PR/push | <1 min | Request shape, response parsing, error mapping |
+| **L2** Customer simulator | `python -m tests.customer_sim` | Nightly cron + manual | ~5–20 min | Real-world latency, errors, OCR drift on real docs |
+| **L3** Auto-issue | GitHub Actions | On L1/L2 failure | — | Opens/comments `sdk-drift` issue with run details |
+
+```bash
+# L1: hermetic, no backend needed
+pip install -e ".[dev]"
+pytest tests/ -v --ignore=tests/customer_sim
+
+# L2: needs a real API key + reachable backend (NEVER production)
+pip install -e ".[dev,sim]"
+HYPERAPI_KEY=hk_test_xxx HYPERAPI_URL=http://localhost:8000 \
+  python -m tests.customer_sim --target local --mode smoke
+```
+
+Full L2 docs (run modes, fixture corpus, metrics, regression detection, baseline updates): [`tests/customer_sim/README.md`](tests/customer_sim/README.md).
 
 ## License
 

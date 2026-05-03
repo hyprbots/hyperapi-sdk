@@ -10,20 +10,34 @@ on:
   pull_request:
     branches:
       - main
+      - preproduction
   workflow_dispatch:
 
 jobs:
-  quality-gates:
-    name: Lint and Test
+  lint-and-test:
+    name: Lint and L1 contract tests (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Lint
         run: ruff check hyperapi/
-      - name: Test
-        run: pytest tests/ -v --tb=short
+      - name: Test (mocked contract suite)
+        run: pytest tests/ -v --tb=short --cov=hyperapi --cov-report=term --cov-report=xml --ignore=tests/customer_sim
+      - name: Enforce coverage threshold
+        if: matrix.python == '3.12'
+        run: pytest tests/ --cov=hyperapi --cov-fail-under=80 --ignore=tests/customer_sim -q
+      - name: Upload coverage
+        if: matrix.python == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml

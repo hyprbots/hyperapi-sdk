@@ -1,38 +1,49 @@
 # qa-manifest.yaml — QA agent configuration for hyperapi-sdk
 # See: hyperapi-documentation-internal/architecture/qa-agent-design-decisions.md
 #
-# WARNING: SDK is stale — may not match current backend API.
-# Treat as contract test target, not unit test subject.
-# Skip unit tests until SDK is updated to match current API.
+# Three-layer testing strategy (zero human intervention):
+#   L1  Mocked HTTP contract tests (respx)            — every PR/push, <1 min, hermetic
+#   L2  Customer simulator (real backend, real docs)  — nightly cron + manual dispatch
+#   L3  Auto-issue on failure (sdk-drift label)       — triggered by L1 or L2 failure
 
 service:
   name: hyperapi-sdk
   type: library
   language: python
   framework: none
-  status: stale
 
 dependencies:
   system: []
   services:
-    - hyperapi-backend  # SDK tests should run against live backend
+    - hyperapi-backend  # required only for L2 customer simulator
   start_command: "echo 'SDK — no service to start'"
   health_check: "echo 'skipped — library'"
 
 testing:
   framework: pytest
   install: "pip install -e '.[dev]'"
-  run: "pytest tests/ -v"
+  # L1 only — fast, hermetic, runs on every PR. L2 is invoked separately via
+  # `python -m tests.customer_sim` (see tests/customer_sim/README.md).
+  run: "pytest tests/ -v --ignore=tests/customer_sim"
+  coverage: "pytest tests/ --cov=hyperapi --cov-report=json --ignore=tests/customer_sim"
   min_coverage: 80
+  lint: "ruff check hyperapi/"
   source_dirs:
     - hyperapi/
   test_dir: tests/
-  # SDK testing strategy:
-  # 1. Skip unit tests until SDK is updated to match current API
-  # 2. Use SDK as E2E contract validator: run SDK methods against staging backend
-  # 3. When backend endpoints change, flag SDK as needing update in QA report
-  contract_test_against: "http://localhost:8000"
+
+  # L2 customer simulator — invoked manually or by .github/workflows/customer-sim.yml
+  customer_simulator:
+    entrypoint: "python -m tests.customer_sim"
+    target_preprod: "https://hyperapi-production-12097051.us-east-1.elb.amazonaws.com"
+    schedule: "nightly @ 02:00 UTC"
+    artifacts: "tests/customer_sim/reports/"
+    baseline: "tests/customer_sim/baseline.json"
+    fixture_corpus: "tests/customer_sim/_corpus_cache/"
 
 ci:
+  dockerfile: null
+  docker_compose: null
   dev_branch: preproduction
   prod_branch: production
+  preproduction_endpoint: "https://hyperapi-production-12097051.us-east-1.elb.amazonaws.com"
