@@ -580,23 +580,56 @@ class HyperAPIClient:
                 f"Job poll failed: {e}", request_id=request_id
             ) from e
 
+        rid = _request_id_of(resp, request_id)
         if resp.status_code == 401:
             raise AuthenticationError(
-                "Invalid API key.", status_code=401, request_id=request_id
+                "Invalid API key.", status_code=401, request_id=rid
             )
         if resp.status_code == 404:
             raise HyperAPIError(
                 "Job not found or expired.",
                 status_code=404,
-                request_id=request_id,
+                request_id=rid,
+            )
+        if resp.status_code == 429:
+            # Kong's hyperapi-auth plugin rate-limits GET /v1/jobs/{id} too — surface
+            # as RateLimitError so callers (and `_poll_with_retry`'s don't-retry list)
+            # see it consistently with submit-time 429s.
+            retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+            tier = None
+            limit = None
+            try:
+                body = resp.json()
+                if isinstance(body, dict):
+                    tier = body.get("tier")
+                    limit = body.get("limit")
+            except (json.JSONDecodeError, ValueError):
+                pass
+            raise RateLimitError(
+                _server_message(resp, "Rate limit exceeded"),
+                retry_after=retry_after,
+                tier=tier,
+                limit=limit,
+                status_code=429,
+                request_id=rid,
             )
         if resp.status_code >= 400:
             raise HyperAPIError(
                 _server_message(resp, f"Poll failed (HTTP {resp.status_code})"),
                 status_code=resp.status_code,
-                request_id=_request_id_of(resp, request_id),
+                request_id=rid,
             )
-        return resp.json()
+        # Defend against a 200 with malformed JSON — some misconfigured proxies will
+        # return text/html bodies on 200. Without this guard, a JSONDecodeError
+        # escapes to the caller as an un-typed exception.
+        try:
+            return resp.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HyperAPIError(
+                f"Malformed job-status response: {e}",
+                status_code=200,
+                request_id=rid,
+            ) from e
 
     def _poll_with_retry(self, job_id: str) -> dict:
         """Poll one time, retrying on transient failures (5xx, connection errors).
@@ -668,7 +701,12 @@ class HyperAPIClient:
             job_id = job
             op = "unknown"
 
-        deadline = time.monotonic() + (timeout if timeout is not None else self._poll_timeout)
+        # Capture start so elapsed math survives degenerate inputs (e.g., timeout=0).
+        # Don't compute it from `deadline - (timeout or self._poll_timeout)` —
+        # `or` treats timeout=0 as falsy and silently swaps in the constructor's value.
+        start = time.monotonic()
+        budget = timeout if timeout is not None else self._poll_timeout
+        deadline = start + budget
         wait_s = interval if interval is not None else self._poll_interval
 
         while True:
@@ -688,15 +726,14 @@ class HyperAPIClient:
                 raise self._exception_for_failed_job(op, envelope, job_id)
 
             if time.monotonic() >= deadline:
-                elapsed = time.monotonic() - (deadline - (timeout or self._poll_timeout))
                 raise JobTimeoutError(
                     (
-                        f"Job {job_id} did not complete within "
-                        f"{timeout or self._poll_timeout}s. Pass a larger poll_timeout "
-                        "or use submit_<op>+wait_for_job to manage polling yourself."
+                        f"Job {job_id} did not complete within {budget}s. "
+                        "Pass a larger poll_timeout or use submit_<op>+wait_for_job "
+                        "to manage polling yourself."
                     ),
                     job_id=job_id,
-                    elapsed_s=elapsed,
+                    elapsed_s=time.monotonic() - start,
                 )
 
             # Sleep, but never past the deadline.
@@ -721,9 +758,15 @@ class HyperAPIClient:
         if not jobs_list:
             return []
 
-        deadline = time.monotonic() + (timeout if timeout is not None else self._poll_timeout)
+        start = time.monotonic()
+        budget = timeout if timeout is not None else self._poll_timeout
+        deadline = start + budget
         wait_s = interval if interval is not None else self._poll_interval
-        results: list[dict | None] = [None] * len(jobs_list)
+        # Sentinel `{}` (not None) means "completed, but the server's result envelope
+        # was empty" — preserves order in the returned list. The loop only exits when
+        # every index has been written, so we never return more or fewer entries than
+        # the input.
+        results: list[dict] = [{} for _ in jobs_list]
         pending: list[int] = list(range(len(jobs_list)))
 
         while pending:
@@ -732,7 +775,11 @@ class HyperAPIClient:
                 envelope = self._poll_with_retry(jobs_list[idx].job_id)
                 status = envelope.get("status")
                 if status == "completed":
-                    results[idx] = envelope.get("result", envelope)
+                    # `envelope.get("result", envelope)` falls back to the full envelope
+                    # if `result` key is absent; if it's explicitly None, coerce to {}
+                    # so the position in the returned list is preserved.
+                    res = envelope.get("result", envelope)
+                    results[idx] = res if isinstance(res, dict) else {}
                 elif status == "failed":
                     raise self._exception_for_failed_job(
                         jobs_list[idx].op, envelope, jobs_list[idx].job_id
@@ -746,31 +793,34 @@ class HyperAPIClient:
             if time.monotonic() >= deadline:
                 pending_ids = ",".join(jobs_list[i].job_id for i in pending)
                 raise JobTimeoutError(
-                    (
-                        f"Jobs [{pending_ids}] did not complete within "
-                        f"{timeout or self._poll_timeout}s."
-                    ),
+                    f"Jobs [{pending_ids}] did not complete within {budget}s.",
                     job_id=pending_ids,
-                    elapsed_s=time.monotonic() - (deadline - (timeout or self._poll_timeout)),
+                    elapsed_s=time.monotonic() - start,
                 )
             remaining = deadline - time.monotonic()
             time.sleep(min(wait_s, max(0.0, remaining)))
 
-        # All jobs completed; results filled in order.
-        return [r for r in results if r is not None]
+        # results is already in input-order; never filter — the input length is the
+        # output length, always.
+        return results
 
     def _exception_for_failed_job(
         self, op: str, envelope: dict, job_id: str
     ) -> HyperAPIError:
-        """Build the right typed exception for a ``status: failed`` envelope."""
-        message = envelope.get("error") or "Job failed"
-        message = _strip_api_key(message) or message
-        status_code = envelope.get("error_status_code")
-        request_id = envelope.get("request_id")
+        """Build the right typed exception for a ``status: failed`` envelope.
+
+        The op-to-class registry returns the per-op subclass when known
+        (``ParseError``, ``ExtractError``, …) and falls back to
+        ``HyperAPIError`` for raw-job-id calls where we couldn't determine
+        which op originated the job.
+        """
+        message = _strip_api_key(envelope.get("error")) or "Job failed"
         cls = _OP_TO_ERROR.get(op, HyperAPIError)
-        if cls is HyperAPIError:
-            return HyperAPIError(message, status_code=status_code, request_id=request_id)
-        return cls(message, status_code=status_code, request_id=request_id)
+        return cls(
+            message,
+            status_code=envelope.get("error_status_code"),
+            request_id=envelope.get("request_id"),
+        )
 
     # ── Public submit_<op> methods ───────────────────────────────────────
 
@@ -782,7 +832,13 @@ class HyperAPIClient:
         ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
     ) -> Job:
-        """Submit a parse job asynchronously and return immediately."""
+        """Submit a parse job asynchronously and return immediately.
+
+        ``image_path`` is a deprecated alias for ``file_path`` retained for
+        v0.1.x backward compatibility — pass exactly one. The other
+        ``submit_<op>`` methods don't take it because parse is the only op
+        that historically accepted bare images via that name.
+        """
         path = self._resolve_path(file_path, image_path)
         return self._submit_via_path(
             "/v1/parse", "parse", path,

@@ -35,9 +35,9 @@ def _clean_env(monkeypatch):
     wrong API key. CI is also clean, but devs hit this constantly.
     """
     for var in (
-        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-        "http_proxy", "https_proxy", "all_proxy",
-        "HYPERAPI_KEY", "HYPERAPI_URL",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+        "HYPERAPI_KEY", "HYPERAPI_URL", "HYPERAPI_VERIFY",
     ):
         monkeypatch.delenv(var, raising=False)
 

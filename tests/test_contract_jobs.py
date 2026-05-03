@@ -225,6 +225,79 @@ def test_wait_for_jobs_empty_input_returns_empty():
 # ── request_id propagation ───────────────────────────────────────────────
 
 
+def test_get_job_429_raises_rate_limit_error(mock_backend, client):
+    """A 429 on the poll path must surface as RateLimitError (matches submit-time
+    behavior) so callers can inspect retry_after / tier / limit uniformly."""
+    from hyperapi import RateLimitError
+    mock_backend.get("/v1/jobs/j-rl").mock(return_value=httpx.Response(
+        429,
+        headers={"Retry-After": "60"},
+        json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
+    ))
+
+    with pytest.raises(RateLimitError) as ei:
+        client.get_job("j-rl")
+    assert ei.value.retry_after == 60
+    assert ei.value.tier == "free"
+    assert ei.value.limit == 1
+
+
+def test_get_job_malformed_json_raises_typed(mock_backend, client):
+    """A 200 with non-JSON body (misconfigured proxy returning HTML) must surface
+    as a typed HyperAPIError, not a raw JSONDecodeError."""
+    mock_backend.get("/v1/jobs/j-bad").mock(return_value=httpx.Response(
+        200,
+        headers={"Content-Type": "text/html"},
+        text="<html>oops</html>",
+    ))
+
+    with pytest.raises(HyperAPIError) as ei:
+        client.get_job("j-bad")
+    assert "Malformed" in str(ei.value)
+    assert ei.value.status_code == 200
+
+
+def test_wait_for_job_with_zero_timeout_raises_immediately(mock_backend):
+    """Edge case: timeout=0 means 'fail immediately if not done on first poll'.
+    Verifies the elapsed_s math no longer treats 0 as falsy via `or` fallback."""
+    mock_backend.get("/v1/jobs/j-zero").mock(return_value=httpx.Response(
+        200, json={"status": "pending"},
+    ))
+    client = HyperAPIClient(
+        api_key="hk_test_z", base_url="http://test.local",
+        poll_interval=0.0, poll_timeout=10.0,  # large constructor budget
+    )
+    job = Job(job_id="j-zero", status="pending", poll_url="/v1/jobs/j-zero", op="parse")
+
+    with pytest.raises(JobTimeoutError) as ei:
+        client.wait_for_job(job, timeout=0)  # per-call OVERRIDE to 0
+    # Must reflect the actual wait, not the constructor's 10s — proves the
+    # `(timeout or self._poll_timeout)` falsy bug is fixed.
+    assert ei.value.elapsed_s < 1.0
+    client.close()
+
+
+def test_wait_for_jobs_returns_full_length_with_empty_result_envelope(mock_backend, client):
+    """If a completed envelope's `result` is None/missing, the returned list must
+    still have the same length as input — never silently drop entries."""
+    mock_backend.get("/v1/jobs/A").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": None},
+    ))
+    mock_backend.get("/v1/jobs/B").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": {"ok": 1}},
+    ))
+    job_a = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="parse")
+    job_b = Job(job_id="B", status="pending", poll_url="/v1/jobs/B", op="extract")
+
+    results = client.wait_for_jobs([job_a, job_b])
+
+    # CRITICAL invariant: len(results) == len(input). The None-result for A
+    # becomes {} so we don't silently drop the slot.
+    assert len(results) == 2
+    assert results[0] == {}
+    assert results[1] == {"ok": 1}
+
+
 def test_failed_job_request_id_carries_to_exception(mock_backend, client):
     """A failed job envelope's `request_id` field should land on the raised exception."""
     mock_backend.get("/v1/jobs/j-11").mock(return_value=httpx.Response(
