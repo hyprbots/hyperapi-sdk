@@ -312,3 +312,23 @@ def test_failed_job_request_id_carries_to_exception(mock_backend, client):
     with pytest.raises(HyperAPIError) as ei:
         client.wait_for_job(job)
     assert ei.value.request_id == "req-zzz"
+
+
+def test_failed_job_message_includes_http_status(mock_backend, client):
+    """str(e) on a failed-job exception must include the HTTP status — support
+    tickets quote the message verbatim, so it should be self-describing."""
+    mock_backend.get("/v1/jobs/j-msg").mock(return_value=httpx.Response(
+        200,
+        json={
+            "status": "failed",
+            "error": "extract pipeline crashed",
+            "error_status_code": 500,
+        },
+    ))
+    job = Job(job_id="j-msg", status="pending", poll_url="/v1/jobs/j-msg", op="extract")
+
+    with pytest.raises(ExtractError) as ei:
+        client.wait_for_job(job)
+    assert "(HTTP 500)" in str(ei.value)
+    assert "extract pipeline crashed" in str(ei.value)
+    assert ei.value.status_code == 500

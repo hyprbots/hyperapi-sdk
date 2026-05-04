@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -202,6 +203,7 @@ class HyperAPIClient:
         poll_interval: float = _DEFAULT_POLL_INTERVAL_S,
         poll_timeout: float = _DEFAULT_POLL_TIMEOUT_S,
         poll_max_transient_retries: int = _DEFAULT_POLL_MAX_TRANSIENT_RETRIES,
+        poll_transient_retry_delay: float = _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S,
     ):
         """Initialize a HyperAPI client.
 
@@ -223,6 +225,10 @@ class HyperAPIClient:
             poll_max_transient_retries: How many times to retry a single
                 ``/v1/jobs/{id}`` GET if it returns 5xx or has a connection
                 error. Default 3. Fast-fails on 401/404.
+            poll_transient_retry_delay: Seconds to sleep between transient-retry
+                attempts on a single poll. Default 0.5; bump this if your
+                network is bursty enough that 3 retries in 1.5 s isn't enough
+                breathing room.
         """
         self.api_key = api_key or os.environ.get("HYPERAPI_KEY")
         if not self.api_key:
@@ -239,9 +245,18 @@ class HyperAPIClient:
         self._poll_interval = poll_interval
         self._poll_timeout = poll_timeout
         self._poll_max_transient_retries = poll_max_transient_retries
+        self._poll_transient_retry_delay = poll_transient_retry_delay
 
         from . import __version__  # local import to avoid circular at module load
-        self._user_agent = f"hyperapi-sdk-python/{__version__}"
+        # User-Agent includes the httpx + Python versions so backend log analytics
+        # and customer firewalls can identify the underlying HTTP stack + runtime
+        # without sniffing other headers. Format mirrors the de-facto convention
+        # popularized by the OpenAI / Stripe SDKs.
+        py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        self._user_agent = (
+            f"hyperapi-sdk-python/{__version__} "
+            f"(httpx/{httpx.__version__}; Python/{py_ver})"
+        )
         self._client = httpx.Client(
             timeout=timeout,
             headers={"User-Agent": self._user_agent},
@@ -656,10 +671,11 @@ class HyperAPIClient:
                         extra={
                             "job_id": job_id,
                             "attempt": attempt + 1,
+                            "delay_s": self._poll_transient_retry_delay,
                             "error": str(e)[:200],
                         },
                     )
-                    time.sleep(_DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S)
+                    time.sleep(self._poll_transient_retry_delay)
                     continue
                 raise
         # Unreachable in practice; mypy comfort.
@@ -697,16 +713,20 @@ class HyperAPIClient:
         if isinstance(job, Job):
             job_id = job.job_id
             op = job.op
+            # Use the Job's actual submission time so JobTimeoutError reports
+            # total time-since-submit, not just the wait_for_job loop duration.
+            # Useful when callers persist a Job and call wait_for_job later.
+            start = job.submitted_at
         else:
             job_id = job
             op = "unknown"
+            start = time.monotonic()
 
-        # Capture start so elapsed math survives degenerate inputs (e.g., timeout=0).
-        # Don't compute it from `deadline - (timeout or self._poll_timeout)` —
-        # `or` treats timeout=0 as falsy and silently swaps in the constructor's value.
-        start = time.monotonic()
+        # Don't compute elapsed from `deadline - (timeout or self._poll_timeout)`
+        # — `or` treats timeout=0 as falsy and silently swaps in the constructor.
+        loop_start = time.monotonic()
         budget = timeout if timeout is not None else self._poll_timeout
-        deadline = start + budget
+        deadline = loop_start + budget
         wait_s = interval if interval is not None else self._poll_interval
 
         while True:
@@ -812,13 +832,18 @@ class HyperAPIClient:
         The op-to-class registry returns the per-op subclass when known
         (``ParseError``, ``ExtractError``, …) and falls back to
         ``HyperAPIError`` for raw-job-id calls where we couldn't determine
-        which op originated the job.
+        which op originated the job. The HTTP status (if present in the
+        envelope's ``error_status_code``) is prefixed onto the message so
+        ``str(e)`` is self-describing in support tickets without needing the
+        caller to also surface ``e.status_code``.
         """
-        message = _strip_api_key(envelope.get("error")) or "Job failed"
+        raw = _strip_api_key(envelope.get("error")) or "Job failed"
+        status_code = envelope.get("error_status_code")
+        message = f"(HTTP {status_code}) {raw}" if status_code else raw
         cls = _OP_TO_ERROR.get(op, HyperAPIError)
         return cls(
             message,
-            status_code=envelope.get("error_status_code"),
+            status_code=status_code,
             request_id=envelope.get("request_id"),
         )
 
@@ -1003,9 +1028,12 @@ class HyperAPIClient:
     ) -> dict:
         """Parse and extract in one call.
 
-        Uploads the document once, then submits parse + extract concurrently
-        on the backend (sharing the document_key so the router's OCR cache is
-        hit on extract). Polls both jobs round-robin via ``wait_for_jobs``.
+        Uploads the document once, then submits the parse and extract legs
+        back-to-back (two sequential POSTs from the SDK). The platform runs
+        the two legs concurrently on the backend — the second leg hits the
+        router's OCR cache via the shared ``document_key``, so total
+        wall-clock time ≈ max(parse, extract) + a small polling overhead,
+        not their sum. Polls both jobs round-robin via ``wait_for_jobs``.
 
         Returns:
             ``{"ocr": <parse text>, "data": <extract structured fields>}``

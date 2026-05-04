@@ -127,8 +127,21 @@ def test_constructor_exposes_poll_knobs():
     """Polling cadence + timeout are configurable per-client (defaults match the
     platform playground)."""
     sig = inspect.signature(HyperAPIClient.__init__)
-    for kw in ("poll_interval", "poll_timeout", "poll_max_transient_retries"):
+    for kw in (
+        "poll_interval",
+        "poll_timeout",
+        "poll_max_transient_retries",
+        "poll_transient_retry_delay",
+    ):
         assert kw in sig.parameters
+
+
+def test_poll_transient_retry_delay_threads_through():
+    """The constructor's poll_transient_retry_delay must land on the instance
+    so customers behind flaky proxies can extend the inter-retry pause."""
+    client = HyperAPIClient(api_key="hk_test_x", poll_transient_retry_delay=2.5)
+    assert client._poll_transient_retry_delay == 2.5
+    client.close()
 
 
 def test_client_repr_masks_api_key():
@@ -143,9 +156,13 @@ def test_client_repr_masks_api_key():
 
 def test_client_sets_user_agent_header():
     """User-Agent must be present on the underlying httpx.Client so backend
-    log analytics + customer firewalls can identify SDK traffic."""
+    log analytics + customer firewalls can identify SDK traffic. Format mirrors
+    OpenAI/Stripe convention: `<product>/<version> (<runtime-stack>)`."""
     client = HyperAPIClient(api_key="hk_test_ua")
-    assert client._client.headers.get("user-agent") == f"hyperapi-sdk-python/{__version__}"
+    ua = client._client.headers.get("user-agent")
+    assert ua.startswith(f"hyperapi-sdk-python/{__version__}")
+    assert "httpx/" in ua
+    assert "Python/" in ua
     client.close()
 
 
