@@ -62,6 +62,17 @@ class RateLimitError(HyperAPIError):
             `Retry-After` response header).
         tier: The plan tier on the API key (e.g., "free", "pro", "enterprise").
         limit: The numeric limit that was exceeded (per the configured window).
+        window_seconds: Length of the sliding window the server's rate limiter
+            uses, in seconds. ``limit`` is "N requests per ``window_seconds``."
+            The free tier is 1 per 60s — NOT 1 RPS. (Bug #86 b.) Older server
+            versions may not surface this; in that case it stays ``None`` and
+            callers should fall back to the public docs.
+        degraded: True iff the server told us this 429 was emitted because the
+            rate-limit infrastructure was temporarily unavailable rather than
+            because the customer actually exceeded their tier (free tier
+            fail-closed branch — see ``hyperapi-infra`` commit ``cfaeb83``).
+            Customers should treat ``degraded=True`` as a transient signal:
+            sleep ``retry_after`` and retry, expect success.
     """
 
     def __init__(
@@ -71,6 +82,8 @@ class RateLimitError(HyperAPIError):
         retry_after: int = 60,
         tier: str | None = None,
         limit: int | None = None,
+        window_seconds: int | None = None,
+        degraded: bool = False,
         status_code: int | None = 429,
         request_id: str | None = None,
     ):
@@ -78,6 +91,8 @@ class RateLimitError(HyperAPIError):
         self.retry_after = retry_after
         self.tier = tier
         self.limit = limit
+        self.window_seconds = window_seconds
+        self.degraded = degraded
 
 
 class JobTimeoutError(HyperAPIError):

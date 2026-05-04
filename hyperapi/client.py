@@ -423,11 +423,20 @@ class HyperAPIClient:
             retry_after = _parse_retry_after(resp.headers.get("retry-after"))
             tier = None
             limit = None
+            window_seconds = None
+            degraded = False
             try:
                 body = resp.json()
                 if isinstance(body, dict):
                     tier = body.get("tier")
                     limit = body.get("limit")
+                    # Bug #86 (b): server now emits the sliding-window length so
+                    # callers know "limit per N seconds" rather than guessing RPS.
+                    window_seconds = body.get("window_seconds")
+                    # Bug #86 (a): free-tier fail-closed sets degraded:true so
+                    # customers can distinguish "temporarily unavailable, retry"
+                    # from "actually exceeded my quota".
+                    degraded = bool(body.get("degraded", False))
             except (json.JSONDecodeError, ValueError):
                 pass
             raise RateLimitError(
@@ -435,6 +444,8 @@ class HyperAPIClient:
                 retry_after=retry_after,
                 tier=tier,
                 limit=limit,
+                window_seconds=window_seconds,
+                degraded=degraded,
                 status_code=429,
                 request_id=rid,
             )
@@ -613,11 +624,15 @@ class HyperAPIClient:
             retry_after = _parse_retry_after(resp.headers.get("retry-after"))
             tier = None
             limit = None
+            window_seconds = None
+            degraded = False
             try:
                 body = resp.json()
                 if isinstance(body, dict):
                     tier = body.get("tier")
                     limit = body.get("limit")
+                    window_seconds = body.get("window_seconds")
+                    degraded = bool(body.get("degraded", False))
             except (json.JSONDecodeError, ValueError):
                 pass
             raise RateLimitError(
@@ -625,6 +640,8 @@ class HyperAPIClient:
                 retry_after=retry_after,
                 tier=tier,
                 limit=limit,
+                window_seconds=window_seconds,
+                degraded=degraded,
                 status_code=429,
                 request_id=rid,
             )

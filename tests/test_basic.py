@@ -73,6 +73,20 @@ def test_rate_limit_error_carries_retry_after_tier_limit():
     assert err.limit == 1
     assert err.status_code == 429
     assert err.request_id == "r"
+    # Defaults for the new fields keep older usages working.
+    assert err.window_seconds is None
+    assert err.degraded is False
+
+
+def test_rate_limit_error_carries_window_seconds_and_degraded():
+    """Bug #86 (b): server emits window_seconds; (a): free-tier fail-closed
+    sets degraded=True. Both must round-trip through the constructor."""
+    err = RateLimitError(
+        retry_after=60, tier="free", limit=1,
+        window_seconds=60, degraded=True,
+    )
+    assert err.window_seconds == 60
+    assert err.degraded is True
 
 
 def test_job_timeout_error_carries_job_id_and_elapsed():

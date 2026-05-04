@@ -92,6 +92,35 @@ def test_upload_rate_limit_surfaces_typed_error(mock_backend, client, tiny_pdf):
     assert ei.value.retry_after == 60
     assert ei.value.tier == "free"
     assert ei.value.limit == 1
+    # Old server (pre-bug-#86) doesn't surface these — ensure we don't crash.
+    assert ei.value.window_seconds is None
+    assert ei.value.degraded is False
+
+
+def test_upload_rate_limit_parses_window_seconds_and_degraded(mock_backend, client, tiny_pdf):
+    """Bug #86 (b): server's 429 envelope now includes window_seconds; (a):
+    free-tier fail-closed sets degraded=true. SDK must parse both."""
+    mock_backend.post("/v1/documents/upload").mock(
+        return_value=httpx.Response(
+            429,
+            headers={"Retry-After": "60"},
+            json={
+                "message": "Rate limit enforcement temporarily unavailable; retry shortly.",
+                "tier": "free",
+                "limit": 1,
+                "window_seconds": 60,
+                "degraded": True,
+            },
+        ),
+    )
+
+    with pytest.raises(RateLimitError) as ei:
+        client.upload_document(tiny_pdf)
+    assert ei.value.window_seconds == 60
+    assert ei.value.degraded is True
+    assert ei.value.retry_after == 60
+    assert ei.value.tier == "free"
+    assert ei.value.limit == 1
 
 
 def test_upload_413_raises_document_upload_error(mock_backend, client, tiny_pdf):
