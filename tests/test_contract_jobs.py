@@ -314,6 +314,98 @@ def test_failed_job_request_id_carries_to_exception(mock_backend, client):
     assert ei.value.request_id == "req-zzz"
 
 
+# ── Tier-3 polish: KeyboardInterrupt + ConnectError guards ───────────────
+
+
+def test_wait_for_job_propagates_keyboard_interrupt(mock_backend, client):
+    """Ctrl+C mid-poll must NOT be swallowed by the SDK's transient-retry path.
+    The user expects to interrupt cleanly — KeyboardInterrupt is BaseException,
+    not Exception, but defending against `except Exception:` regressions is
+    cheap insurance."""
+    call_count = {"n": 0}
+
+    def _side_effect(request):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return httpx.Response(200, json={"status": "pending", "request_id": "req-x"})
+        raise KeyboardInterrupt("user pressed Ctrl+C")
+
+    mock_backend.get("/v1/jobs/j-kbi").mock(side_effect=_side_effect)
+    job = Job(job_id="j-kbi", status="pending", poll_url="/v1/jobs/j-kbi", op="parse")
+
+    with pytest.raises(KeyboardInterrupt):
+        client.wait_for_job(job)
+
+
+def test_wait_for_jobs_propagates_keyboard_interrupt(mock_backend, client):
+    """Same guarantee for the multi-job round-robin polling path."""
+    a_count = {"n": 0}
+
+    def _a_side_effect(request):
+        a_count["n"] += 1
+        if a_count["n"] == 1:
+            return httpx.Response(200, json={"status": "pending", "request_id": "req-x"})
+        raise KeyboardInterrupt("user pressed Ctrl+C")
+
+    mock_backend.get("/v1/jobs/A").mock(side_effect=_a_side_effect)
+    mock_backend.get("/v1/jobs/B").mock(return_value=_pending_response())
+    job_a = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="parse")
+    job_b = Job(job_id="B", status="pending", poll_url="/v1/jobs/B", op="extract")
+
+    with pytest.raises(KeyboardInterrupt):
+        client.wait_for_jobs([job_a, job_b])
+
+
+def test_poll_retries_on_connection_error_then_succeeds(mock_backend):
+    """A bare httpx.ConnectError on a poll (DNS hiccup, brief network blip)
+    must be absorbed by the transient-retry path and the next poll succeed.
+    Mirrors the 5xx-retry guarantee but for the connection-error branch in
+    `get_job` -> `_poll_with_retry`."""
+    mock_backend.get("/v1/jobs/j-conn").mock(side_effect=[
+        httpx.ConnectError("DNS failed"),
+        _completed_response({"data": {"ok": True}}),
+    ])
+    client = HyperAPIClient(
+        api_key="hk_test_conn",
+        base_url="http://test.local",
+        poll_interval=0.0,
+        poll_timeout=5.0,
+        # Tiny delay so the retry path doesn't sleep meaningfully in tests.
+        poll_transient_retry_delay=0.0,
+        poll_max_transient_retries=2,
+    )
+    job = Job(job_id="j-conn", status="pending", poll_url="/v1/jobs/j-conn", op="extract")
+
+    result = client.wait_for_job(job)
+
+    assert result == {"data": {"ok": True}}
+    client.close()
+
+
+def test_wait_for_jobs_timeout_lists_pending_ids(mock_backend):
+    """All jobs stay pending past the deadline → JobTimeoutError with comma-joined
+    pending ids and elapsed_s populated. Drives L831-832 in `wait_for_jobs`."""
+    mock_backend.get("/v1/jobs/A").mock(return_value=_pending_response())
+    mock_backend.get("/v1/jobs/B").mock(return_value=_pending_response())
+    client = HyperAPIClient(
+        api_key="hk_test_multi",
+        base_url="http://test.local",
+        poll_interval=0.0,
+        poll_timeout=10.0,
+        poll_transient_retry_delay=0.0,
+        poll_max_transient_retries=0,
+    )
+    job_a = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="parse")
+    job_b = Job(job_id="B", status="pending", poll_url="/v1/jobs/B", op="extract")
+
+    with pytest.raises(JobTimeoutError) as ei:
+        client.wait_for_jobs([job_a, job_b], timeout=0.05, interval=0.01)
+    # Both ids must appear, comma-joined.
+    assert ei.value.job_id == "A,B"
+    assert ei.value.elapsed_s >= 0.0
+    client.close()
+
+
 def test_failed_job_message_includes_http_status(mock_backend, client):
     """str(e) on a failed-job exception must include the HTTP status — support
     tickets quote the message verbatim, so it should be self-describing."""

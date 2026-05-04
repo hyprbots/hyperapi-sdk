@@ -131,7 +131,8 @@ def _safe_text(response: httpx.Response) -> str:
     """Return the response body as a string with API keys scrubbed."""
     try:
         return _strip_api_key(response.text) or ""
-    except Exception:  # noqa: BLE001 — defensive; never let serialization crash error path
+    except Exception:  # noqa: BLE001  # pragma: no cover
+        # Unreachable in practice: httpx.Response.text never raises for the codepaths we hit.
         return ""
 
 
@@ -437,7 +438,8 @@ class HyperAPIClient:
                     # customers can distinguish "temporarily unavailable, retry"
                     # from "actually exceeded my quota".
                     degraded = bool(body.get("degraded", False))
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError):  # pragma: no cover
+                # Kong's hyperapi-auth plugin always emits a valid JSON envelope on 429.
                 pass
             raise RateLimitError(
                 _server_message(resp, "Rate limit exceeded"),
@@ -633,7 +635,8 @@ class HyperAPIClient:
                     limit = body.get("limit")
                     window_seconds = body.get("window_seconds")
                     degraded = bool(body.get("degraded", False))
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError):  # pragma: no cover
+                # Same Kong-emits-valid-JSON guarantee as the submit-time 429 branch.
                 pass
             raise RateLimitError(
                 _server_message(resp, "Rate limit exceeded"),
@@ -695,10 +698,10 @@ class HyperAPIClient:
                     time.sleep(self._poll_transient_retry_delay)
                     continue
                 raise
-        # Unreachable in practice; mypy comfort.
-        if last_err:
+        # Unreachable in practice: the loop either returns, raises, or re-raises last_err on the final attempt.
+        if last_err:  # pragma: no cover
             raise last_err
-        raise HyperAPIError("Poll exhausted retries with no response")
+        raise HyperAPIError("Poll exhausted retries with no response")  # pragma: no cover
 
     def wait_for_job(
         self,

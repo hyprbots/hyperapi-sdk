@@ -137,6 +137,61 @@ def test_submit_extract_returns_job_no_polling(mock_backend, client, tiny_pdf):
     assert not poll_route.called
 
 
+def test_extract_submit_402_insufficient_credits_raises(mock_backend, client, tiny_pdf):
+    """A 402 on the per-op submit POST surfaces as the per-op error class
+    (ExtractError here) with the billing-URL hint baked into the message."""
+    _seed_presigned(mock_backend)
+    mock_backend.post("/v1/extract").mock(
+        return_value=httpx.Response(402, json={"message": "Insufficient credits"}),
+    )
+
+    with pytest.raises(ExtractError) as ei:
+        client.extract(tiny_pdf)
+    assert ei.value.status_code == 402
+    assert "billing" in str(ei.value).lower() or "credits" in str(ei.value).lower()
+
+
+def test_extract_submit_408_service_deadline_raises(mock_backend, client, tiny_pdf):
+    """408 from the upstream service translates into the per-op error class."""
+    _seed_presigned(mock_backend)
+    mock_backend.post("/v1/extract").mock(
+        return_value=httpx.Response(408, json={"message": "Service deadline exceeded"}),
+    )
+
+    with pytest.raises(ExtractError) as ei:
+        client.extract(tiny_pdf)
+    assert ei.value.status_code == 408
+
+
+def test_extract_submit_403_forbidden_raises_generic_hyperapi_error(mock_backend, client, tiny_pdf):
+    """A 403 on submit raises the generic HyperAPIError — it's a policy/IAM problem."""
+    from hyperapi import HyperAPIError
+
+    _seed_presigned(mock_backend)
+    mock_backend.post("/v1/extract").mock(
+        return_value=httpx.Response(403, json={"message": "Forbidden by org policy"}),
+    )
+
+    with pytest.raises(HyperAPIError) as ei:
+        client.extract(tiny_pdf)
+    assert ei.value.status_code == 403
+
+
+def test_extract_submit_request_error_raises_extract_error(mock_backend, client, tiny_pdf):
+    """A bare httpx.RequestError on the submit POST (DNS / connect-reset)
+    must be caught and surface as the per-op error class with the request_id
+    we generated on the way out."""
+    _seed_presigned(mock_backend)
+    mock_backend.post("/v1/extract").mock(
+        side_effect=httpx.RequestError("dns failed"),
+    )
+
+    with pytest.raises(ExtractError) as ei:
+        client.extract(tiny_pdf)
+    assert "Request failed" in str(ei.value)
+    assert ei.value.request_id
+
+
 def test_extract_per_call_timeout_raises_job_timeout(mock_backend, client, tiny_pdf):
     """Per-call poll_timeout overrides constructor — useful for fast-fail."""
     _seed_presigned(mock_backend)

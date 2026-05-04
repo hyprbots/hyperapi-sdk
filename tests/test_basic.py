@@ -103,6 +103,53 @@ def test_exception_message_redacts_api_keys():
     assert "hk_***redacted" in str(err)
 
 
+# ── Tier-3 polish: _strip_api_key regex coverage ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw, must_not_contain, must_contain",
+    [
+        # Test-prefix keys are redacted just like live-prefix keys.
+        (
+            "Bad key hk_test_abcdefgh1234",
+            ["hk_test_abcdefgh1234"],
+            ["hk_***redacted"],
+        ),
+        # Both live and test keys in the same message — both must be redacted.
+        (
+            "Tried hk_live_aaa111 then hk_test_bbb222 — both rejected",
+            ["hk_live_aaa111", "hk_test_bbb222"],
+            ["hk_***redacted"],
+        ),
+        # Punctuation that immediately follows the key (period, comma) must
+        # not be eaten by the regex — it's part of the surrounding sentence,
+        # not the key. The current pattern stops at non-`[A-Za-z0-9_-]` chars.
+        (
+            "key=hk_live_abc123.",
+            ["hk_live_abc123"],
+            ["hk_***redacted", "."],
+        ),
+        # Keys can contain underscores and hyphens internally — the regex must
+        # eat the full body, not stop at the first `_` or `-`.
+        (
+            "Use hk_live_abc-123_xyz now",
+            ["hk_live_abc-123_xyz"],
+            ["hk_***redacted"],
+        ),
+    ],
+    ids=["test_prefix", "multiple_keys", "punctuation_after_key", "internal_dash_underscore"],
+)
+def test_strip_api_key_redaction(raw, must_not_contain, must_contain):
+    from hyperapi.exceptions import _strip_api_key
+
+    scrubbed = _strip_api_key(raw)
+    assert scrubbed is not None
+    for needle in must_not_contain:
+        assert needle not in scrubbed, f"{needle!r} should have been redacted from {scrubbed!r}"
+    for needle in must_contain:
+        assert needle in scrubbed, f"{needle!r} should remain in {scrubbed!r}"
+
+
 # ── Client constructor ──────────────────────────────────────────────────
 
 
@@ -292,6 +339,27 @@ def test_headers_async_mode_sets_x_async_true():
     headers = client._get_headers(async_mode=True)
     assert headers["X-Async"] == "true"
     client.close()
+
+
+# ── Helpers: _parse_retry_after edge cases ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("", 60),               # falsy — falls through to default
+        (None, 60),             # falsy — falls through to default
+        ("not-a-number", 60),   # ValueError on int() — falls through to default
+        ("12", 12),             # ordinary positive integer
+        ("0", 0),               # zero is a legitimate "retry now" hint
+        ("-5", 0),              # max(0, ...) clamps negatives
+    ],
+    ids=["empty", "none", "garbage", "positive", "zero", "negative_clamped"],
+)
+def test_parse_retry_after_edge_cases(raw, expected):
+    from hyperapi.client import _parse_retry_after
+
+    assert _parse_retry_after(raw) == expected
 
 
 def test_job_dataclass_shape():

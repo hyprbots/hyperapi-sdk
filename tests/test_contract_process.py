@@ -108,3 +108,44 @@ def test_process_extract_failure_surfaces_extract_error(mock_backend, client, ti
 
     with pytest.raises(ExtractError):
         client.process(tiny_pdf)
+
+
+# ── Coverage: _submit_via_doc_key error paths (used only by process()) ──────
+
+
+def test_process_submit_timeout_raises_504(mock_backend, client, tiny_pdf):
+    """An httpx.TimeoutException on the parse-leg submit (which goes through
+    _submit_via_doc_key) translates into the per-op error class with status_code=504."""
+    _seed_upload(mock_backend)
+    mock_backend.post("/v1/parse").mock(side_effect=httpx.TimeoutException("timeout"))
+
+    with pytest.raises(ParseError) as ei:
+        client.process(tiny_pdf)
+    assert ei.value.status_code == 504
+    assert ei.value.request_id
+
+
+def test_process_submit_request_error_raises_parse_error(mock_backend, client, tiny_pdf):
+    """A bare httpx.RequestError on the parse-leg submit surfaces as ParseError."""
+    _seed_upload(mock_backend)
+    mock_backend.post("/v1/parse").mock(side_effect=httpx.RequestError("connection reset"))
+
+    with pytest.raises(ParseError) as ei:
+        client.process(tiny_pdf)
+    assert "Request failed" in str(ei.value)
+    assert ei.value.request_id
+
+
+def test_process_submit_unexpected_status_raises(mock_backend, client, tiny_pdf):
+    """A 500 from the parse-leg submit (no well-known mapping, just an upstream
+    crash) falls through to the generic non-(200,202) branch and surfaces as
+    ParseError carrying the server message + status_code."""
+    _seed_upload(mock_backend)
+    mock_backend.post("/v1/parse").mock(
+        return_value=httpx.Response(500, json={"message": "parse pipeline crashed"}),
+    )
+
+    with pytest.raises(ParseError) as ei:
+        client.process(tiny_pdf)
+    assert ei.value.status_code == 500
+    assert "parse pipeline crashed" in str(ei.value)
