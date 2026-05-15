@@ -100,6 +100,12 @@ print(result["data"]["line_items"])      # Validated line items
 print(result["data"]["total"])           # "$1,800.00"
 ```
 
+> **Test keys (`hk_test_…`) are admin-issued only.** They get a 1,000 req/min
+> ceiling and skip billing entirely (no charges, no usage-export rows), which
+> is why they aren't a self-serve developer feature. If your CI needs a
+> non-billable smoke-test key, contact your platform admin. SDK users
+> integrating with production should default to `hk_live_…`.
+
 ## Two-Step Pipeline
 
 For more control, use parse and extract separately:
