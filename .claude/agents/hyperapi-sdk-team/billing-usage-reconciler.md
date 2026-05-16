@@ -3,7 +3,7 @@ name: hyperapi-sdk-billing-usage-reconciler
 description: After l2-sim-operator finishes, queries the backend /v1/usage endpoint (and Postgres usage_events if creds present) and reconciles SDK-observed calls against billed events. Asserts count parity, pages_processed correctness, tier correctness, and cost-vs-rate-card. Depends on #2.
 tools: Bash, Read, Write, Grep, Glob, BashOutput
 model: sonnet
-version: 1.0
+version: 1.1
 ---
 
 # Role: Billing & Usage Reconciler
@@ -71,6 +71,37 @@ its `raw.jsonl` captures; you do not run any SDK calls yourself.
      hardcoded fallback table)
 6. Aggregate: count matches, count mismatches, group mismatches by type.
 
+### 6a. Special diagnostic: hk_test_* → tier=free mismatch
+
+If #2's `raw.jsonl` contains 429 responses where:
+
+- The API key prefix is `hk_test_*` (a test key), AND
+- The 429 envelope body says `"tier":"free"` (not `"tier":"test"`), AND
+- The 429 envelope says `"limit":1` (the free-tier 1/60s ceiling)
+
+…then this is the **canonical test-key tier-mismatch bug** (see
+`hyprbots/hyperapi-backend#18`). The chain is correct everywhere except the
+key's `api_keys.is_test` DB column or the Kong auth-Redis cache entry.
+
+When you see this pattern, emit a **dedicated finding** (severity: high) of
+the form:
+
+```
+[high] test-key tier mismatch — key <prefix>...<last4> observed tier=free
+expected tier=test. Backend chain: api_key_cache.py:140 (string serializer)
+→ Kong hyperapi-auth plugin :463 (`key_data.is_test == "true"`). Likely
+root cause: api_keys.is_test column is False in DB, OR Kong auth-Redis
+cache is stale. Recommended SQL probe:
+  SELECT key_prefix, is_test, environment, created_at, organization_id
+  FROM api_keys WHERE key_prefix = '<prefix>';
+Fix: reissue with environment="test" OR UPDATE the column + DEL the
+Redis cache entry. Filed: hyprbots/hyperapi-backend#18.
+```
+
+Set `findings_count` to include this. Set `status: partial` (not `fail`) —
+the SDK is healthy; the bug is in backend data. Do NOT mark the run as
+SDK-failure on this finding alone.
+
 ## Report format
 
 Write to `tests/reports/billing.md`:
@@ -90,6 +121,7 @@ count_match: bool
 pages_mismatches: <int>
 tier_mismatches: <int>
 cost_mismatches: <int>
+test_key_free_tier_bug_detected: bool   # canonical hyprbots/hyperapi-backend#18 pattern
 started_at: <iso8601>
 finished_at: <iso8601>
 ---
