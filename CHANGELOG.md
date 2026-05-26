@@ -5,6 +5,83 @@ All notable changes to `hyperapi-sdk` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-26
+
+Async client. No breaking changes — purely additive.
+
+### Added
+
+- **`AsyncHyperAPIClient`** — an `async`/`await` twin of `HyperAPIClient` for
+  use inside event-loop-based runtimes (FastAPI, agent loops, Discord/Slack
+  bots, polyglot microservices). Same constructor signature, same method
+  names, same `Job` dataclass, same typed exceptions — swap the import and
+  prefix calls with `await`.
+
+  ```python
+  import asyncio
+  from hyperapi import AsyncHyperAPIClient
+
+  async def main():
+      async with AsyncHyperAPIClient() as client:
+          result = await client.extract("invoice.pdf")
+          print(result)
+
+  asyncio.run(main())
+  ```
+
+- **`examples/async_quickstart.py`** — standalone script + FastAPI integration
+  snippet showing the recommended one-client-per-app + lifespan-close pattern.
+- **`pytest-asyncio>=0.23`** added to the `[dev]` optional dependencies; pytest
+  `asyncio_mode = "auto"` enabled so async test functions don't need per-test
+  markers.
+- **Async-aware test fixtures** in `tests/conftest.py`: `async_client` and
+  `slow_poll_async_client` mirror the existing sync fixtures.
+- **Full mirror of the L1 mocked contract suite** as async tests
+  (`tests/test_async_*.py`) — every sync `test_contract_*.py` has an async
+  twin. `respx` mocks the underlying `httpx` transport, so the same fixtures
+  work for both clients.
+
+### Notes
+
+- The async client uses `httpx.AsyncClient` — no new runtime dependency
+  (`httpx>=0.25` already provides both).
+- `User-Agent` carries an `-async` suffix
+  (`hyperapi-sdk-python/0.2.0-async (httpx/…; Python/…)`) so backend log
+  analytics can distinguish sync vs async traffic without sniffing other
+  signals.
+- `AsyncHyperAPIClient.wait_for_jobs(...)` uses `asyncio.gather` under the
+  hood — true concurrent polling on one event loop. The first failure raises
+  and cancels the rest; the sync client's "comma-joined pending job_ids"
+  shape on timeout becomes a single job_id under async because gather raises
+  immediately on the first `JobTimeoutError`.
+- The internal MCP server (`services/hyperapi-mcp/server/hyperapi_client.py`)
+  still ships its own `aiohttp`-based client — migrating it to the new
+  `AsyncHyperAPIClient` is a follow-up cleanup, not blocking 0.2.0.
+
+### Fixed
+
+- **401 and 402 error messages are now environment-aware.** Previously
+  hardcoded `https://apis.hyperbots.com/dashboard` regardless of the
+  client's `base_url` — confusing for customers on staging, on-prem, or
+  self-hosted deployments. The messages now reference `self.base_url`
+  ("Invalid API key for `<base_url>`. Check your HyperAPI dashboard for the
+  correct key.") and never mention the prod URL by name. Applies to both
+  `HyperAPIClient` and `AsyncHyperAPIClient`.
+
+### Compatibility
+
+- **No breaking changes.** `client.py` is essentially v0.1.0 + the
+  env-aware error message fix above. Existing imports (`HyperAPIClient`,
+  `Job`, every exception class) work unchanged.
+- The only public surface added is `AsyncHyperAPIClient`, re-exported from
+  the top-level `hyperapi` package.
+- Internal helpers (`_OP_TO_ERROR`, `_parse_retry_after`, `_safe_text`,
+  `_server_message`, `_request_id_of`) are now imported by `async_client.py`
+  from `client.py` — they remain leading-underscore-private and not part of
+  the public API.
+
+[0.2.0]: https://github.com/hyprbots/hyperapi-sdk/releases/tag/v0.2.0
+
 ## [0.1.0] — 2026-05-03
 
 First public release.

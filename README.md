@@ -140,6 +140,78 @@ client.extract(file)
 
 This is the pattern used by [LlamaParse](https://docs.llamaindex.ai/en/stable/llama_cloud/llama_parse/) and [Reducto](https://docs.reducto.ai/) for the same reason.
 
+## Async client (new in 0.2.0)
+
+`AsyncHyperAPIClient` is an `async`/`await` twin of `HyperAPIClient` for code that already runs inside an event loop — FastAPI / Starlette / aiohttp servers, LLM agent loops, Discord/Slack bots, and any high-concurrency processor that fans out with `asyncio.gather`. Same constructor signature, same method names, same `Job` dataclass, same typed exceptions — swap the import and add `await`.
+
+```python
+import asyncio
+from hyperapi import AsyncHyperAPIClient
+
+async def main():
+    async with AsyncHyperAPIClient() as client:    # reads HYPERAPI_KEY
+        result = await client.extract("invoice.pdf")
+        print(result)
+
+asyncio.run(main())
+```
+
+### When to pick which client
+
+> **If your code already says `async def` somewhere — use the async client. Otherwise, use sync.**
+
+| You're building… | Use |
+|---|---|
+| Python script / Jupyter notebook / Airflow task / Celery worker | `HyperAPIClient` (sync) |
+| FastAPI / Starlette / aiohttp service | `AsyncHyperAPIClient` |
+| LLM agent loop that interleaves multiple `await` calls | `AsyncHyperAPIClient` |
+| Discord / Slack / Telegram bot | `AsyncHyperAPIClient` |
+| Fan-out across many docs in one process | `AsyncHyperAPIClient` + `asyncio.gather` |
+
+A sync call inside an async event loop blocks the **entire** event loop (not just your handler) for the duration of the call. For HyperAPI's multi-minute extracts that means every other in-flight request stalls. The async client yields between polls so the loop stays responsive.
+
+### FastAPI integration
+
+One client per application, reused across requests, closed on shutdown via the lifespan handler:
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, UploadFile
+from hyperapi import AsyncHyperAPIClient
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.hyperapi = AsyncHyperAPIClient()        # reads HYPERAPI_KEY
+    try:
+        yield
+    finally:
+        await app.state.hyperapi.aclose()             # release connection pool
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/extract")
+async def extract_endpoint(file: UploadFile):
+    # save UploadFile to a tmp path, then:
+    return await app.state.hyperapi.extract(tmp_path)
+```
+
+A runnable version (standalone CLI + FastAPI snippet) lives at [`examples/async_quickstart.py`](examples/async_quickstart.py).
+
+### Concurrent fan-out
+
+`asyncio.gather` fans out hundreds of in-flight ops on one event loop — no thread pool, no GIL contention:
+
+```python
+async with AsyncHyperAPIClient() as client:
+    results = await asyncio.gather(*(client.extract(p) for p in paths))
+```
+
+### Notes on parity
+
+- **`wait_for_jobs([...])`** uses `asyncio.gather` under the hood — true concurrent polling. On timeout the first job to fail raises a `JobTimeoutError` and the rest are cancelled. (The sync client's "comma-joined `'A,B'` job_id" shape is async-specific divergence — see the CHANGELOG.)
+- **Submit-and-poll is identical** — `AsyncHyperAPIClient.submit_extract(...)` returns the same `Job` dataclass; `await client.wait_for_job(job)` blocks the coroutine without blocking the event loop.
+- **`User-Agent`** carries an `-async` suffix so backend analytics can split traffic by client type.
+
 ### Advanced: explicit submit + poll
 
 If you want fire-and-forget semantics (e.g., to integrate with your own job queue or render a custom progress UI), use `submit_<op>(...)` to get a `Job` handle, then `wait_for_job(...)` or `get_job(...)` yourself:
@@ -185,7 +257,7 @@ result = client.extract("scan.pdf", poll_timeout=600, poll_interval=5)
 
 ## API Reference
 
-### `HyperAPIClient`
+### `HyperAPIClient` and `AsyncHyperAPIClient`
 
 ```python
 client = HyperAPIClient(
@@ -196,13 +268,21 @@ client = HyperAPIClient(
     poll_timeout: float = 1800.0,       # max wall-clock seconds to wait for a job
     poll_max_transient_retries: int = 3,# transient-5xx retries on a single poll
 )
+
+# Async equivalent — identical constructor signature, every method is `async def`:
+client = AsyncHyperAPIClient(api_key=..., base_url=..., ...)
+# Use as an async context manager so the httpx.AsyncClient pool is released:
+async with AsyncHyperAPIClient() as client:
+    result = await client.extract("invoice.pdf")
 ```
 
 ### Methods
 
+Every method below exists on both clients with identical signatures. On `AsyncHyperAPIClient` each is a coroutine — prefix with `await`.
+
 | Method | Pipeline | Description |
 |--------|----------|-------------|
-| `upload_document(file)` | presigned S3 | Upload file, returns `document_key` (valid 24 h). Direct sync. |
+| `upload_document(file)` | presigned S3 | Upload file, returns `document_key` (valid 24 h). |
 | `parse(file)` | OCR only | Parse document into structured text. Submit + poll under the hood. |
 | `extract(file)` | OCR → extract-service | Extract structured fields with validation. Submit + poll. |
 | `classify(file)` | OCR → classifier | Classify document type. Submit + poll. |
@@ -211,7 +291,9 @@ client = HyperAPIClient(
 | `submit_parse / submit_extract / submit_classify / submit_split` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
 | `get_job(job_id)` | — | One-shot status poll. No waiting, no retry. |
 | `wait_for_job(job, *, timeout=None, interval=None)` | — | Block until the job completes, fails, or `timeout` elapses. |
-| `wait_for_jobs([job1, job2], …)` | — | Round-robin poll across multiple jobs concurrently. |
+| `wait_for_jobs([job1, job2], …)` | — | Poll multiple jobs concurrently. Sync: round-robin loop. Async: `asyncio.gather`. |
+| **Lifecycle (sync)** `close()` / `with HyperAPIClient() as client:` | — | Release HTTP connection pool. |
+| **Lifecycle (async)** `await aclose()` / `async with AsyncHyperAPIClient() as client:` | — | Release HTTP connection pool. |
 
 ### Common Parameters
 
@@ -244,8 +326,9 @@ Every exception carries `status_code` (HTTP status if applicable) and `request_i
 
 ## Operational Notes
 
-### Threading
-`HyperAPIClient` is **not thread-safe** (httpx.Client isn't either). Construct one client per worker thread, or use `threading.local()`.
+### Threading and concurrency
+- `HyperAPIClient` is **not thread-safe** (httpx.Client isn't either). Construct one client per worker thread, or use `threading.local()`.
+- `AsyncHyperAPIClient` **is coroutine-safe** — a single instance can be shared across many concurrent `asyncio.gather` operations. Construct one client per application, not per request.
 
 ### Corporate proxy / custom CA
 Standard httpx env vars are honored — `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`. To pin a custom CA bundle:

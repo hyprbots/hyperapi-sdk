@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperapi import HyperAPIClient
+from hyperapi import AsyncHyperAPIClient, HyperAPIClient
 
 
 TEST_BASE_URL = "http://test.local"
@@ -72,6 +72,38 @@ def slow_poll_client():
     )
     yield c
     c.close()
+
+
+# ── Async fixtures (mirror the sync ones; asyncio_mode = "auto" picks these up) ─
+
+
+@pytest.fixture
+async def async_client():
+    """Async client with poll_interval=0 + small poll_timeout so tests don't actually sleep."""
+    c = AsyncHyperAPIClient(
+        api_key=TEST_API_KEY,
+        base_url=TEST_BASE_URL,
+        poll_interval=0.0,
+        poll_timeout=5.0,
+        poll_max_transient_retries=2,
+    )
+    yield c
+    await c.aclose()
+
+
+@pytest.fixture
+async def slow_poll_async_client():
+    """Async client with a short positive poll_interval, for tests that need to
+    assert the SDK actually yields between polls."""
+    c = AsyncHyperAPIClient(
+        api_key=TEST_API_KEY,
+        base_url=TEST_BASE_URL,
+        poll_interval=0.05,
+        poll_timeout=5.0,
+        poll_max_transient_retries=2,
+    )
+    yield c
+    await c.aclose()
 
 
 @pytest.fixture

@@ -7,6 +7,7 @@ the caller) so customer requests are never bound by edge timeouts.
 
 import logging
 
+from .async_client import AsyncHyperAPIClient
 from .client import HyperAPIClient, Job
 from .exceptions import (
     AuthenticationError,
@@ -20,7 +21,7 @@ from .exceptions import (
     SplitError,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Library-style logger: silent unless the application configures handlers.
 # Customers opt in with: `logging.getLogger("hyperapi").setLevel(logging.INFO)`.
@@ -28,6 +29,7 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 __all__ = [
     "HyperAPIClient",
+    "AsyncHyperAPIClient",
     "Job",
     "HyperAPIError",
     "AuthenticationError",

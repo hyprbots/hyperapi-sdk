@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperapi-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "HyperAPI Python SDK - Document intelligence APIs (parse, extract, classify, split)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -34,6 +34,7 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.23.0",
     "respx>=0.20.0",
     "ruff==0.8.6",
     "pre-commit>=4.0.0",
@@ -54,6 +55,11 @@ target-version = "py39"
 [tool.ruff.lint]
 select = ["E", "F", "N", "W", "UP"]
 ignore = ["E501"]
+
+[tool.pytest.ini_options]
+# asyncio_mode = "auto" lets async test functions run without per-test
+# @pytest.mark.asyncio decorators — every `async def test_*` is collected.
+asyncio_mode = "auto"
 
 [project.urls]
 Homepage = "https://apis.hyperbots.com"

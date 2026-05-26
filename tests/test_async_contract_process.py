@@ -1,0 +1,145 @@
+"""Async twin of test_contract_process.py.
+
+process() uploads once, submits parse + extract sharing the document_key,
+and polls both concurrently via asyncio.gather. Verifies the same
+shared-upload + concurrent-poll behaviour as the sync version.
+"""
+
+import httpx
+import pytest
+
+from hyperapi import ExtractError, ParseError
+
+
+def _seed_upload(mock_backend, key="doc_proc"):
+    mock_backend.post("/v1/documents/upload").mock(
+        return_value=httpx.Response(200, json={
+            "document_key": key,
+            "upload_url": f"https://s3.local/{key}?sig=x",
+            "expires_in": 600,
+        }),
+    )
+    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
+
+
+async def test_async_process_uploads_once_then_submits_both_legs_async(
+    mock_backend, async_client, tiny_pdf,
+):
+    upload_route = mock_backend.post("/v1/documents/upload").mock(
+        return_value=httpx.Response(200, json={
+            "document_key": "doc_once",
+            "upload_url": "https://s3.local/once?sig=x",
+            "expires_in": 600,
+        }),
+    )
+    s3_route = mock_backend.put("https://s3.local/once?sig=x").mock(
+        return_value=httpx.Response(200),
+    )
+    parse_submit = mock_backend.post("/v1/parse").mock(
+        return_value=httpx.Response(202, json={
+            "job_id": "parse_J", "status": "pending", "poll_url": "/v1/jobs/parse_J",
+        }),
+    )
+    extract_submit = mock_backend.post("/v1/extract").mock(
+        return_value=httpx.Response(202, json={
+            "job_id": "extract_J", "status": "pending", "poll_url": "/v1/jobs/extract_J",
+        }),
+    )
+    mock_backend.get("/v1/jobs/parse_J").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": {"ocr": "Hello world"}},
+    ))
+    mock_backend.get("/v1/jobs/extract_J").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": {"entities": {"foo": "bar"}}},
+    ))
+
+    result = await async_client.process(tiny_pdf)
+
+    parse_body = parse_submit.calls[0].request.read()
+    extract_body = extract_submit.calls[0].request.read()
+    assert b"document_key=doc_once" in parse_body
+    assert b"document_key=doc_once" in extract_body
+
+    assert parse_submit.calls[0].request.headers["X-Async"] == "true"
+    assert extract_submit.calls[0].request.headers["X-Async"] == "true"
+
+    assert upload_route.call_count == 1
+    assert s3_route.call_count == 1
+
+    assert result["ocr"] == "Hello world"
+    assert result["data"] == {"entities": {"foo": "bar"}}
+
+
+async def test_async_process_parse_failure_surfaces_parse_error(
+    mock_backend, async_client, tiny_pdf,
+):
+    _seed_upload(mock_backend)
+    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(202, json={
+        "job_id": "p", "status": "pending", "poll_url": "/v1/jobs/p",
+    }))
+    mock_backend.post("/v1/extract").mock(return_value=httpx.Response(202, json={
+        "job_id": "e", "status": "pending", "poll_url": "/v1/jobs/e",
+    }))
+    mock_backend.get("/v1/jobs/p").mock(return_value=httpx.Response(
+        200, json={"status": "failed", "error": "ocr failed", "error_status_code": 500},
+    ))
+    mock_backend.get("/v1/jobs/e").mock(return_value=httpx.Response(
+        200, json={"status": "pending"},
+    ))
+
+    with pytest.raises(ParseError):
+        await async_client.process(tiny_pdf)
+
+
+async def test_async_process_extract_failure_surfaces_extract_error(
+    mock_backend, async_client, tiny_pdf,
+):
+    _seed_upload(mock_backend)
+    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(202, json={
+        "job_id": "p", "status": "pending", "poll_url": "/v1/jobs/p",
+    }))
+    mock_backend.post("/v1/extract").mock(return_value=httpx.Response(202, json={
+        "job_id": "e", "status": "pending", "poll_url": "/v1/jobs/e",
+    }))
+    mock_backend.get("/v1/jobs/p").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": {"ocr": "ok"}},
+    ))
+    mock_backend.get("/v1/jobs/e").mock(return_value=httpx.Response(
+        200, json={"status": "failed", "error": "extract crashed"},
+    ))
+
+    with pytest.raises(ExtractError):
+        await async_client.process(tiny_pdf)
+
+
+async def test_async_process_submit_timeout_raises_504(mock_backend, async_client, tiny_pdf):
+    _seed_upload(mock_backend)
+    mock_backend.post("/v1/parse").mock(side_effect=httpx.TimeoutException("timeout"))
+
+    with pytest.raises(ParseError) as ei:
+        await async_client.process(tiny_pdf)
+    assert ei.value.status_code == 504
+    assert ei.value.request_id
+
+
+async def test_async_process_submit_request_error_raises_parse_error(
+    mock_backend, async_client, tiny_pdf,
+):
+    _seed_upload(mock_backend)
+    mock_backend.post("/v1/parse").mock(side_effect=httpx.RequestError("connection reset"))
+
+    with pytest.raises(ParseError) as ei:
+        await async_client.process(tiny_pdf)
+    assert "Request failed" in str(ei.value)
+    assert ei.value.request_id
+
+
+async def test_async_process_submit_unexpected_status_raises(mock_backend, async_client, tiny_pdf):
+    _seed_upload(mock_backend)
+    mock_backend.post("/v1/parse").mock(
+        return_value=httpx.Response(500, json={"message": "parse pipeline crashed"}),
+    )
+
+    with pytest.raises(ParseError) as ei:
+        await async_client.process(tiny_pdf)
+    assert ei.value.status_code == 500
+    assert "parse pipeline crashed" in str(ei.value)

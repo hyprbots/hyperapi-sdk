@@ -1,198 +1,129 @@
-"""HyperAPI Client.
+"""HyperAPI Async Client.
 
-Architecture
-============
-Every long-running pipeline op (`parse`, `extract`, `classify`, `split`,
-`process`) goes through **submit + poll** under the hood:
+Async-native twin of :class:`hyperapi.client.HyperAPIClient`. The HTTP contract
+is identical (submit + poll, same envelopes, same error mapping); the only
+difference is that every public method is a coroutine and the polling loop
+yields to the event loop via ``asyncio.sleep`` instead of blocking the thread
+with ``time.sleep``.
 
-    1. POST /v1/<op>           with X-Async: true  →  202 {job_id, poll_url}
-    2. GET  /v1/jobs/{job_id}  (every poll_interval) →  {status, result?, error?}
+Use this client when your code already runs inside an event loop:
 
-This keeps every individual HTTP request short (sub-second), so the SDK is
-**timeout-immune** at any edge — works behind CloudFront's 30 s
-`origin_response_timeout`, Cloudflare's 100 s, a raw ALB, or no edge at all.
-The convenience methods (``parse(...)``, ``extract(...)``, ...) hide the
-``job_id`` from callers; advanced users who want fire-and-forget or custom
-progress UIs can call ``submit_<op>(...)`` and ``wait_for_job(...)`` directly.
+* FastAPI / Starlette / aiohttp request handlers
+* LLM agent loops that interleave HyperAPI with other ``await`` calls
+* Discord / Slack / Telegram bots
+* High-concurrency processors that fan out with ``asyncio.gather``
 
-Pipeline (server-side, unchanged):
+For batch scripts, Airflow tasks, Celery workers, and Jupyter notebooks the
+sync :class:`hyperapi.client.HyperAPIClient` is the right choice — async adds
+boilerplate without benefit in those contexts.
 
-    Stage 1 — OCR (always runs)
-        Upload → doc-processor /convert → page images
-        → OCR engine (paddle-ocr or doc-intent) → full_text + page_texts
+Quickstart
+==========
 
-    Stage 2 — Task-specific LLM (skipped for parse)
-        parse:      OCR text only (no Stage 2)
-        extract:    OCR output → extract-service /v2/extract
-        classify:   OCR output → classifier-splitter /v2/classify
-        split:      OCR output → classifier-splitter /v2/split
+::
 
-OCR engines
------------
-paddle      PaddleOCR (default) — fast, high-throughput production OCR
-doc-intent  Doc-Intent VLM — vision-language model, better on complex layouts
+    import asyncio
+    from hyperapi import AsyncHyperAPIClient
+
+    async def main():
+        async with AsyncHyperAPIClient(api_key="hk_live_…") as client:
+            result = await client.extract("invoice.pdf")
+            print(result["data"])
+
+    asyncio.run(main())
+
+Inside FastAPI::
+
+    from fastapi import FastAPI, UploadFile
+    from hyperapi import AsyncHyperAPIClient
+
+    app = FastAPI()
+    client = AsyncHyperAPIClient()  # reads HYPERAPI_KEY from env
+
+    @app.post("/extract")
+    async def extract(file: UploadFile):
+        # Save UploadFile to a tmp path, then:
+        return await client.extract(tmp_path)
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        await client.aclose()
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import sys
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from collections.abc import Iterable
 
 import httpx
 
+# Reuse the sync client's pure helpers + constants + Job + op→error registry.
+# Importing rather than duplicating keeps the two clients behaviorally aligned
+# and means bug fixes in error parsing / scrubbing land in both.
+from .client import (
+    CONTENT_TYPES,
+    Job,
+    OCREngine,
+    _DEFAULT_POLL_INTERVAL_S,
+    _DEFAULT_POLL_MAX_TRANSIENT_RETRIES,
+    _DEFAULT_POLL_TIMEOUT_S,
+    _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S,
+    _DEFAULT_TIMEOUT,
+    _OP_TO_ERROR,
+    _parse_retry_after,
+    _request_id_of,
+    _server_message,
+)
 from .exceptions import (
     AuthenticationError,
-    ClassifyError,
     DocumentUploadError,
-    ExtractError,
     HyperAPIError,
     JobTimeoutError,
-    ParseError,
     RateLimitError,
-    SplitError,
     _strip_api_key,
 )
-
-
-CONTENT_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".tiff": "image/tiff",
-    ".tif": "image/tiff",
-    ".pdf": "application/pdf",
-}
-
-OCREngine = Literal["paddle", "doc-intent"]
-
-# Per-HTTP-call defaults — single submit / single poll, NOT total job time.
-_DEFAULT_TIMEOUT = 120.0
-
-# Polling defaults — match the playground (hyperapi/src/app/(dashboard)/dashboard/playground/page.tsx)
-# so operational characteristics are identical to what the team has already validated in production.
-_DEFAULT_POLL_INTERVAL_S = 3.0           # POLL_INTERVAL_MS = 3000 in the playground
-_DEFAULT_POLL_TIMEOUT_S = 1800.0         # HARD_TIMEOUT_MS = 1_800_000
-_DEFAULT_POLL_MAX_TRANSIENT_RETRIES = 3
-_DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S = 0.5
 
 
 logger = logging.getLogger("hyperapi")
 
 
-# Ops the SDK can submit asynchronously. Used as the per-op error class registry.
-_OP_TO_ERROR: dict[str, type] = {
-    "parse": ParseError,
-    "extract": ExtractError,
-    "classify": ClassifyError,
-    "split": SplitError,
-}
+class AsyncHyperAPIClient:
+    """Async client for the HyperAPI document intelligence platform.
 
+    Mirrors :class:`hyperapi.client.HyperAPIClient` one-to-one — same
+    constructor signature, same method names, same return shapes, same typed
+    exceptions. Pick this client when your runtime is async (FastAPI, agent
+    loops, asyncio-based services); otherwise use the sync client.
 
-@dataclass
-class Job:
-    """Handle returned by ``client.submit_<op>(...)``.
-
-    Pass to :py:meth:`HyperAPIClient.wait_for_job` to block until the job is
-    done, or to :py:meth:`HyperAPIClient.get_job` for a single-shot status
-    check. The ``op`` field is what tells :py:meth:`wait_for_job` which typed
-    exception to raise on ``status: "failed"``.
-    """
-
-    job_id: str
-    status: str
-    poll_url: str
-    op: str  # "parse" | "extract" | "classify" | "split"
-    submitted_at: float = field(default_factory=time.monotonic)
-
-
-# ── Helpers (module-private) ────────────────────────────────────────────────
-
-def _parse_retry_after(value: str | None, *, default: int = 60) -> int:
-    """Parse a `Retry-After` header. Server emits seconds-since-now."""
-    if not value:
-        return default
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_text(response: httpx.Response) -> str:
-    """Return the response body as a string with API keys scrubbed."""
-    try:
-        return _strip_api_key(response.text) or ""
-    except Exception:  # noqa: BLE001  # pragma: no cover
-        # Unreachable in practice: httpx.Response.text never raises for the codepaths we hit.
-        return ""
-
-
-def _server_message(response: httpx.Response, fallback: str) -> str:
-    """Pull a human-readable message out of a server response.
-
-    Prefers the JSON ``message`` field when present, falls back to the body
-    text, and finally to the supplied fallback. Always API-key-scrubbed.
-    """
-    body = _safe_text(response)
-    try:
-        parsed = json.loads(body)
-        if isinstance(parsed, dict):
-            for key in ("message", "detail", "error"):
-                if key in parsed and parsed[key]:
-                    return str(parsed[key])
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return body or fallback
-
-
-def _request_id_of(response: httpx.Response, sent: str | None = None) -> str | None:
-    """Best-effort extraction of the request id we should attach to errors."""
-    return response.headers.get("x-request-id") or response.headers.get("x-correlation-id") or sent
-
-
-# ── Client ─────────────────────────────────────────────────────────────────
-
-class HyperAPIClient:
-    """Client for the HyperAPI document intelligence platform.
-
-    Quickstart::
-
-        from hyperapi import HyperAPIClient
-
-        client = HyperAPIClient(api_key="hk_live_…")
-        result = client.extract("invoice.pdf")
-        print(result["result"])
-        client.close()
-
-    Or as a context manager::
-
-        with HyperAPIClient(api_key="hk_live_…") as client:
-            print(client.parse("invoice.pdf")["result"]["ocr"])
-
-    Threading
+    Lifecycle
     ---------
-    ``HyperAPIClient`` is **not** thread-safe (httpx.Client isn't either).
-    Construct one client per thread, or use ``threading.local()``.
+    The underlying :class:`httpx.AsyncClient` holds a connection pool that
+    must be released. Use as an async context manager::
 
-    Polling
-    -------
-    Long-running ops (parse/extract/classify/split/process) submit to the
-    server with ``X-Async: true`` and poll ``/v1/jobs/{job_id}`` until done.
-    Each individual HTTP request is sub-second so the SDK is edge-timeout
-    immune. Override the polling cadence per-call:
+        async with AsyncHyperAPIClient() as client:
+            ...
 
-        client.extract("scan.pdf", poll_timeout=600, poll_interval=5)
+    Or close manually::
 
-    Or globally on the constructor (defaults match the platform playground).
+        client = AsyncHyperAPIClient()
+        try:
+            ...
+        finally:
+            await client.aclose()
+
+    Concurrency
+    -----------
+    A single ``AsyncHyperAPIClient`` instance can be shared across many
+    concurrent ``asyncio.gather`` operations — ``httpx.AsyncClient`` is
+    coroutine-safe. Construct one client per application, not per request.
     """
 
     def __init__(
@@ -206,30 +137,10 @@ class HyperAPIClient:
         poll_max_transient_retries: int = _DEFAULT_POLL_MAX_TRANSIENT_RETRIES,
         poll_transient_retry_delay: float = _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S,
     ):
-        """Initialize a HyperAPI client.
+        """Initialize an async HyperAPI client.
 
-        Args:
-            api_key: API key for authentication. Falls back to ``HYPERAPI_KEY``
-                environment variable. Required.
-            base_url: API base URL. Falls back to ``HYPERAPI_URL`` env var,
-                then ``https://apis.hyperbots.com``.
-            timeout: Per-HTTP-call timeout in seconds (NOT the total time
-                allowed for an entire job — see ``poll_timeout`` for that).
-                Default 120 s, which generously covers a single submit or
-                a single status poll on production traffic.
-            poll_interval: Seconds between successive polls of
-                ``/v1/jobs/{id}``. Default 3.0 (matches the platform
-                playground).
-            poll_timeout: Total wall-clock seconds the SDK will wait for a
-                single job to complete. Raises ``JobTimeoutError`` past this.
-                Default 1800.0 (30 min, matches playground).
-            poll_max_transient_retries: How many times to retry a single
-                ``/v1/jobs/{id}`` GET if it returns 5xx or has a connection
-                error. Default 3. Fast-fails on 401/404.
-            poll_transient_retry_delay: Seconds to sleep between transient-retry
-                attempts on a single poll. Default 0.5; bump this if your
-                network is bursty enough that 3 retries in 1.5 s isn't enough
-                breathing room.
+        Args mirror :class:`hyperapi.client.HyperAPIClient` exactly — see
+        that class for full descriptions.
         """
         self.api_key = api_key or os.environ.get("HYPERAPI_KEY")
         if not self.api_key:
@@ -249,16 +160,14 @@ class HyperAPIClient:
         self._poll_transient_retry_delay = poll_transient_retry_delay
 
         from . import __version__  # local import to avoid circular at module load
-        # User-Agent includes the httpx + Python versions so backend log analytics
-        # and customer firewalls can identify the underlying HTTP stack + runtime
-        # without sniffing other headers. Format mirrors the de-facto convention
-        # popularized by the OpenAI / Stripe SDKs.
         py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        # Note the "-async" suffix in the User-Agent so backend analytics can
+        # distinguish sync vs async client usage without sniffing other signals.
         self._user_agent = (
-            f"hyperapi-sdk-python/{__version__} "
+            f"hyperapi-sdk-python/{__version__}-async "
             f"(httpx/{httpx.__version__}; Python/{py_ver})"
         )
-        self._client = httpx.Client(
+        self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={"User-Agent": self._user_agent},
         )
@@ -267,13 +176,16 @@ class HyperAPIClient:
 
     def __repr__(self) -> str:
         tail = self.api_key[-4:] if self.api_key else ""
-        return f"HyperAPIClient(api_key='hk_***{tail}', base_url='{self.base_url}')"
+        return f"AsyncHyperAPIClient(api_key='hk_***{tail}', base_url='{self.base_url}')"
 
     # ── Headers ──────────────────────────────────────────────────────────
 
     def _get_headers(self, *, async_mode: bool = False) -> dict[str, str]:
-        """Per-request headers. Generates a fresh X-Request-ID per call so
-        every request can be correlated end-to-end across the platform."""
+        """Per-request headers. Generates a fresh X-Request-ID per call.
+
+        ``async_mode`` here refers to the HTTP-contract flag (``X-Async: true``)
+        that tells the server to return a job handle, not Python's async/await.
+        """
         headers = {
             "X-API-Key": self.api_key,
             "X-Request-ID": str(uuid.uuid4()),
@@ -300,23 +212,16 @@ class HyperAPIClient:
 
     # ── Upload ───────────────────────────────────────────────────────────
 
-    def upload_document(
+    async def upload_document(
         self,
         file_path: str | Path,
         content_type: str | None = None,
     ) -> str:
         """Upload a document via the presigned-URL flow and return its document_key.
 
-        Performs the two HTTP hops (presigned-URL fetch + S3 PUT) so the
-        returned ``document_key`` can be reused across subsequent calls
-        without re-uploading the file.
-
-        Args:
-            file_path: Path to the file to upload.
-            content_type: MIME type. Auto-detected from the extension if omitted.
-
-        Returns:
-            The ``document_key`` to pass to inference endpoints.
+        Two awaits under the hood: presigned-URL fetch (Kong + auth) and the
+        direct S3 PUT (bypasses Kong). The returned ``document_key`` is reusable
+        across subsequent inference calls without re-uploading.
 
         Raises:
             FileNotFoundError: If the file does not exist.
@@ -335,7 +240,7 @@ class HyperAPIClient:
 
         # Step 1 — get presigned upload URL (goes through Kong + auth)
         try:
-            resp = self._client.post(
+            resp = await self._client.post(
                 f"{self.base_url}/v1/documents/upload",
                 json={"filename": path.name, "content_type": content_type},
                 headers=headers,
@@ -365,14 +270,15 @@ class HyperAPIClient:
         # Step 2 — PUT bytes directly to S3 (bypasses Kong; S3 validates the presigned URL)
         try:
             with open(path, "rb") as f:
-                s3_resp = self._client.put(
-                    upload_url,
-                    content=f.read(),
-                    headers={
-                        "Content-Type": content_type,
-                        "x-amz-server-side-encryption": "AES256",
-                    },
-                )
+                file_bytes = f.read()
+            s3_resp = await self._client.put(
+                upload_url,
+                content=file_bytes,
+                headers={
+                    "Content-Type": content_type,
+                    "x-amz-server-side-encryption": "AES256",
+                },
+            )
         except httpx.RequestError as e:
             raise DocumentUploadError(f"S3 upload failed: {e}", request_id=request_id) from e
 
@@ -403,17 +309,15 @@ class HyperAPIClient:
         """Raise the appropriate typed exception for well-known HTTP statuses.
 
         Returns silently for 200/202 (success) and any other status that the
-        caller wants to handle explicitly.
+        caller wants to handle explicitly. Mirrors the sync client's mapping
+        byte-for-byte.
         """
         sc = resp.status_code
         rid = _request_id_of(resp, request_id)
 
         if sc == 401:
-            # Message references self.base_url so customers on staging / on-prem /
-            # self-hosted deployments aren't told to "go to the prod dashboard" —
-            # the URL pattern points at the environment they actually authenticated
-            # against. Generic "your dashboard" wording stays portable across
-            # deployments that may have different dashboard URL conventions.
+            # Same env-aware behavior as the sync client: reference self.base_url
+            # so customers on staging / on-prem aren't pointed at the prod dashboard.
             raise AuthenticationError(
                 f"Invalid API key for {self.base_url}. "
                 "Check your HyperAPI dashboard for the correct key.",
@@ -438,15 +342,9 @@ class HyperAPIClient:
                 if isinstance(body, dict):
                     tier = body.get("tier")
                     limit = body.get("limit")
-                    # Bug #86 (b): server now emits the sliding-window length so
-                    # callers know "limit per N seconds" rather than guessing RPS.
                     window_seconds = body.get("window_seconds")
-                    # Bug #86 (a): free-tier fail-closed sets degraded:true so
-                    # customers can distinguish "temporarily unavailable, retry"
-                    # from "actually exceeded my quota".
                     degraded = bool(body.get("degraded", False))
             except (json.JSONDecodeError, ValueError):  # pragma: no cover
-                # Kong's hyperapi-auth plugin always emits a valid JSON envelope on 429.
                 pass
             raise RateLimitError(
                 _server_message(resp, "Rate limit exceeded"),
@@ -485,7 +383,7 @@ class HyperAPIClient:
 
     # ── Async submission (X-Async: true) ─────────────────────────────────
 
-    def _submit_via_path(
+    async def _submit_via_path(
         self,
         endpoint: str,
         op_name: str,
@@ -506,8 +404,8 @@ class HyperAPIClient:
 
         try:
             if use_presigned:
-                document_key = self.upload_document(file_path, content_type=content_type)
-                response = self._client.post(
+                document_key = await self.upload_document(file_path, content_type=content_type)
+                response = await self._client.post(
                     f"{self.base_url}{endpoint}",
                     data={"document_key": document_key},
                     params=params,
@@ -516,14 +414,15 @@ class HyperAPIClient:
                 )
             else:
                 with open(file_path, "rb") as f:
-                    files = {"file": (file_path.name, f, content_type)}
-                    response = self._client.post(
-                        f"{self.base_url}{endpoint}",
-                        files=files,
-                        params=params,
-                        headers=headers,
-                        timeout=request_timeout,
-                    )
+                    file_bytes = f.read()
+                files = {"file": (file_path.name, file_bytes, content_type)}
+                response = await self._client.post(
+                    f"{self.base_url}{endpoint}",
+                    files=files,
+                    params=params,
+                    headers=headers,
+                    timeout=request_timeout,
+                )
         except httpx.TimeoutException as e:
             raise error_cls(
                 "Request timed out",
@@ -546,7 +445,7 @@ class HyperAPIClient:
         envelope = response.json()
         return self._job_from_envelope(envelope, op=op_name)
 
-    def _submit_via_doc_key(
+    async def _submit_via_doc_key(
         self,
         endpoint: str,
         op_name: str,
@@ -563,7 +462,7 @@ class HyperAPIClient:
         request_id = headers["X-Request-ID"]
 
         try:
-            response = self._client.post(
+            response = await self._client.post(
                 f"{self.base_url}{endpoint}",
                 data={"document_key": document_key},
                 params=params,
@@ -600,14 +499,14 @@ class HyperAPIClient:
 
     # ── Polling ──────────────────────────────────────────────────────────
 
-    def get_job(self, job_id: str) -> dict:
-        """Single-shot poll. No retry, no waiting. Raises on 4xx; returns the
-        raw envelope on 200 (``{status, result?, error?, ...}``)."""
+    async def get_job(self, job_id: str) -> dict:
+        """Single-shot async poll. No retry, no waiting. Raises on 4xx; returns
+        the raw envelope on 200 (``{status, result?, error?, ...}``)."""
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
 
         try:
-            resp = self._client.get(
+            resp = await self._client.get(
                 f"{self.base_url}/v1/jobs/{job_id}", headers=headers
             )
         except httpx.RequestError as e:
@@ -627,9 +526,6 @@ class HyperAPIClient:
                 request_id=rid,
             )
         if resp.status_code == 429:
-            # Kong's hyperapi-auth plugin rate-limits GET /v1/jobs/{id} too — surface
-            # as RateLimitError so callers (and `_poll_with_retry`'s don't-retry list)
-            # see it consistently with submit-time 429s.
             retry_after = _parse_retry_after(resp.headers.get("retry-after"))
             tier = None
             limit = None
@@ -643,7 +539,6 @@ class HyperAPIClient:
                     window_seconds = body.get("window_seconds")
                     degraded = bool(body.get("degraded", False))
             except (json.JSONDecodeError, ValueError):  # pragma: no cover
-                # Same Kong-emits-valid-JSON guarantee as the submit-time 429 branch.
                 pass
             raise RateLimitError(
                 _server_message(resp, "Rate limit exceeded"),
@@ -661,9 +556,6 @@ class HyperAPIClient:
                 status_code=resp.status_code,
                 request_id=rid,
             )
-        # Defend against a 200 with malformed JSON — some misconfigured proxies will
-        # return text/html bodies on 200. Without this guard, a JSONDecodeError
-        # escapes to the caller as an un-typed exception.
         try:
             return resp.json()
         except (json.JSONDecodeError, ValueError) as e:
@@ -673,16 +565,16 @@ class HyperAPIClient:
                 request_id=rid,
             ) from e
 
-    def _poll_with_retry(self, job_id: str) -> dict:
+    async def _poll_with_retry(self, job_id: str) -> dict:
         """Poll one time, retrying on transient failures (5xx, connection errors).
 
-        Fast-fails on 401 (bad key) and 404 (job missing / org mismatch). Bounds
-        the retry budget so a single poll attempt can't dominate poll_timeout.
+        Fast-fails on 401 (bad key) and 404 (job missing). Bounds the retry
+        budget so a single poll attempt can't dominate poll_timeout.
         """
         last_err: Exception | None = None
         for attempt in range(self._poll_max_transient_retries + 1):
             try:
-                envelope = self.get_job(job_id)
+                envelope = await self.get_job(job_id)
                 return envelope
             except (AuthenticationError, RateLimitError):
                 # Don't retry — caller's key/credit problem.
@@ -702,15 +594,14 @@ class HyperAPIClient:
                             "error": str(e)[:200],
                         },
                     )
-                    time.sleep(self._poll_transient_retry_delay)
+                    await asyncio.sleep(self._poll_transient_retry_delay)
                     continue
                 raise
-        # Unreachable in practice: the loop either returns, raises, or re-raises last_err on the final attempt.
         if last_err:  # pragma: no cover
             raise last_err
         raise HyperAPIError("Poll exhausted retries with no response")  # pragma: no cover
 
-    def wait_for_job(
+    async def wait_for_job(
         self,
         job: Job | str,
         *,
@@ -719,45 +610,26 @@ class HyperAPIClient:
     ) -> dict:
         """Poll a job until it completes, fails, or the timeout elapses.
 
-        Args:
-            job: A :py:class:`Job` returned by ``submit_<op>`` (preferred — the
-                ``op`` field lets us raise the right typed exception on
-                failure), or a raw ``job_id`` string (falls back to generic
-                ``HyperAPIError`` on failure).
-            timeout: Total wall-clock seconds. Defaults to the constructor's
-                ``poll_timeout``.
-            interval: Seconds between polls. Defaults to the constructor's
-                ``poll_interval``.
-
-        Returns:
-            The final ``result`` envelope from the server when ``status=completed``.
-
-        Raises:
-            JobTimeoutError: If ``timeout`` elapses with the job still pending.
-            HyperAPIError (or subclass): If the job ends with ``status=failed``,
-                or the poll itself fails after exhausting transient retries.
+        Mirrors :meth:`HyperAPIClient.wait_for_job` semantics — same return
+        shape, same exceptions — but yields to the event loop between polls
+        via ``await asyncio.sleep`` instead of blocking the thread.
         """
         if isinstance(job, Job):
             job_id = job.job_id
             op = job.op
-            # Use the Job's actual submission time so JobTimeoutError reports
-            # total time-since-submit, not just the wait_for_job loop duration.
-            # Useful when callers persist a Job and call wait_for_job later.
             start = job.submitted_at
         else:
             job_id = job
             op = "unknown"
             start = time.monotonic()
 
-        # Don't compute elapsed from `deadline - (timeout or self._poll_timeout)`
-        # — `or` treats timeout=0 as falsy and silently swaps in the constructor.
         loop_start = time.monotonic()
         budget = timeout if timeout is not None else self._poll_timeout
         deadline = loop_start + budget
         wait_s = interval if interval is not None else self._poll_interval
 
         while True:
-            envelope = self._poll_with_retry(job_id)
+            envelope = await self._poll_with_retry(job_id)
             status = envelope.get("status")
             if status == "completed":
                 logger.info(
@@ -783,86 +655,60 @@ class HyperAPIClient:
                     elapsed_s=time.monotonic() - start,
                 )
 
-            # Sleep, but never past the deadline.
             remaining = deadline - time.monotonic()
-            time.sleep(min(wait_s, max(0.0, remaining)))
+            await asyncio.sleep(min(wait_s, max(0.0, remaining)))
 
-    def wait_for_jobs(
+    async def wait_for_jobs(
         self,
         jobs: Iterable[Job],
         *,
         timeout: float | None = None,
         interval: float | None = None,
     ) -> list[dict]:
-        """Poll multiple jobs concurrently (round-robin).
+        """Poll multiple jobs concurrently and return results in input order.
 
-        Returns the results in the same order as ``jobs``. Single shared
-        deadline. Raises on the first failed job (other in-flight jobs continue
-        running on the server but are abandoned by the SDK). Useful for
-        ``process()`` to collapse parse + extract polling overhead.
+        Uses ``asyncio.gather`` for true concurrent polling — each job runs on
+        its own task in the event loop. This is the natural async fan-out and
+        is strictly more concurrent than the sync client's round-robin loop.
+
+        Behavior matches the sync client otherwise: shared timeout budget per
+        job, first failure raises (others are cancelled), returns ``[]`` for
+        empty input.
+
+        Raises:
+            JobTimeoutError: If any job exceeds ``timeout``.
+            HyperAPIError (or subclass): If any job ends with status=failed.
         """
         jobs_list = list(jobs)
         if not jobs_list:
             return []
 
-        start = time.monotonic()
+        # Each task waits up to `budget`; gather raises on the first failure
+        # and cancels the rest, matching the sync semantics ("first failure
+        # wins; pending jobs abandoned by the SDK").
         budget = timeout if timeout is not None else self._poll_timeout
-        deadline = start + budget
-        wait_s = interval if interval is not None else self._poll_interval
-        # Sentinel `{}` (not None) means "completed, but the server's result envelope
-        # was empty" — preserves order in the returned list. The loop only exits when
-        # every index has been written, so we never return more or fewer entries than
-        # the input.
-        results: list[dict] = [{} for _ in jobs_list]
-        pending: list[int] = list(range(len(jobs_list)))
 
-        while pending:
-            still_pending: list[int] = []
-            for idx in pending:
-                envelope = self._poll_with_retry(jobs_list[idx].job_id)
-                status = envelope.get("status")
-                if status == "completed":
-                    # `envelope.get("result", envelope)` falls back to the full envelope
-                    # if `result` key is absent; if it's explicitly None, coerce to {}
-                    # so the position in the returned list is preserved.
-                    res = envelope.get("result", envelope)
-                    results[idx] = res if isinstance(res, dict) else {}
-                elif status == "failed":
-                    raise self._exception_for_failed_job(
-                        jobs_list[idx].op, envelope, jobs_list[idx].job_id
-                    )
-                else:
-                    still_pending.append(idx)
-            pending = still_pending
+        coros = [
+            self.wait_for_job(j, timeout=budget, interval=interval)
+            for j in jobs_list
+        ]
+        results = await asyncio.gather(*coros)
 
-            if not pending:
-                break
-            if time.monotonic() >= deadline:
-                pending_ids = ",".join(jobs_list[i].job_id for i in pending)
-                raise JobTimeoutError(
-                    f"Jobs [{pending_ids}] did not complete within {budget}s.",
-                    job_id=pending_ids,
-                    elapsed_s=time.monotonic() - start,
-                )
-            remaining = deadline - time.monotonic()
-            time.sleep(min(wait_s, max(0.0, remaining)))
-
-        # results is already in input-order; never filter — the input length is the
-        # output length, always.
-        return results
+        # `wait_for_job` returns the envelope's `result` field (or the full
+        # envelope if there's no `result`). Coerce non-dicts to {} so positional
+        # ordering is preserved exactly like the sync version.
+        normalized: list[dict] = []
+        for res in results:
+            normalized.append(res if isinstance(res, dict) else {})
+        return normalized
 
     def _exception_for_failed_job(
         self, op: str, envelope: dict, job_id: str
     ) -> HyperAPIError:
         """Build the right typed exception for a ``status: failed`` envelope.
 
-        The op-to-class registry returns the per-op subclass when known
-        (``ParseError``, ``ExtractError``, …) and falls back to
-        ``HyperAPIError`` for raw-job-id calls where we couldn't determine
-        which op originated the job. The HTTP status (if present in the
-        envelope's ``error_status_code``) is prefixed onto the message so
-        ``str(e)`` is self-describing in support tickets without needing the
-        caller to also surface ``e.status_code``.
+        Same registry as the sync client — per-op subclass when known
+        (ParseError, ExtractError, …), HyperAPIError otherwise.
         """
         raw = _strip_api_key(envelope.get("error")) or "Job failed"
         status_code = envelope.get("error_status_code")
@@ -876,7 +722,7 @@ class HyperAPIClient:
 
     # ── Public submit_<op> methods ───────────────────────────────────────
 
-    def submit_parse(
+    async def submit_parse(
         self,
         file_path: str | Path | None = None,
         *,
@@ -884,21 +730,15 @@ class HyperAPIClient:
         ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
     ) -> Job:
-        """Submit a parse job asynchronously and return immediately.
-
-        ``image_path`` is a deprecated alias for ``file_path`` retained for
-        v0.1.x backward compatibility — pass exactly one. The other
-        ``submit_<op>`` methods don't take it because parse is the only op
-        that historically accepted bare images via that name.
-        """
+        """Submit a parse job asynchronously and return immediately."""
         path = self._resolve_path(file_path, image_path)
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/parse", "parse", path,
             params={"ocr_engine": ocr_engine},
             use_presigned=use_presigned,
         )
 
-    def submit_extract(
+    async def submit_extract(
         self,
         file_path: str | Path,
         *,
@@ -908,13 +748,13 @@ class HyperAPIClient:
     ) -> Job:
         """Submit an extract job asynchronously and return immediately."""
         path = self._resolve_path(file_path)
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/extract", "extract", path,
             params={"ocr_engine": ocr_engine, "mode": mode},
             use_presigned=use_presigned,
         )
 
-    def submit_classify(
+    async def submit_classify(
         self,
         file_path: str | Path,
         *,
@@ -924,13 +764,13 @@ class HyperAPIClient:
     ) -> Job:
         """Submit a classify job asynchronously and return immediately."""
         path = self._resolve_path(file_path)
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/classify", "classify", path,
             params={"ocr_engine": ocr_engine, "mode": mode},
             use_presigned=use_presigned,
         )
 
-    def submit_split(
+    async def submit_split(
         self,
         file_path: str | Path,
         *,
@@ -940,7 +780,7 @@ class HyperAPIClient:
     ) -> Job:
         """Submit a split job asynchronously and return immediately."""
         path = self._resolve_path(file_path)
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/split", "split", path,
             params={"ocr_engine": ocr_engine, "mode": mode},
             use_presigned=use_presigned,
@@ -948,7 +788,7 @@ class HyperAPIClient:
 
     # ── Public convenience methods (submit + wait) ───────────────────────
 
-    def parse(
+    async def parse(
         self,
         file_path: str | Path | None = None,
         *,
@@ -958,28 +798,16 @@ class HyperAPIClient:
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
-        """Parse a document using OCR. Submits asynchronously and polls until done.
-
-        Args:
-            file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF, GIF).
-            image_path: Deprecated alias for file_path.
-            ocr_engine: ``"paddle"`` (default) or ``"doc-intent"``.
-            use_presigned: Use the presigned-S3 upload flow (default True).
-            poll_timeout: Override the constructor's poll_timeout for this call.
-            poll_interval: Override the constructor's poll_interval for this call.
-
-        Returns:
-            Response envelope with ``result["ocr"]``.
-        """
-        job = self.submit_parse(
+        """Parse a document using OCR. Submits asynchronously and polls until done."""
+        job = await self.submit_parse(
             file_path=file_path,
             image_path=image_path,
             ocr_engine=ocr_engine,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
 
-    def extract(
+    async def extract(
         self,
         file_path: str | Path,
         *,
@@ -989,24 +817,16 @@ class HyperAPIClient:
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
-        """Extract structured data (entities + line items) from a document.
-
-        Submits asynchronously and polls until done. Bypasses any edge-timeout
-        ceiling because each individual HTTP request stays sub-second.
-
-        Returns:
-            Response envelope with ``result`` containing entities and line items,
-            and ``result["ocr_text"]`` with the raw OCR.
-        """
-        job = self.submit_extract(
+        """Extract structured data (entities + line items) from a document."""
+        job = await self.submit_extract(
             file_path,
             ocr_engine=ocr_engine,
             mode=mode,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
 
-    def classify(
+    async def classify(
         self,
         file_path: str | Path,
         *,
@@ -1017,15 +837,15 @@ class HyperAPIClient:
         poll_interval: float | None = None,
     ) -> dict:
         """Classify a document type (invoice, contract, receipt, etc.)."""
-        job = self.submit_classify(
+        job = await self.submit_classify(
             file_path,
             ocr_engine=ocr_engine,
             mode=mode,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
 
-    def split(
+    async def split(
         self,
         file_path: str | Path,
         *,
@@ -1036,15 +856,15 @@ class HyperAPIClient:
         poll_interval: float | None = None,
     ) -> dict:
         """Split a multi-document PDF into individual document segments."""
-        job = self.submit_split(
+        job = await self.submit_split(
             file_path,
             ocr_engine=ocr_engine,
             mode=mode,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
 
-    def process(
+    async def process(
         self,
         file_path: str | Path | None = None,
         *,
@@ -1056,26 +876,27 @@ class HyperAPIClient:
         """Parse and extract in one call.
 
         Uploads the document once, then submits the parse and extract legs
-        back-to-back (two sequential POSTs from the SDK). The platform runs
-        the two legs concurrently on the backend — the second leg hits the
-        router's OCR cache via the shared ``document_key``, so total
-        wall-clock time ≈ max(parse, extract) + a small polling overhead,
-        not their sum. Polls both jobs round-robin via ``wait_for_jobs``.
+        back-to-back. The platform runs the two legs concurrently on the
+        backend; the SDK polls both jobs concurrently via ``asyncio.gather``.
+        Total wall-clock ≈ max(parse, extract) + small polling overhead.
 
         Returns:
             ``{"ocr": <parse text>, "data": <extract structured fields>}``
         """
         path = self._resolve_path(file_path, image_path)
-        document_key = self.upload_document(path)
-        parse_job = self._submit_via_doc_key(
+        document_key = await self.upload_document(path)
+        # The two submissions could in principle be gathered too, but keeping
+        # them sequential matches the sync client's behavior and the backend
+        # router serializes them anyway through the shared document_key.
+        parse_job = await self._submit_via_doc_key(
             "/v1/parse", "parse", document_key,
             params={"ocr_engine": ocr_engine},
         )
-        extract_job = self._submit_via_doc_key(
+        extract_job = await self._submit_via_doc_key(
             "/v1/extract", "extract", document_key,
             params={"ocr_engine": ocr_engine, "mode": "default"},
         )
-        results = self.wait_for_jobs(
+        results = await self.wait_for_jobs(
             [parse_job, extract_job],
             timeout=poll_timeout,
             interval=poll_interval,
@@ -1088,12 +909,12 @@ class HyperAPIClient:
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
         """Close the underlying HTTP client and release its connection pool."""
-        self._client.close()
+        await self._client.aclose()
 
-    def __enter__(self) -> HyperAPIClient:
+    async def __aenter__(self) -> AsyncHyperAPIClient:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.aclose()
