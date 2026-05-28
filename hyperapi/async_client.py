@@ -729,17 +729,25 @@ class AsyncHyperAPIClient:
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
         include_boxes: bool = False,
+        include_image: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a parse job asynchronously and return immediately.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
         ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+
+        ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
+        to each ``result["pages"]`` entry for the deskew-corrected page image.
         """
         path = self._resolve_path(file_path, image_path)
         return await self._submit_via_path(
             "/v1/parse", "parse", path,
-            params={"ocr_engine": ocr_engine, "include_boxes": include_boxes},
+            params={
+                "ocr_engine": ocr_engine,
+                "include_boxes": include_boxes,
+                "include_image": include_image,
+            },
             use_presigned=use_presigned,
         )
 
@@ -800,6 +808,7 @@ class AsyncHyperAPIClient:
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
         include_boxes: bool = False,
+        include_image: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -808,12 +817,16 @@ class AsyncHyperAPIClient:
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
         ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+
+        ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
+        to each ``result["pages"]`` entry for the deskew-corrected page image.
         """
         job = await self.submit_parse(
             file_path=file_path,
             image_path=image_path,
             ocr_engine=ocr_engine,
             include_boxes=include_boxes,
+            include_image=include_image,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)

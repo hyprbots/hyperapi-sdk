@@ -883,6 +883,7 @@ class HyperAPIClient:
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
         include_boxes: bool = False,
+        include_image: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a parse job asynchronously and return immediately.
@@ -894,11 +895,20 @@ class HyperAPIClient:
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
         ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+
+        ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
+        to each ``result["pages"]`` entry pointing to the deskew-corrected page
+        image in S3. Requires the router's IAM to have ``s3:PutObject`` +
+        ``s3:GetObject`` on the ``deskewed/*`` prefix.
         """
         path = self._resolve_path(file_path, image_path)
         return self._submit_via_path(
             "/v1/parse", "parse", path,
-            params={"ocr_engine": ocr_engine, "include_boxes": include_boxes},
+            params={
+                "ocr_engine": ocr_engine,
+                "include_boxes": include_boxes,
+                "include_image": include_image,
+            },
             use_presigned=use_presigned,
         )
 
@@ -959,6 +969,7 @@ class HyperAPIClient:
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
         include_boxes: bool = False,
+        include_image: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -972,6 +983,10 @@ class HyperAPIClient:
             include_boxes: When True, each ``result["pages"]`` entry includes a
                 ``boxes`` list of ``{"text", "bbox": [left, top, right, bottom],
                 "confidence"}`` segments. PaddleOCR only; other engines return [].
+            include_image: When True, each ``result["pages"]`` entry includes an
+                ``image_url`` (presigned S3 GET for the deskew-corrected page) and
+                ``dimensions`` (``{"width", "height"}`` in that image's pixel space,
+                which matches the box coordinate space). Requires appropriate IAM.
             use_presigned: Use the presigned-S3 upload flow (default True).
             poll_timeout: Override the constructor's poll_timeout for this call.
             poll_interval: Override the constructor's poll_interval for this call.
@@ -984,6 +999,7 @@ class HyperAPIClient:
             image_path=image_path,
             ocr_engine=ocr_engine,
             include_boxes=include_boxes,
+            include_image=include_image,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)

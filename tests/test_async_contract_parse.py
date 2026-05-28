@@ -71,6 +71,28 @@ def _seed_completed_with_boxes(mock_backend, *, job_id="job_parse_1"):
     )
 
 
+def _seed_completed_with_image(mock_backend, *, job_id="job_parse_1"):
+    image_url = "https://s3.example.com/deskewed/org/hash/0.webp?sig=xxx"
+    boxes = [{"text": "Invoice #4471", "bbox": [120, 340, 410, 372], "confidence": 0.987}]
+    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+        return_value=httpx.Response(200, json={
+            "status": "completed",
+            "result": {
+                "ocr": "Invoice #4471",
+                "pages": [{
+                    "page_number": 1,
+                    "text": "Invoice #4471",
+                    "image_url": image_url,
+                    "dimensions": {"width": 824, "height": 1066},
+                    "boxes": boxes,
+                }],
+            },
+            "request_id": "req-x",
+            "duration_ms": 1234,
+        }),
+    )
+
+
 async def test_async_parse_default_sends_include_boxes_false(mock_backend, async_client, tiny_pdf):
     _seed_presigned(mock_backend)
     submit_route = _seed_submit(mock_backend)
@@ -79,6 +101,31 @@ async def test_async_parse_default_sends_include_boxes_false(mock_backend, async
     await async_client.parse(tiny_pdf)
 
     assert submit_route.calls[0].request.url.params["include_boxes"] == "false"
+
+
+async def test_async_parse_default_sends_include_image_false(mock_backend, async_client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit_route = _seed_submit(mock_backend)
+    _seed_completed(mock_backend)
+
+    await async_client.parse(tiny_pdf)
+
+    assert submit_route.calls[0].request.url.params["include_image"] == "false"
+
+
+async def test_async_parse_include_image_propagates_and_returns_image_url(
+    mock_backend, async_client, tiny_pdf
+):
+    _seed_presigned(mock_backend)
+    submit_route = _seed_submit(mock_backend)
+    _seed_completed_with_image(mock_backend)
+
+    result = await async_client.parse(tiny_pdf, include_image=True)
+
+    assert submit_route.calls[0].request.url.params["include_image"] == "true"
+    page = result["pages"][0]
+    assert "s3.example.com" in page["image_url"]
+    assert page["dimensions"] == {"width": 824, "height": 1066}
 
 
 async def test_async_parse_include_boxes_propagates_and_returns_boxes(
