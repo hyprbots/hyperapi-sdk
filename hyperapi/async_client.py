@@ -728,13 +728,18 @@ class AsyncHyperAPIClient:
         *,
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
+        include_boxes: bool = False,
         use_presigned: bool = True,
     ) -> Job:
-        """Submit a parse job asynchronously and return immediately."""
+        """Submit a parse job asynchronously and return immediately.
+
+        ``include_boxes=True`` adds per-segment bounding boxes to each entry of
+        ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+        """
         path = self._resolve_path(file_path, image_path)
         return await self._submit_via_path(
             "/v1/parse", "parse", path,
-            params={"ocr_engine": ocr_engine},
+            params={"ocr_engine": ocr_engine, "include_boxes": include_boxes},
             use_presigned=use_presigned,
         )
 
@@ -794,15 +799,21 @@ class AsyncHyperAPIClient:
         *,
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
+        include_boxes: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
-        """Parse a document using OCR. Submits asynchronously and polls until done."""
+        """Parse a document using OCR. Submits asynchronously and polls until done.
+
+        ``include_boxes=True`` adds per-segment bounding boxes to each entry of
+        ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+        """
         job = await self.submit_parse(
             file_path=file_path,
             image_path=image_path,
             ocr_engine=ocr_engine,
+            include_boxes=include_boxes,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)

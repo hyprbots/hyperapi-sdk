@@ -56,6 +56,47 @@ async def test_async_parse_submits_with_x_async_then_polls(mock_backend, async_c
     assert poll_route.called
 
 
+def _seed_completed_with_boxes(mock_backend, *, job_id="job_parse_1"):
+    boxes = [{"text": "Invoice #4471", "bbox": [120, 340, 410, 372], "confidence": 0.987}]
+    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+        return_value=httpx.Response(200, json={
+            "status": "completed",
+            "result": {
+                "ocr": "Invoice #4471",
+                "pages": [{"page_number": 1, "text": "Invoice #4471", "boxes": boxes}],
+            },
+            "request_id": "req-x",
+            "duration_ms": 1234,
+        }),
+    )
+
+
+async def test_async_parse_default_sends_include_boxes_false(mock_backend, async_client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit_route = _seed_submit(mock_backend)
+    _seed_completed(mock_backend)
+
+    await async_client.parse(tiny_pdf)
+
+    assert submit_route.calls[0].request.url.params["include_boxes"] == "false"
+
+
+async def test_async_parse_include_boxes_propagates_and_returns_boxes(
+    mock_backend, async_client, tiny_pdf
+):
+    _seed_presigned(mock_backend)
+    submit_route = _seed_submit(mock_backend)
+    _seed_completed_with_boxes(mock_backend)
+
+    result = await async_client.parse(tiny_pdf, include_boxes=True)
+
+    assert submit_route.calls[0].request.url.params["include_boxes"] == "true"
+    box = result["pages"][0]["boxes"][0]
+    assert box["text"] == "Invoice #4471"
+    assert box["bbox"] == [120, 340, 410, 372]
+    assert box["confidence"] == 0.987
+
+
 async def test_async_parse_with_doc_intent_engine(mock_backend, async_client, tiny_pdf):
     _seed_presigned(mock_backend)
     submit_route = _seed_submit(mock_backend)

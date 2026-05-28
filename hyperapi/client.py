@@ -882,6 +882,7 @@ class HyperAPIClient:
         *,
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
+        include_boxes: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a parse job asynchronously and return immediately.
@@ -890,11 +891,14 @@ class HyperAPIClient:
         v0.1.x backward compatibility — pass exactly one. The other
         ``submit_<op>`` methods don't take it because parse is the only op
         that historically accepted bare images via that name.
+
+        ``include_boxes=True`` adds per-segment bounding boxes to each entry of
+        ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
         """
         path = self._resolve_path(file_path, image_path)
         return self._submit_via_path(
             "/v1/parse", "parse", path,
-            params={"ocr_engine": ocr_engine},
+            params={"ocr_engine": ocr_engine, "include_boxes": include_boxes},
             use_presigned=use_presigned,
         )
 
@@ -954,6 +958,7 @@ class HyperAPIClient:
         *,
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
+        include_boxes: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -964,6 +969,9 @@ class HyperAPIClient:
             file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF, GIF).
             image_path: Deprecated alias for file_path.
             ocr_engine: ``"paddle"`` (default) or ``"doc-intent"``.
+            include_boxes: When True, each ``result["pages"]`` entry includes a
+                ``boxes`` list of ``{"text", "bbox": [left, top, right, bottom],
+                "confidence"}`` segments. PaddleOCR only; other engines return [].
             use_presigned: Use the presigned-S3 upload flow (default True).
             poll_timeout: Override the constructor's poll_timeout for this call.
             poll_interval: Override the constructor's poll_interval for this call.
@@ -975,6 +983,7 @@ class HyperAPIClient:
             file_path=file_path,
             image_path=image_path,
             ocr_engine=ocr_engine,
+            include_boxes=include_boxes,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
