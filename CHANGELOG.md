@@ -5,6 +5,27 @@ All notable changes to `hyperapi-sdk` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-06-02
+
+Redact / deidentify. No breaking changes — purely additive.
+
+### Added
+
+- **`redact()` / `submit_redact()`** (sync + async) — mask or deidentify PII in
+  a document. `mode="redact"` applies black boxes; `mode="deidentify"` overlays
+  synthetic replacements. `include_logos=True` also masks logos. `pii_config`
+  (`{"mode": "extend"|"replace", "types": [...]}`) customizes the detected PII
+  type set. Same submit+poll path as `extract` — timeout-immune at any edge.
+
+  ```python
+  result = client.redact("contract.pdf", mode="deidentify", include_logos=True)
+  for page_png_b64 in result["images"]:
+      ...
+  ```
+
+- **`RedactError`** — raised on a redact HTTP error or `status=failed` job,
+  consistent with the other per-op error classes.
+
 ## [0.2.0] — 2026-05-26
 
 Async client. No breaking changes — purely additive.

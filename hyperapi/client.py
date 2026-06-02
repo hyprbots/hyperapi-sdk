@@ -57,6 +57,7 @@ from .exceptions import (
     JobTimeoutError,
     ParseError,
     RateLimitError,
+    RedactError,
     SplitError,
     _strip_api_key,
 )
@@ -95,6 +96,7 @@ _OP_TO_ERROR: dict[str, type] = {
     "extract": ExtractError,
     "classify": ClassifyError,
     "split": SplitError,
+    "redact": RedactError,
 }
 
 
@@ -111,7 +113,7 @@ class Job:
     job_id: str
     status: str
     poll_url: str
-    op: str  # "parse" | "extract" | "classify" | "split"
+    op: str  # "parse" | "extract" | "classify" | "split" | "redact"
     submitted_at: float = field(default_factory=time.monotonic)
 
 
@@ -493,9 +495,15 @@ class HyperAPIClient:
         *,
         params: dict[str, Any],
         use_presigned: bool,
+        data: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> Job:
-        """Submit a pipeline op asynchronously. Returns a Job handle."""
+        """Submit a pipeline op asynchronously. Returns a Job handle.
+
+        ``data`` carries extra form fields beyond ``document_key`` (e.g. redact's
+        ``pii_config``). Sent in the form body on both the presigned and the
+        direct-multipart paths.
+        """
         request_timeout = timeout or self.timeout
         error_cls = _OP_TO_ERROR[op_name]
         content_type = CONTENT_TYPES.get(
@@ -503,13 +511,14 @@ class HyperAPIClient:
         )
         headers = self._get_headers(async_mode=True)
         request_id = headers["X-Request-ID"]
+        extra_form = data or {}
 
         try:
             if use_presigned:
                 document_key = self.upload_document(file_path, content_type=content_type)
                 response = self._client.post(
                     f"{self.base_url}{endpoint}",
-                    data={"document_key": document_key},
+                    data={"document_key": document_key, **extra_form},
                     params=params,
                     headers=headers,
                     timeout=request_timeout,
@@ -520,6 +529,7 @@ class HyperAPIClient:
                     response = self._client.post(
                         f"{self.base_url}{endpoint}",
                         files=files,
+                        data=extra_form,
                         params=params,
                         headers=headers,
                         timeout=request_timeout,
@@ -960,6 +970,31 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
 
+    def submit_redact(
+        self,
+        file_path: str | Path,
+        *,
+        mode: str = "redact",
+        pii_config: dict | None = None,
+        include_logos: bool = False,
+        ocr_engine: OCREngine = "paddle",
+        use_presigned: bool = True,
+    ) -> Job:
+        """Submit a redact/deidentify job asynchronously and return immediately.
+
+        ``mode="redact"`` applies black boxes; ``mode="deidentify"`` overlays
+        synthetic values. ``pii_config`` (``{"mode": "extend"|"replace",
+        "types": [...]}``) customizes the detected PII types.
+        """
+        path = self._resolve_path(file_path)
+        data = {"pii_config": json.dumps(pii_config)} if pii_config is not None else None
+        return self._submit_via_path(
+            "/v1/redact", "redact", path,
+            params={"ocr_engine": ocr_engine, "mode": mode, "include_logos": include_logos},
+            data=data,
+            use_presigned=use_presigned,
+        )
+
     # ── Public convenience methods (submit + wait) ───────────────────────
 
     def parse(
@@ -1065,6 +1100,38 @@ class HyperAPIClient:
             file_path,
             ocr_engine=ocr_engine,
             mode=mode,
+            use_presigned=use_presigned,
+        )
+        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+
+    def redact(
+        self,
+        file_path: str | Path,
+        *,
+        mode: str = "redact",
+        pii_config: dict | None = None,
+        include_logos: bool = False,
+        ocr_engine: OCREngine = "paddle",
+        use_presigned: bool = True,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
+    ) -> dict:
+        """Redact or deidentify PII in a document. Submits async + polls until done.
+
+        ``mode="redact"`` masks PII with black boxes; ``mode="deidentify"``
+        overlays synthetic replacements. ``include_logos=True`` also detects and
+        masks logos. ``pii_config`` customizes the detected PII type set.
+
+        Returns:
+            Response envelope with ``result`` containing ``images`` (redacted
+            pages), ``updated_text_block``, and a ``summary`` of masked counts.
+        """
+        job = self.submit_redact(
+            file_path,
+            mode=mode,
+            pii_config=pii_config,
+            include_logos=include_logos,
+            ocr_engine=ocr_engine,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
