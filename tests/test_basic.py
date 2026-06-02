@@ -32,9 +32,9 @@ def test_version_is_semver():
     assert all(p.isdigit() for p in parts)
 
 
-def test_version_is_020():
-    """v0.2.0 ships AsyncHyperAPIClient. Bump this when the version moves."""
-    assert __version__ == "0.2.0"
+def test_version_is_030():
+    """v0.3.0 ships redact()/submit_redact(). Bump this when the version moves."""
+    assert __version__ == "0.3.0"
 
 
 # ── Exception hierarchy ─────────────────────────────────────────────────

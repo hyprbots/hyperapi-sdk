@@ -18,10 +18,11 @@ from .exceptions import (
     JobTimeoutError,
     ParseError,
     RateLimitError,
+    RedactError,
     SplitError,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Library-style logger: silent unless the application configures handlers.
 # Customers opt in with: `logging.getLogger("hyperapi").setLevel(logging.INFO)`.
@@ -39,6 +40,7 @@ __all__ = [
     "ExtractError",
     "ClassifyError",
     "SplitError",
+    "RedactError",
     "DocumentUploadError",
     "__version__",
 ]

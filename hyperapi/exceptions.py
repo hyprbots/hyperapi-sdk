@@ -136,6 +136,11 @@ class SplitError(HyperAPIError):
     pass
 
 
+class RedactError(HyperAPIError):
+    """Raised when redaction/deidentification fails (sync HTTP error or job status=failed)."""
+    pass
+
+
 class DocumentUploadError(HyperAPIError):
     """Raised when the presigned-URL flow fails (presigned fetch or S3 PUT)."""
     pass
