@@ -36,8 +36,10 @@ are keyword-only with backward-compatible defaults).
   ```
 
 - **`list_recent_jobs(limit=20, source=None)`** (sync + async) — list the
-  org's recent jobs as summary rows (`GET /v1/jobs/recent`). `limit` is
-  server-clamped to [1, 100]; `source` filters `"api"` vs `"playground"`.
+  org's recent jobs as summary rows (`GET /v1/jobs/recent`). `limit` valid
+  range is [1, 100] — out-of-range values are not clamped; the server
+  silently falls back to the default 20. `source` filters `"api"` vs
+  `"playground"`.
 
 - **`delete_job(job_id)`** (sync + async) — cancel a job
   (`DELETE /v1/jobs/{job_id}`). Server semantics are *cancel*: in-flight jobs

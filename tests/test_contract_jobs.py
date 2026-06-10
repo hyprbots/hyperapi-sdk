@@ -493,6 +493,33 @@ def test_list_recent_jobs_malformed_envelope_raises_typed(mock_backend, client):
     assert "Malformed" in str(ei.value)
 
 
+def test_list_recent_jobs_non_list_jobs_raises_typed(mock_backend, client):
+    """{"jobs": <non-list>} must also be rejected — the -> list[dict] contract
+    holds even against a proxy that mangles only the value."""
+    mock_backend.get("/v1/jobs/recent").mock(
+        return_value=httpx.Response(200, json={"jobs": {"x": 1}}),
+    )
+
+    with pytest.raises(HyperAPIError) as ei:
+        client.list_recent_jobs()
+    assert "Malformed" in str(ei.value)
+
+
+def test_list_recent_jobs_429_raises_rate_limit_error(mock_backend, client):
+    """The new endpoint must ride the same 429 ladder as get_job/submits."""
+    from hyperapi import RateLimitError
+    mock_backend.get("/v1/jobs/recent").mock(return_value=httpx.Response(
+        429,
+        headers={"Retry-After": "30"},
+        json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
+    ))
+
+    with pytest.raises(RateLimitError) as ei:
+        client.list_recent_jobs()
+    assert ei.value.retry_after == 30
+    assert ei.value.tier == "free"
+
+
 # ── delete_job (cancel semantics) ────────────────────────────────────────
 
 

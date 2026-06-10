@@ -681,8 +681,9 @@ class HyperAPIClient:
         """List the org's recent jobs (summary rows, newest first).
 
         Args:
-            limit: Maximum rows to return. The server clamps to [1, 100];
-                out-of-range values silently fall back to 20.
+            limit: Maximum rows to return. Valid range [1, 100]; out-of-range
+                values are NOT clamped — the server silently falls back to
+                the default 20 (e.g. ``limit=200`` returns 20 rows, not 100).
             source: Optional filter — ``"api"`` or ``"playground"``. Unknown
                 values are ignored server-side (no error).
 
@@ -725,7 +726,10 @@ class HyperAPIClient:
         # Same malformed-200 defence as get_job, plus envelope-shape guard:
         # the contract is {"jobs": [...]} — anything else is a broken proxy.
         try:
-            return resp.json()["jobs"]
+            jobs = resp.json()["jobs"]
+            if not isinstance(jobs, list):
+                raise TypeError(f"'jobs' is {type(jobs).__name__}, expected list")
+            return jobs
         except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
             raise HyperAPIError(
                 f"Malformed recent-jobs response: {e}",

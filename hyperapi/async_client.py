@@ -541,9 +541,10 @@ class AsyncHyperAPIClient:
         """List the org's recent jobs (summary rows, newest first).
 
         Mirrors :meth:`HyperAPIClient.list_recent_jobs` — same params
-        (``limit`` server-clamped to [1, 100], ``source`` filter ``"api"`` |
-        ``"playground"``), same summary-row shape, same exceptions. Fetch a
-        full result envelope for one job with :py:meth:`get_job`.
+        (``limit`` valid range [1, 100], out-of-range falls back to the
+        server default 20; ``source`` filter ``"api"`` | ``"playground"``),
+        same summary-row shape, same exceptions. Fetch a full result
+        envelope for one job with :py:meth:`get_job`.
         """
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
@@ -574,7 +575,10 @@ class AsyncHyperAPIClient:
                 request_id=rid,
             )
         try:
-            return resp.json()["jobs"]
+            jobs = resp.json()["jobs"]
+            if not isinstance(jobs, list):
+                raise TypeError(f"'jobs' is {type(jobs).__name__}, expected list")
+            return jobs
         except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
             raise HyperAPIError(
                 f"Malformed recent-jobs response: {e}",
@@ -800,7 +804,8 @@ class AsyncHyperAPIClient:
         ``mode="advanced"`` runs structured-layout OCR (Chandra): each
         ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
         ``markdown``, and ``regions``. Only meaningful with the default
-        ``ocr_engine="paddle"``; noticeably slower than ``"fast"``.
+        ``ocr_engine="paddle"``; noticeably slower than ``"fast"`` but well
+        within the default ``poll_timeout``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
         ``result["pages"]`` (PaddleOCR only; other engines return an empty list).

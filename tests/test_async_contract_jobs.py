@@ -688,6 +688,30 @@ async def test_async_list_recent_jobs_malformed_envelope_raises_typed(mock_backe
     assert "Malformed" in str(ei.value)
 
 
+async def test_async_list_recent_jobs_non_list_jobs_raises_typed(mock_backend, async_client):
+    mock_backend.get("/v1/jobs/recent").mock(
+        return_value=httpx.Response(200, json={"jobs": {"x": 1}}),
+    )
+
+    with pytest.raises(HyperAPIError) as ei:
+        await async_client.list_recent_jobs()
+    assert "Malformed" in str(ei.value)
+
+
+async def test_async_list_recent_jobs_429_raises_rate_limit_error(mock_backend, async_client):
+    from hyperapi import RateLimitError
+    mock_backend.get("/v1/jobs/recent").mock(return_value=httpx.Response(
+        429,
+        headers={"Retry-After": "30"},
+        json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
+    ))
+
+    with pytest.raises(RateLimitError) as ei:
+        await async_client.list_recent_jobs()
+    assert ei.value.retry_after == 30
+    assert ei.value.tier == "free"
+
+
 # ── delete_job (cancel semantics) ────────────────────────────────────────
 
 
