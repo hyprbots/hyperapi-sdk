@@ -277,3 +277,59 @@ def test_parse_each_call_has_unique_request_id(mock_backend, client, tiny_pdf):
 
     ids = {c.request.headers["X-Request-ID"] for c in submit_route.calls}
     assert len(ids) == 2  # two distinct UUIDs
+
+
+# ── mode (fast | advanced) ───────────────────────────────────────────────
+
+
+def _seed_completed_with_structured(mock_backend, *, job_id="job_parse_1"):
+    structured = {
+        "html": "<table><tr><td>Invoice #4471</td></tr></table>",
+        "markdown": "| Invoice #4471 |",
+        "regions": [{"type": "table", "bbox": [10, 10, 600, 200]}],
+    }
+    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+        return_value=httpx.Response(200, json={
+            "status": "completed",
+            "result": {
+                "ocr": "Invoice #4471",
+                "pages": [{"page_number": 1, "text": "Invoice #4471", "structured": structured}],
+            },
+            "request_id": "req-x",
+            "duration_ms": 9876,
+        }),
+    )
+
+
+def test_parse_default_sends_mode_fast(mock_backend, client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit_route = _seed_submit(mock_backend)
+    _seed_completed(mock_backend)
+
+    client.parse(tiny_pdf)
+
+    assert submit_route.calls[0].request.url.params["mode"] == "fast"
+
+
+def test_parse_advanced_mode_propagates_and_returns_structured(mock_backend, client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit_route = _seed_submit(mock_backend)
+    _seed_completed_with_structured(mock_backend)
+
+    result = client.parse(tiny_pdf, mode="advanced")
+
+    # Flag reached the submit POST as a query param.
+    assert submit_route.calls[0].request.url.params["mode"] == "advanced"
+    # Structured layout flows through the dict-passthrough result untouched.
+    structured = result["pages"][0]["structured"]
+    assert "<table>" in structured["html"]
+    assert structured["regions"][0]["type"] == "table"
+
+
+def test_submit_parse_mode_advanced_propagates(mock_backend, client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit_route = _seed_submit(mock_backend)
+
+    client.submit_parse(tiny_pdf, mode="advanced")
+
+    assert submit_route.calls[0].request.url.params["mode"] == "advanced"

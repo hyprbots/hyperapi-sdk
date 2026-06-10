@@ -127,3 +127,96 @@ async def test_async_submit_split_returns_job(mock_backend, async_client, tiny_p
 
     assert isinstance(job, Job)
     assert job.op == "split"
+
+
+# ── options (classify + split) ───────────────────────────────────────────
+
+
+async def test_async_classify_default_omits_options_from_body(mock_backend, async_client, tiny_pdf):
+    submit = _seed(
+        mock_backend, "doc_cl3", "/v1/classify",
+        job_id="cj_2",
+        result={"document_type": "invoice"},
+    )
+
+    await async_client.classify(tiny_pdf)
+
+    body = submit.calls[0].request.content.decode()
+    assert "options" not in body
+
+
+async def test_async_classify_options_ride_in_form_body(mock_backend, async_client, tiny_pdf):
+    submit = _seed(
+        mock_backend, "doc_cl4", "/v1/classify",
+        job_id="cj_3",
+        result={"document_type": "invoice"},
+    )
+
+    await async_client.classify(
+        tiny_pdf,
+        options={"mode": "thorough", "active_classes": ["invoice", "purchase_order"]},
+    )
+
+    req = submit.calls[0].request
+    # options["mode"] is the service-level knob; the query param stays "default".
+    assert req.url.params["mode"] == "default"
+    body = req.content.decode()
+    assert "options" in body
+    assert "thorough" in body
+    assert "purchase_order" in body
+
+
+async def test_async_split_options_ride_in_form_body(mock_backend, async_client, tiny_pdf):
+    submit = _seed(
+        mock_backend, "doc_sp3", "/v1/split",
+        job_id="sj_2",
+        result={"segments": []},
+    )
+
+    await async_client.split(tiny_pdf, options={"use_thinking": False})
+
+    body = submit.calls[0].request.content.decode()
+    assert "options" in body
+    assert "use_thinking" in body
+
+
+async def test_async_split_use_presigned_false_sends_multipart_with_options(
+    mock_backend, async_client, tiny_pdf
+):
+    submit = mock_backend.post("/v1/split").mock(
+        return_value=httpx.Response(202, json={
+            "job_id": "sj_3", "status": "pending", "poll_url": "/v1/jobs/sj_3",
+        }),
+    )
+    mock_backend.get("/v1/jobs/sj_3").mock(
+        return_value=httpx.Response(200, json={
+            "status": "completed", "result": {"segments": []}, "request_id": "req-x",
+        }),
+    )
+
+    await async_client.split(tiny_pdf, use_presigned=False, options={"use_thinking": False})
+
+    req = submit.calls[0].request
+    assert req.headers["content-type"].startswith("multipart/form-data")
+    body = req.content.decode("utf-8", errors="ignore")
+    assert "options" in body and "use_thinking" in body
+    assert 'name="file"' in body
+
+
+async def test_async_classify_invalid_options_400_raises_classify_error(
+    mock_backend, async_client, tiny_pdf
+):
+    mock_backend.post("/v1/documents/upload").mock(
+        return_value=httpx.Response(200, json={
+            "document_key": "k", "upload_url": "https://s3.local/k?sig=x", "expires_in": 600,
+        }),
+    )
+    mock_backend.put("https://s3.local/k?sig=x").mock(return_value=httpx.Response(200))
+    mock_backend.post("/v1/classify").mock(return_value=httpx.Response(
+        400, json={"detail": "Invalid options JSON: not an object"},
+    ))
+
+    with pytest.raises(ClassifyError) as ei:
+        await async_client.classify(tiny_pdf, options={"mode": "thorough"})
+    assert ei.value.status_code == 400
+    assert "Invalid options" in str(ei.value)

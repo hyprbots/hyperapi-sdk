@@ -10,7 +10,7 @@
 
 ---
 
-**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Classify, Split, and more APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
+**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Classify, Split, Redact, and more APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
 
 ## Architecture
 
@@ -37,6 +37,7 @@ HyperAPI uses a **two-stage pipeline** for document processing:
                     │  extract → extract-service   │
                     │  classify → classifier       │
                     │  split → classifier-splitter │
+                    │  redact → redact-service     │
                     └─────────────────────────────┘
 ```
 
@@ -121,6 +122,83 @@ print(fields["result"])
 
 # Use alternative OCR engine
 ocr_result = client.parse("complex_table.pdf", ocr_engine="doc-intent")
+```
+
+## Advanced Parse (structured layout)
+
+`mode="advanced"` runs structured-layout OCR: each page gains a `structured`
+dict with `html`, `markdown`, and `regions` — tables come back as tables, not
+flattened text. Slower than the default `mode="fast"`, and applies on the
+default `ocr_engine="paddle"` path.
+
+```python
+result = client.parse("annual_report.pdf", mode="advanced")
+page = result["pages"][0]
+print(page["structured"]["markdown"])   # layout-aware markdown
+print(page["structured"]["regions"])    # typed regions with bounding boxes
+```
+
+## Classify / Split Options
+
+`classify()` and `split()` accept an `options` dict of service-level knobs,
+validated server-side:
+
+```python
+# Classifier: pipeline depth, restricted class set, custom instructions
+client.classify(
+    "doc.pdf",
+    options={
+        "mode": "thorough",                       # "fast" | "balanced" | "thorough"
+        "active_classes": ["invoice", "purchase_order"],
+        "system_instruction": "Prefer invoice when ambiguous.",
+    },
+)
+
+# Splitter: thinking toggle, custom segment classes, domain guidelines
+client.split(
+    "binder.pdf",
+    options={
+        "use_thinking": True,
+        "extend_segment_classes": True,
+        "segment_classes": {"remittance_advice": "Payment remittance advice"},
+    },
+)
+```
+
+Note: `options["mode"]` (classifier pipeline depth) is a different knob from
+the top-level `mode=` keyword (task selector) — they travel in different parts
+of the request.
+
+## Redact / Deidentify
+
+`redact()` masks PII with black boxes; `mode="deidentify"` overlays synthetic
+replacements instead. Built-in PII types: PERSON_NAME, COMPANY_NAME, EMAIL,
+ADDRESS, WEBSITE, PHONE, and CREDENTIALS (passwords, API keys, tokens,
+secrets).
+
+```python
+result = client.redact("contract.pdf", mode="deidentify", include_logos=True)
+for page_png_b64 in result["images"]:
+    ...                                  # masked page images
+print(result["summary"])                 # {"PERSON_NAME": 2, "EMAIL": 1, ...}
+
+# Customize the detected PII type set
+client.redact(
+    "form.pdf",
+    pii_config={"mode": "extend", "types": [{"name": "SSN"}]},
+)
+```
+
+## Jobs Management
+
+```python
+# List the org's recent jobs (summary rows, newest first)
+for row in client.list_recent_jobs(limit=10, source="api"):
+    print(row["job_id"], row["task"], row["status"])
+
+# Cancel an in-flight job (idempotent; completed jobs keep their result)
+job = client.submit_extract("big_binder.pdf")
+client.delete_job(job.job_id)
 ```
 
 ## How It Works (Submit + Poll)
@@ -234,7 +312,7 @@ if status["status"] == "completed":
 result = client.wait_for_job(job, timeout=600, interval=5)
 ```
 
-`submit_parse`, `submit_extract`, `submit_classify`, and `submit_split` are all available.
+`submit_parse`, `submit_extract`, `submit_classify`, `submit_split`, and `submit_redact` are all available.
 
 ### Polling configuration
 
@@ -287,9 +365,12 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `extract(file)` | OCR → extract-service | Extract structured fields with validation. Submit + poll. |
 | `classify(file)` | OCR → classifier | Classify document type. Submit + poll. |
 | `split(file)` | OCR → classifier-splitter | Split multi-document binders. Submit + poll. |
+| `redact(file)` | OCR → redact-service | Mask or deidentify PII (and optionally logos). Submit + poll. |
 | `process(file)` | OCR → parse + extract | Combined parse + extract sharing one upload. Submit + poll on both legs. |
-| `submit_parse / submit_extract / submit_classify / submit_split` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
+| `submit_parse / submit_extract / submit_classify / submit_split / submit_redact` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
 | `get_job(job_id)` | — | One-shot status poll. No waiting, no retry. |
+| `list_recent_jobs(*, limit=20, source=None)` | — | List the org's recent jobs (summary rows, newest first). |
+| `delete_job(job_id)` | — | Cancel a job. Idempotent; completed jobs keep their result. |
 | `wait_for_job(job, *, timeout=None, interval=None)` | — | Block until the job completes, fails, or `timeout` elapses. |
 | `wait_for_jobs([job1, job2], …)` | — | Poll multiple jobs concurrently. Sync: round-robin loop. Async: `asyncio.gather`. |
 | **Lifecycle (sync)** `close()` / `with HyperAPIClient() as client:` | — | Release HTTP connection pool. |
@@ -299,11 +380,16 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 
 | Parameter | Type | Default | Available On |
 |-----------|------|---------|-------------|
-| `ocr_engine` | `"paddle"` \| `"doc-intent"` | `"paddle"` | parse / extract / classify / split / process |
-| `mode` | `str` | `"default"` | extract / classify / split |
-| `use_presigned` | `bool` | `True` | parse / extract / classify / split |
-| `poll_timeout` | `float` | constructor's | parse / extract / classify / split / process |
-| `poll_interval` | `float` | constructor's | parse / extract / classify / split / process |
+| `ocr_engine` | `"paddle"` \| `"doc-intent"` | `"paddle"` | parse / extract / classify / split / redact / process |
+| `mode` (parse) | `"fast"` \| `"advanced"` | `"fast"` | parse — `"advanced"` adds per-page `structured` layout |
+| `mode` (extract) | `str` | `"default"` | extract — `"omni"` routes to the omni-model pipeline |
+| `mode` (classify / split) | `str` | `"default"` | classify / split — task selector |
+| `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |
+| `options` | `dict \| None` | `None` | classify / split — service knobs, sent as a JSON form field |
+| `pii_config` / `include_logos` | `dict \| None` / `bool` | `None` / `False` | redact |
+| `use_presigned` | `bool` | `True` | parse / extract / classify / split / redact |
+| `poll_timeout` | `float` | constructor's | parse / extract / classify / split / redact / process |
+| `poll_interval` | `float` | constructor's | parse / extract / classify / split / redact / process |
 
 ### Exceptions
 
@@ -312,7 +398,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `HyperAPIError` | Base — anything not specifically classified |
 | `AuthenticationError` | 401 from server, missing API key |
 | `RateLimitError` | 429 from server (carries `retry_after`, `tier`, `limit`) |
-| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` | The corresponding op fails |
+| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` / `RedactError` | The corresponding op fails |
 | `DocumentUploadError` | Presigned-URL flow or S3 PUT fails |
 | `JobTimeoutError` | `wait_for_job` exceeded its timeout (job still running on server) |
 

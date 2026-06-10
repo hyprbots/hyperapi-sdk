@@ -75,6 +75,7 @@ CONTENT_TYPES = {
 }
 
 OCREngine = Literal["paddle", "doc-intent"]
+ParseMode = Literal["fast", "advanced"]
 
 # Per-HTTP-call defaults — single submit / single poll, NOT total job time.
 _DEFAULT_TIMEOUT = 120.0
@@ -159,6 +160,45 @@ def _server_message(response: httpx.Response, fallback: str) -> str:
 def _request_id_of(response: httpx.Response, sent: str | None = None) -> str | None:
     """Best-effort extraction of the request id we should attach to errors."""
     return response.headers.get("x-request-id") or response.headers.get("x-correlation-id") or sent
+
+
+def _rate_limit_error_from(resp: httpx.Response, rid: str | None) -> RateLimitError:
+    """Build a RateLimitError from a 429 response envelope.
+
+    Kong's hyperapi-auth plugin rate-limits every /v1 route (submits and
+    job polls alike), always with a valid JSON envelope. Shared by both
+    clients so the field extraction stays in one place.
+    """
+    retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+    tier = None
+    limit = None
+    window_seconds = None
+    degraded = False
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            tier = body.get("tier")
+            limit = body.get("limit")
+            # Bug #86 (b): server now emits the sliding-window length so
+            # callers know "limit per N seconds" rather than guessing RPS.
+            window_seconds = body.get("window_seconds")
+            # Bug #86 (a): free-tier fail-closed sets degraded:true so
+            # customers can distinguish "temporarily unavailable, retry"
+            # from "actually exceeded my quota".
+            degraded = bool(body.get("degraded", False))
+    except (json.JSONDecodeError, ValueError):  # pragma: no cover
+        # Kong's hyperapi-auth plugin always emits a valid JSON envelope on 429.
+        pass
+    return RateLimitError(
+        _server_message(resp, "Rate limit exceeded"),
+        retry_after=retry_after,
+        tier=tier,
+        limit=limit,
+        window_seconds=window_seconds,
+        degraded=degraded,
+        status_code=429,
+        request_id=rid,
+    )
 
 
 # ── Client ─────────────────────────────────────────────────────────────────
@@ -430,36 +470,7 @@ class HyperAPIClient:
                 request_id=rid,
             )
         if sc == 429:
-            retry_after = _parse_retry_after(resp.headers.get("retry-after"))
-            tier = None
-            limit = None
-            window_seconds = None
-            degraded = False
-            try:
-                body = resp.json()
-                if isinstance(body, dict):
-                    tier = body.get("tier")
-                    limit = body.get("limit")
-                    # Bug #86 (b): server now emits the sliding-window length so
-                    # callers know "limit per N seconds" rather than guessing RPS.
-                    window_seconds = body.get("window_seconds")
-                    # Bug #86 (a): free-tier fail-closed sets degraded:true so
-                    # customers can distinguish "temporarily unavailable, retry"
-                    # from "actually exceeded my quota".
-                    degraded = bool(body.get("degraded", False))
-            except (json.JSONDecodeError, ValueError):  # pragma: no cover
-                # Kong's hyperapi-auth plugin always emits a valid JSON envelope on 429.
-                pass
-            raise RateLimitError(
-                _server_message(resp, "Rate limit exceeded"),
-                retry_after=retry_after,
-                tier=tier,
-                limit=limit,
-                window_seconds=window_seconds,
-                degraded=degraded,
-                status_code=429,
-                request_id=rid,
-            )
+            raise _rate_limit_error_from(resp, rid)
         if sc == 413:
             raise DocumentUploadError(
                 _server_message(resp, "File exceeds upload size limit"),
@@ -640,31 +651,7 @@ class HyperAPIClient:
             # Kong's hyperapi-auth plugin rate-limits GET /v1/jobs/{id} too — surface
             # as RateLimitError so callers (and `_poll_with_retry`'s don't-retry list)
             # see it consistently with submit-time 429s.
-            retry_after = _parse_retry_after(resp.headers.get("retry-after"))
-            tier = None
-            limit = None
-            window_seconds = None
-            degraded = False
-            try:
-                body = resp.json()
-                if isinstance(body, dict):
-                    tier = body.get("tier")
-                    limit = body.get("limit")
-                    window_seconds = body.get("window_seconds")
-                    degraded = bool(body.get("degraded", False))
-            except (json.JSONDecodeError, ValueError):  # pragma: no cover
-                # Same Kong-emits-valid-JSON guarantee as the submit-time 429 branch.
-                pass
-            raise RateLimitError(
-                _server_message(resp, "Rate limit exceeded"),
-                retry_after=retry_after,
-                tier=tier,
-                limit=limit,
-                window_seconds=window_seconds,
-                degraded=degraded,
-                status_code=429,
-                request_id=rid,
-            )
+            raise _rate_limit_error_from(resp, rid)
         if resp.status_code >= 400:
             raise HyperAPIError(
                 _server_message(resp, f"Poll failed (HTTP {resp.status_code})"),
@@ -682,6 +669,116 @@ class HyperAPIClient:
                 status_code=200,
                 request_id=rid,
             ) from e
+
+    # ── Jobs management ──────────────────────────────────────────────────
+
+    def list_recent_jobs(
+        self,
+        *,
+        limit: int = 20,
+        source: str | None = None,
+    ) -> list[dict]:
+        """List the org's recent jobs (summary rows, newest first).
+
+        Args:
+            limit: Maximum rows to return. The server clamps to [1, 100];
+                out-of-range values silently fall back to 20.
+            source: Optional filter — ``"api"`` or ``"playground"``. Unknown
+                values are ignored server-side (no error).
+
+        Returns:
+            A list of summary dicts (``job_id``, ``request_id``, ``status``,
+            ``task``, ``endpoint``, ``pages``, ``filename``, ``source``,
+            ``is_test``, ``created_at``, ``completed_at``, ``error``).
+            ``status`` may be ``"cancelled"`` for jobs stopped via
+            :py:meth:`delete_job`. Summaries never include results — fetch
+            the full envelope for one job with :py:meth:`get_job`.
+        """
+        headers = self._get_headers()
+        request_id = headers["X-Request-ID"]
+        params: dict[str, Any] = {"limit": limit}
+        if source is not None:
+            params["source"] = source
+
+        try:
+            resp = self._client.get(
+                f"{self.base_url}/v1/jobs/recent", params=params, headers=headers
+            )
+        except httpx.RequestError as e:
+            raise HyperAPIError(
+                f"Recent-jobs request failed: {e}", request_id=request_id
+            ) from e
+
+        rid = _request_id_of(resp, request_id)
+        if resp.status_code == 401:
+            raise AuthenticationError(
+                "Invalid API key.", status_code=401, request_id=rid
+            )
+        if resp.status_code == 429:
+            raise _rate_limit_error_from(resp, rid)
+        if resp.status_code >= 400:
+            raise HyperAPIError(
+                _server_message(resp, f"Recent-jobs request failed (HTTP {resp.status_code})"),
+                status_code=resp.status_code,
+                request_id=rid,
+            )
+        # Same malformed-200 defence as get_job, plus envelope-shape guard:
+        # the contract is {"jobs": [...]} — anything else is a broken proxy.
+        try:
+            return resp.json()["jobs"]
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+            raise HyperAPIError(
+                f"Malformed recent-jobs response: {e}",
+                status_code=200,
+                request_id=rid,
+            ) from e
+
+    def delete_job(self, job_id: str) -> None:
+        """Cancel a job (``DELETE /v1/jobs/{job_id}``).
+
+        Despite the HTTP verb, the server semantics are *cancel*, not erase:
+        a pending or running job is stopped (its status becomes
+        ``"cancelled"``); a job that already completed or failed is left
+        untouched and keeps its result. Idempotent — missing, expired, and
+        already-terminal job ids all return success, so calling this twice
+        is safe.
+
+        Raises:
+            AuthenticationError: 401 (bad key).
+            HyperAPIError: 404 (job not found or expired), or any other ≥400.
+        """
+        headers = self._get_headers()
+        request_id = headers["X-Request-ID"]
+
+        try:
+            resp = self._client.delete(
+                f"{self.base_url}/v1/jobs/{job_id}", headers=headers
+            )
+        except httpx.RequestError as e:
+            raise HyperAPIError(
+                f"Job cancel failed: {e}", request_id=request_id
+            ) from e
+
+        rid = _request_id_of(resp, request_id)
+        if resp.status_code in (200, 204):
+            return
+        if resp.status_code == 401:
+            raise AuthenticationError(
+                "Invalid API key.", status_code=401, request_id=rid
+            )
+        if resp.status_code == 404:
+            raise HyperAPIError(
+                "Job not found or expired.",
+                status_code=404,
+                request_id=rid,
+            )
+        if resp.status_code == 429:
+            raise _rate_limit_error_from(resp, rid)
+        raise HyperAPIError(
+            _server_message(resp, f"Job cancel failed (HTTP {resp.status_code})"),
+            status_code=resp.status_code,
+            request_id=rid,
+        )
 
     def _poll_with_retry(self, job_id: str) -> dict:
         """Poll one time, retrying on transient failures (5xx, connection errors).
@@ -892,6 +989,7 @@ class HyperAPIClient:
         *,
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
+        mode: ParseMode = "fast",
         include_boxes: bool = False,
         include_image: bool = False,
         use_presigned: bool = True,
@@ -902,6 +1000,12 @@ class HyperAPIClient:
         v0.1.x backward compatibility — pass exactly one. The other
         ``submit_<op>`` methods don't take it because parse is the only op
         that historically accepted bare images via that name.
+
+        ``mode="advanced"`` runs structured-layout OCR (Chandra): each
+        ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
+        ``markdown``, and ``regions``. Only meaningful with the default
+        ``ocr_engine="paddle"``; noticeably slower than ``"fast"`` but well
+        within the default ``poll_timeout``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
         ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
@@ -916,6 +1020,7 @@ class HyperAPIClient:
             "/v1/parse", "parse", path,
             params={
                 "ocr_engine": ocr_engine,
+                "mode": mode,
                 "include_boxes": include_boxes,
                 "include_image": include_image,
             },
@@ -930,7 +1035,12 @@ class HyperAPIClient:
         mode: str = "default",
         use_presigned: bool = True,
     ) -> Job:
-        """Submit an extract job asynchronously and return immediately."""
+        """Submit an extract job asynchronously and return immediately.
+
+        ``mode`` selects the extraction pipeline: ``"default"`` (parallel
+        entity + line-item extraction) or ``"omni"`` (omni-model extraction
+        on a dedicated backend pool).
+        """
         path = self._resolve_path(file_path)
         return self._submit_via_path(
             "/v1/extract", "extract", path,
@@ -944,13 +1054,25 @@ class HyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
+        options: dict | None = None,
         use_presigned: bool = True,
     ) -> Job:
-        """Submit a classify job asynchronously and return immediately."""
+        """Submit a classify job asynchronously and return immediately.
+
+        ``options`` is an optional dict of classifier knobs, sent as a JSON
+        form field and validated server-side: ``mode`` (``"fast"`` |
+        ``"balanced"`` | ``"thorough"`` — the pipeline depth, distinct from
+        this method's ``mode=`` task selector), ``active_classes``,
+        ``custom_llm_classes``, ``system_instruction``, and token/page
+        budgets (``start_token_budget``, ``end_token_budget``,
+        ``max_start_pages``, ``max_end_pages``).
+        """
         path = self._resolve_path(file_path)
+        data = {"options": json.dumps(options)} if options is not None else None
         return self._submit_via_path(
             "/v1/classify", "classify", path,
             params={"ocr_engine": ocr_engine, "mode": mode},
+            data=data,
             use_presigned=use_presigned,
         )
 
@@ -960,13 +1082,23 @@ class HyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
+        options: dict | None = None,
         use_presigned: bool = True,
     ) -> Job:
-        """Submit a split job asynchronously and return immediately."""
+        """Submit a split job asynchronously and return immediately.
+
+        ``options`` is an optional dict of splitter knobs, sent as a JSON
+        form field and validated server-side: ``use_thinking``,
+        ``segment_classes``, ``extend_segment_classes``, and
+        ``custom_domain_guidelines`` (``{"domain_name", "identifier_patterns",
+        "binding_patterns", "heuristics", "examples"}``).
+        """
         path = self._resolve_path(file_path)
+        data = {"options": json.dumps(options)} if options is not None else None
         return self._submit_via_path(
             "/v1/split", "split", path,
             params={"ocr_engine": ocr_engine, "mode": mode},
+            data=data,
             use_presigned=use_presigned,
         )
 
@@ -984,7 +1116,10 @@ class HyperAPIClient:
 
         ``mode="redact"`` applies black boxes; ``mode="deidentify"`` overlays
         synthetic values. ``pii_config`` (``{"mode": "extend"|"replace",
-        "types": [...]}``) customizes the detected PII types.
+        "types": [...]}``) customizes the detected PII types. Built-in types
+        include PERSON_NAME, COMPANY_NAME, EMAIL, ADDRESS, WEBSITE, PHONE,
+        and CREDENTIALS (passwords, API keys, tokens, secrets) — all with
+        synthetic replacements, so each works in both modes.
         """
         path = self._resolve_path(file_path)
         data = {"pii_config": json.dumps(pii_config)} if pii_config is not None else None
@@ -1003,6 +1138,7 @@ class HyperAPIClient:
         *,
         image_path: str | Path | None = None,
         ocr_engine: OCREngine = "paddle",
+        mode: ParseMode = "fast",
         include_boxes: bool = False,
         include_image: bool = False,
         use_presigned: bool = True,
@@ -1015,6 +1151,11 @@ class HyperAPIClient:
             file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF, GIF).
             image_path: Deprecated alias for file_path.
             ocr_engine: ``"paddle"`` (default) or ``"doc-intent"``.
+            mode: ``"fast"`` (default — plain text + boxes) or ``"advanced"``
+                (structured-layout OCR via Chandra: each ``result["pages"]``
+                entry gains a ``structured`` dict with ``html``, ``markdown``,
+                and ``regions``). Advanced only applies on the default
+                ``ocr_engine="paddle"`` path and is noticeably slower.
             include_boxes: When True, each ``result["pages"]`` entry includes a
                 ``boxes`` list of ``{"text", "bbox": [left, top, right, bottom],
                 "confidence"}`` segments. PaddleOCR only; other engines return [].
@@ -1033,6 +1174,7 @@ class HyperAPIClient:
             file_path=file_path,
             image_path=image_path,
             ocr_engine=ocr_engine,
+            mode=mode,
             include_boxes=include_boxes,
             include_image=include_image,
             use_presigned=use_presigned,
@@ -1054,6 +1196,10 @@ class HyperAPIClient:
         Submits asynchronously and polls until done. Bypasses any edge-timeout
         ceiling because each individual HTTP request stays sub-second.
 
+        ``mode="omni"`` routes to the omni-model extraction pipeline on a
+        dedicated backend pool; ``"default"`` runs parallel entity +
+        line-item extraction.
+
         Returns:
             Response envelope with ``result`` containing entities and line items,
             and ``result["ocr_text"]`` with the raw OCR.
@@ -1072,15 +1218,24 @@ class HyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
+        options: dict | None = None,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
-        """Classify a document type (invoice, contract, receipt, etc.)."""
+        """Classify a document type (invoice, contract, receipt, etc.).
+
+        ``options`` customizes the classifier (see
+        :py:meth:`submit_classify`): pipeline depth via ``options["mode"]``
+        (``"fast"`` | ``"balanced"`` | ``"thorough"`` — distinct from the
+        ``mode=`` task selector), ``active_classes``, ``custom_llm_classes``,
+        ``system_instruction``, and token/page budgets.
+        """
         job = self.submit_classify(
             file_path,
             ocr_engine=ocr_engine,
             mode=mode,
+            options=options,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -1091,15 +1246,22 @@ class HyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
+        options: dict | None = None,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
-        """Split a multi-document PDF into individual document segments."""
+        """Split a multi-document PDF into individual document segments.
+
+        ``options`` customizes the splitter (see :py:meth:`submit_split`):
+        ``use_thinking``, ``segment_classes``, ``extend_segment_classes``,
+        and ``custom_domain_guidelines``.
+        """
         job = self.submit_split(
             file_path,
             ocr_engine=ocr_engine,
             mode=mode,
+            options=options,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)

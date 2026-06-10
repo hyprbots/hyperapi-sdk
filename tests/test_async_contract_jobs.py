@@ -621,3 +621,102 @@ async def test_async_and_sync_clients_coexist_in_same_process(mock_backend):
         assert async_result_2["result"] == {"who": "async"}
     finally:
         await async_client.aclose()
+
+
+# ── list_recent_jobs ─────────────────────────────────────────────────────
+
+
+_RECENT_ROWS = [
+    {
+        "job_id": "j-r1", "request_id": "req-1", "status": "completed",
+        "task": "extract", "endpoint": "/v1/extract", "pages": 3,
+        "filename": "invoice.pdf", "source": "api", "is_test": False,
+        "created_at": "2026-06-10T10:00:00Z", "completed_at": "2026-06-10T10:00:09Z",
+        "error": None,
+    },
+    {
+        "job_id": "j-r2", "request_id": "req-2", "status": "cancelled",
+        "task": "parse", "endpoint": "/v1/parse", "pages": 1,
+        "filename": "scan.png", "source": "playground", "is_test": True,
+        "created_at": "2026-06-10T09:00:00Z", "completed_at": None,
+        "error": None,
+    },
+]
+
+
+async def test_async_list_recent_jobs_defaults(mock_backend, async_client):
+    route = mock_backend.get("/v1/jobs/recent").mock(
+        return_value=httpx.Response(200, json={"jobs": _RECENT_ROWS}),
+    )
+
+    jobs = await async_client.list_recent_jobs()
+
+    assert [j["job_id"] for j in jobs] == ["j-r1", "j-r2"]
+    req = route.calls[0].request
+    assert req.headers["X-API-Key"] == "hk_test_unit"
+    assert req.url.params["limit"] == "20"
+    assert "source" not in req.url.params
+
+
+async def test_async_list_recent_jobs_limit_and_source_params(mock_backend, async_client):
+    route = mock_backend.get("/v1/jobs/recent").mock(
+        return_value=httpx.Response(200, json={"jobs": []}),
+    )
+
+    await async_client.list_recent_jobs(limit=5, source="playground")
+
+    req = route.calls[0].request
+    assert req.url.params["limit"] == "5"
+    assert req.url.params["source"] == "playground"
+
+
+async def test_async_list_recent_jobs_401_raises_authentication(mock_backend, async_client):
+    mock_backend.get("/v1/jobs/recent").mock(return_value=httpx.Response(401))
+
+    with pytest.raises(AuthenticationError) as ei:
+        await async_client.list_recent_jobs()
+    assert ei.value.status_code == 401
+
+
+async def test_async_list_recent_jobs_malformed_envelope_raises_typed(mock_backend, async_client):
+    mock_backend.get("/v1/jobs/recent").mock(
+        return_value=httpx.Response(200, json={"unexpected": True}),
+    )
+
+    with pytest.raises(HyperAPIError) as ei:
+        await async_client.list_recent_jobs()
+    assert "Malformed" in str(ei.value)
+
+
+# ── delete_job (cancel semantics) ────────────────────────────────────────
+
+
+async def test_async_delete_job_204_returns_none(mock_backend, async_client):
+    route = mock_backend.delete("/v1/jobs/j-del").mock(return_value=httpx.Response(204))
+
+    assert await async_client.delete_job("j-del") is None
+    req = route.calls[0].request
+    assert req.method == "DELETE"
+    assert req.headers["X-API-Key"] == "hk_test_unit"
+
+
+async def test_async_delete_job_idempotent_204_for_unknown_id(mock_backend, async_client):
+    mock_backend.delete("/v1/jobs/never-existed").mock(return_value=httpx.Response(204))
+
+    await async_client.delete_job("never-existed")  # no raise
+
+
+async def test_async_delete_job_404_raises_typed(mock_backend, async_client):
+    mock_backend.delete("/v1/jobs/other-org").mock(return_value=httpx.Response(404))
+
+    with pytest.raises(HyperAPIError) as ei:
+        await async_client.delete_job("other-org")
+    assert ei.value.status_code == 404
+    assert "not found" in str(ei.value).lower() or "expired" in str(ei.value).lower()
+
+
+async def test_async_delete_job_401_raises_authentication(mock_backend, async_client):
+    mock_backend.delete("/v1/jobs/j-del").mock(return_value=httpx.Response(401))
+
+    with pytest.raises(AuthenticationError):
+        await async_client.delete_job("j-del")

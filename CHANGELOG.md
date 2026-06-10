@@ -5,6 +5,58 @@ All notable changes to `hyperapi-sdk` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-06-10
+
+Platform API sync. No breaking changes — purely additive (all new parameters
+are keyword-only with backward-compatible defaults).
+
+### Added
+
+- **`parse(mode=...)` / `submit_parse(mode=...)`** (sync + async) —
+  `mode="advanced"` runs structured-layout OCR (Chandra): each
+  `result["pages"]` entry gains a `structured` dict with `html`, `markdown`,
+  and `regions`. Default `mode="fast"` is unchanged behavior.
+
+  ```python
+  result = client.parse("report.pdf", mode="advanced")
+  print(result["pages"][0]["structured"]["markdown"])
+  ```
+
+- **`classify(options=...)` / `split(options=...)`** (and their `submit_`
+  twins, sync + async) — pass service-level knobs as a dict, sent as a JSON
+  form field and validated server-side. Classify: `mode`
+  (`"fast"|"balanced"|"thorough"` — pipeline depth, distinct from the top-level
+  `mode=` task selector), `active_classes`, `custom_llm_classes`,
+  `system_instruction`, token/page budgets. Split: `use_thinking`,
+  `segment_classes`, `extend_segment_classes`, `custom_domain_guidelines`.
+
+  ```python
+  client.classify("doc.pdf", options={"mode": "thorough", "active_classes": ["invoice", "po"]})
+  client.split("binder.pdf", options={"use_thinking": False})
+  ```
+
+- **`list_recent_jobs(limit=20, source=None)`** (sync + async) — list the
+  org's recent jobs as summary rows (`GET /v1/jobs/recent`). `limit` is
+  server-clamped to [1, 100]; `source` filters `"api"` vs `"playground"`.
+
+- **`delete_job(job_id)`** (sync + async) — cancel a job
+  (`DELETE /v1/jobs/{job_id}`). Server semantics are *cancel*: in-flight jobs
+  stop (status becomes `"cancelled"`); completed jobs keep their result.
+  Idempotent.
+
+### Documentation
+
+- `extract(mode="omni")` documented — omni-model extraction on a dedicated
+  backend pool.
+- `CREDENTIALS` PII type (passwords, API keys, tokens, secrets) documented for
+  `redact()` / `pii_config`.
+
+### Internal
+
+- 429 envelope parsing consolidated into a single shared
+  `_rate_limit_error_from()` helper (was duplicated four times across the two
+  clients).
+
 ## [0.3.0] — 2026-06-02
 
 Redact / deidentify. No breaking changes — purely additive.
