@@ -864,6 +864,9 @@ class AsyncHyperAPIClient:
         envelope shape as :py:meth:`submit_extract`.
         """
         path = self._resolve_path(file_path)
+        # op_name="extract" is deliberate error-taxonomy reuse (same ExtractError,
+        # same response envelope) — NOT a typo. There is no "extract-omni" key in
+        # _OP_TO_ERROR; do not "fix" this to one (it would KeyError).
         return await self._submit_via_path(
             "/v1/extract-omni", "extract", path,
             params={"ocr_engine": ocr_engine},

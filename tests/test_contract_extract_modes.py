@@ -78,3 +78,48 @@ def test_submit_extract_advanced_returns_job_no_polling(mock_backend, client, ti
     assert job.job_id == "j_adv2"
     assert submit.calls[0].request.url.path == "/v1/extract-omni"
     assert not poll.called                       # submit_* does not poll
+
+
+# ── async mirrors (the async client is a hand-maintained parallel impl) ────────
+async def test_async_basic_extract_defaults_to_financial(mock_backend, async_client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, _ = _seed_completed(mock_backend, job_id="aj_fin", path="/v1/extract")
+
+    await async_client.extract(tiny_pdf)
+
+    req = submit.calls[0].request
+    assert req.url.path == "/v1/extract"
+    assert req.url.params["category"] == "financial"
+
+
+async def test_async_basic_extract_non_financial_sets_category(mock_backend, async_client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, _ = _seed_completed(mock_backend, job_id="aj_nf", path="/v1/extract")
+
+    await async_client.extract(tiny_pdf, category="non_financial")
+
+    assert submit.calls[0].request.url.params["category"] == "non_financial"
+
+
+async def test_async_advanced_extract_hits_omni_endpoint(mock_backend, async_client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, poll = _seed_completed(mock_backend, job_id="aj_adv", path="/v1/extract-omni")
+
+    result = await async_client.extract_advanced(tiny_pdf)
+
+    assert result["entities"]["vendor"] == "Acme"
+    req = submit.calls[0].request
+    assert req.url.path == "/v1/extract-omni"
+    assert "category" not in req.url.params
+    assert poll.called
+
+
+async def test_async_submit_extract_advanced_returns_job_no_polling(mock_backend, async_client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, poll = _seed_completed(mock_backend, job_id="aj_adv2", path="/v1/extract-omni")
+
+    job = await async_client.submit_extract_advanced(tiny_pdf)
+
+    assert job.job_id == "aj_adv2"
+    assert submit.calls[0].request.url.path == "/v1/extract-omni"
+    assert not poll.called
