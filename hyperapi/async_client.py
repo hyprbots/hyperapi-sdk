@@ -70,6 +70,7 @@ import httpx
 # and means bug fixes in error parsing / scrubbing land in both.
 from .client import (
     CONTENT_TYPES,
+    ExtractCategory,
     Job,
     OCREngine,
     ParseMode,
@@ -831,18 +832,41 @@ class AsyncHyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
+        category: ExtractCategory = "financial",
         use_presigned: bool = True,
     ) -> Job:
-        """Submit an extract job asynchronously and return immediately.
+        """Submit a Basic extract job asynchronously and return immediately.
 
-        ``mode`` selects the extraction pipeline: ``"default"`` (parallel
-        entity + line-item extraction) or ``"omni"`` (omni-model extraction
-        on a dedicated backend pool).
+        ``category`` selects the Basic extractor: ``"financial"`` (default —
+        the two-leg IDP adapter for invoices/receipts) or ``"non_financial"``
+        (a generic single-pass extractor). For auto-detecting Advanced
+        extraction, use :py:meth:`submit_extract_advanced`.
         """
         path = self._resolve_path(file_path)
         return await self._submit_via_path(
             "/v1/extract", "extract", path,
-            params={"ocr_engine": ocr_engine, "mode": mode},
+            params={"ocr_engine": ocr_engine, "mode": mode, "category": category},
+            use_presigned=use_presigned,
+        )
+
+    async def submit_extract_advanced(
+        self,
+        file_path: str | Path,
+        *,
+        ocr_engine: OCREngine = "paddle",
+        use_presigned: bool = True,
+    ) -> Job:
+        """Submit an Advanced extract job asynchronously and return immediately.
+
+        Advanced extraction auto-detects the document type (no ``category``
+        needed): invoice-family documents route to the two-leg IDP adapter,
+        everything else to schema-less grounded extraction. Returns the same
+        envelope shape as :py:meth:`submit_extract`.
+        """
+        path = self._resolve_path(file_path)
+        return await self._submit_via_path(
+            "/v1/extract-omni", "extract", path,
+            params={"ocr_engine": ocr_engine},
             use_presigned=use_presigned,
         )
 
@@ -971,20 +995,45 @@ class AsyncHyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
+        category: ExtractCategory = "financial",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
         """Extract structured data (entities + line items) from a document.
 
-        ``mode="omni"`` routes to the omni-model extraction pipeline on a
-        dedicated backend pool; ``"default"`` runs parallel entity +
-        line-item extraction.
+        This is the Basic extractor. ``category="financial"`` (default) runs the
+        two-leg IDP adapter (invoices/receipts); ``"non_financial"`` runs a
+        generic single-pass extractor. For auto-detecting Advanced extraction,
+        use :py:meth:`extract_advanced`.
         """
         job = await self.submit_extract(
             file_path,
             ocr_engine=ocr_engine,
             mode=mode,
+            category=category,
+            use_presigned=use_presigned,
+        )
+        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+
+    async def extract_advanced(
+        self,
+        file_path: str | Path,
+        *,
+        ocr_engine: OCREngine = "paddle",
+        use_presigned: bool = True,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
+    ) -> dict:
+        """Advanced extraction — auto-detects the document type, no ``category``.
+
+        Invoice-family documents route to the two-leg IDP adapter; everything
+        else to schema-less grounded extraction. Submits asynchronously and
+        polls until done. Returns the same envelope shape as :py:meth:`extract`.
+        """
+        job = await self.submit_extract_advanced(
+            file_path,
+            ocr_engine=ocr_engine,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
