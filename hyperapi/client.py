@@ -374,11 +374,20 @@ class HyperAPIClient:
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
 
+        # Send the file size so the server can pre-flight the size limit and
+        # reject oversized files with a 413 here, before the S3 PUT, instead of
+        # failing later at the PUT. Best-effort: skipped if stat() fails.
+        body: dict[str, object] = {"filename": path.name, "content_type": content_type}
+        try:
+            body["content_length"] = path.stat().st_size
+        except OSError:
+            pass
+
         # Step 1 — get presigned upload URL (goes through Kong + auth)
         try:
             resp = self._client.post(
                 f"{self.base_url}/v1/documents/upload",
-                json={"filename": path.name, "content_type": content_type},
+                json=body,
                 headers=headers,
             )
         except httpx.RequestError as e:
@@ -748,7 +757,10 @@ class HyperAPIClient:
 
         Raises:
             AuthenticationError: 401 (bad key).
-            HyperAPIError: 404 (job not found or expired), or any other ≥400.
+            HyperAPIError: 404 (job belongs to a different org), or any other
+                ≥400. A missing/expired job is *not* a 404 here — DELETE is
+                idempotent and returns 204 (success) for ids that no longer
+                exist; the only 404 is a cross-org id.
         """
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
@@ -770,8 +782,11 @@ class HyperAPIClient:
                 "Invalid API key.", status_code=401, request_id=rid
             )
         if resp.status_code == 404:
+            # On DELETE, a 404 means the job belongs to a different org
+            # (opaque enumeration guard). Missing/expired ids short-circuit to
+            # 204 above, so they never reach here.
             raise HyperAPIError(
-                "Job not found or expired.",
+                "Job not found.",
                 status_code=404,
                 request_id=rid,
             )
@@ -1036,17 +1051,26 @@ class HyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
+        category: str = "financial",
         use_presigned: bool = True,
     ) -> Job:
         """Submit an extract job asynchronously and return immediately.
 
         ``mode="default"`` runs the standard structured extraction path
         (entities + line items).
+
+        ``category`` (``"financial"`` | ``"non_financial"``) selects the
+        extraction profile. **Preprod-only and flag-gated:** it is honoured
+        only on the preproduction environment and only when the server-side
+        ``EXTRACT_MODE_ROUTING_ENABLED`` flag is on (default off). When the
+        flag is off — and on production, which does not yet ship this routing
+        — the value is silently ignored and extraction behaves as
+        ``"financial"``.
         """
         path = self._resolve_path(file_path)
         return self._submit_via_path(
             "/v1/extract", "extract", path,
-            params={"ocr_engine": ocr_engine, "mode": mode},
+            params={"ocr_engine": ocr_engine, "mode": mode, "category": category},
             use_presigned=use_presigned,
         )
 
@@ -1062,12 +1086,29 @@ class HyperAPIClient:
         """Submit a classify job asynchronously and return immediately.
 
         ``options`` is an optional dict of classifier knobs, sent as a JSON
-        form field and validated server-side: ``mode`` (``"fast"`` |
-        ``"balanced"`` | ``"thorough"`` — the pipeline depth, distinct from
-        this method's ``mode=`` task selector), ``active_classes``,
-        ``custom_llm_classes``, ``system_instruction``, and token/page
-        budgets (``start_token_budget``, ``end_token_budget``,
-        ``max_start_pages``, ``max_end_pages``).
+        form field and validated server-side. Accepted keys:
+
+        - ``mode`` (``"fast"`` | ``"balanced"`` | ``"thorough"``) — the
+          pipeline depth, distinct from this method's ``mode=`` task selector.
+        - ``active_classes`` — explicit list of class labels to consider.
+        - ``active_classes_type`` (``"default"`` | ``"minimal"``, default
+          ``"default"``) — picks the built-in label set (default = full set,
+          minimal = reduced set).
+        - ``custom_llm_classes`` — additional caller-defined class labels.
+        - ``system_instruction`` — extra prompt guidance.
+        - ``domain_options`` (str, optional) — pipe-separated list of allowed
+          first-stage domain labels.
+        - ``non_domain_label`` (str, optional, effective default
+          ``"non_financial"``) — label used when the document falls outside
+          the configured domain.
+        - ``non_domain_exit_label`` (str, optional, effective default
+          ``"other_non_financial"``) — terminal label for out-of-domain exits.
+        - ``confusion_neighbors`` (dict of ``{label: [neighbor_label, ...]}``,
+          optional) — disambiguation hints between easily-confused classes.
+        - Token/page budgets: ``start_token_budget`` (default 3200, range
+          256–8192), ``end_token_budget`` (default 1600, range 256–8192),
+          ``max_start_pages`` (default 4, range 1–20), ``max_end_pages``
+          (default 2, range 0–10).
         """
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
@@ -1092,8 +1133,10 @@ class HyperAPIClient:
         ``options`` is an optional dict of splitter knobs, sent as a JSON
         form field and validated server-side: ``use_thinking``,
         ``segment_classes``, ``extend_segment_classes``, and
-        ``custom_domain_guidelines`` (``{"domain_name", "identifier_patterns",
-        "binding_patterns", "heuristics", "examples"}``).
+        ``custom_domain_guidelines`` — a nested object whose ``domain_name``
+        sub-field is **required** when ``custom_domain_guidelines`` is given;
+        the remaining sub-fields (``identifier_patterns``, ``binding_patterns``,
+        ``heuristics``, ``examples``) are optional.
         """
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
@@ -1189,6 +1232,7 @@ class HyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
+        category: str = "financial",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1201,6 +1245,12 @@ class HyperAPIClient:
         ``mode="default"`` runs the standard structured extraction path
         (entities + line items).
 
+        ``category`` (``"financial"`` | ``"non_financial"``) selects the
+        extraction profile. **Preprod-only and flag-gated** (server-side
+        ``EXTRACT_MODE_ROUTING_ENABLED``, default off): ignored when the flag
+        is off and on production, where it falls back to ``"financial"``. See
+        :py:meth:`submit_extract`.
+
         Returns:
             Response envelope with ``result`` containing entities and line items,
             and ``result["ocr_text"]`` with the raw OCR.
@@ -1209,6 +1259,7 @@ class HyperAPIClient:
             file_path,
             ocr_engine=ocr_engine,
             mode=mode,
+            category=category,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -1226,11 +1277,14 @@ class HyperAPIClient:
     ) -> dict:
         """Classify a document type (invoice, contract, receipt, etc.).
 
-        ``options`` customizes the classifier (see
-        :py:meth:`submit_classify`): pipeline depth via ``options["mode"]``
+        ``options`` customizes the classifier (see :py:meth:`submit_classify`
+        for the full key list): pipeline depth via ``options["mode"]``
         (``"fast"`` | ``"balanced"`` | ``"thorough"`` — distinct from the
-        ``mode=`` task selector), ``active_classes``, ``custom_llm_classes``,
-        ``system_instruction``, and token/page budgets.
+        ``mode=`` task selector), ``active_classes``, ``active_classes_type``,
+        ``custom_llm_classes``, ``system_instruction``, ``domain_options``,
+        ``non_domain_label``, ``non_domain_exit_label``, ``confusion_neighbors``,
+        and the token/page budgets (``start_token_budget``, ``end_token_budget``,
+        ``max_start_pages``, ``max_end_pages``).
         """
         job = self.submit_classify(
             file_path,
@@ -1256,7 +1310,8 @@ class HyperAPIClient:
 
         ``options`` customizes the splitter (see :py:meth:`submit_split`):
         ``use_thinking``, ``segment_classes``, ``extend_segment_classes``,
-        and ``custom_domain_guidelines``.
+        and ``custom_domain_guidelines`` (its ``domain_name`` sub-field is
+        required when the object is supplied).
         """
         job = self.submit_split(
             file_path,
