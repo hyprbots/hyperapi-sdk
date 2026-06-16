@@ -15,22 +15,21 @@ The convenience methods (``parse(...)``, ``extract(...)``, ...) hide the
 ``job_id`` from callers; advanced users who want fire-and-forget or custom
 progress UIs can call ``submit_<op>(...)`` and ``wait_for_job(...)`` directly.
 
-Pipeline (server-side, unchanged):
+Pipeline (server-side, transparent to callers):
 
     Stage 1 — OCR (always runs)
-        Upload → doc-processor /convert → page images
-        → OCR engine (paddle-ocr or doc-intent) → full_text + page_texts
+        Upload → page images → OCR text (full_text + page_texts)
 
-    Stage 2 — Task-specific LLM (skipped for parse)
+    Stage 2 — Task-specific processing (skipped for parse)
         parse:      OCR text only (no Stage 2)
-        extract:    OCR output → extract-service /v2/extract
-        classify:   OCR output → classifier-splitter /v2/classify
-        split:      OCR output → classifier-splitter /v2/split
+        extract:    OCR output → structured extraction
+        classify:   OCR output → classification
+        split:      OCR output → document splitting
 
 OCR engines
 -----------
-paddle      PaddleOCR (default) — fast, high-throughput production OCR
-doc-intent  Doc-Intent VLM — vision-language model, better on complex layouts
+standard  Standard OCR (default) — fast, high-throughput
+layout    Layout-aware OCR — better on complex layouts, multi-column, tables
 """
 
 from __future__ import annotations
@@ -74,7 +73,7 @@ CONTENT_TYPES = {
     ".pdf": "application/pdf",
 }
 
-OCREngine = Literal["paddle", "doc-intent"]
+OCREngine = str
 ParseMode = Literal["fast", "advanced"]
 
 # Per-HTTP-call defaults — single submit / single poll, NOT total job time.
@@ -1005,19 +1004,19 @@ class HyperAPIClient:
         ``submit_<op>`` methods don't take it because parse is the only op
         that historically accepted bare images via that name.
 
-        ``mode="advanced"`` runs structured-layout OCR (Chandra): each
+        ``mode="advanced"`` runs layout-aware structured OCR: each
         ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
-        ``markdown``, and ``regions``. Only meaningful with the default
-        ``ocr_engine="paddle"``; noticeably slower than ``"fast"`` but well
-        within the default ``poll_timeout``.
+        ``markdown``, and ``regions``. Only meaningful on the default OCR
+        engine; noticeably slower than ``"fast"`` but well within the default
+        ``poll_timeout``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+        ``result["pages"]`` (standard OCR engine only; the layout-aware engine
+        returns an empty list).
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
-        to each ``result["pages"]`` entry pointing to the deskew-corrected page
-        image in S3. Requires the router's IAM to have ``s3:PutObject`` +
-        ``s3:GetObject`` on the ``deskewed/*`` prefix.
+        to each ``result["pages"]`` entry, pointing to the deskew-corrected
+        page image.
         """
         path = self._resolve_path(file_path, image_path)
         return self._submit_via_path(
@@ -1041,9 +1040,8 @@ class HyperAPIClient:
     ) -> Job:
         """Submit an extract job asynchronously and return immediately.
 
-        ``mode`` selects the extraction pipeline: ``"default"`` (parallel
-        entity + line-item extraction) or ``"omni"`` (omni-model extraction
-        on a dedicated backend pool).
+        ``mode="default"`` runs the standard structured extraction path
+        (entities + line items).
         """
         path = self._resolve_path(file_path)
         return self._submit_via_path(
@@ -1154,19 +1152,19 @@ class HyperAPIClient:
         Args:
             file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF, GIF).
             image_path: Deprecated alias for file_path.
-            ocr_engine: ``"paddle"`` (default) or ``"doc-intent"``.
             mode: ``"fast"`` (default — plain text + boxes) or ``"advanced"``
-                (structured-layout OCR via Chandra: each ``result["pages"]``
+                (layout-aware structured OCR: each ``result["pages"]``
                 entry gains a ``structured`` dict with ``html``, ``markdown``,
-                and ``regions``). Advanced only applies on the default
-                ``ocr_engine="paddle"`` path and is noticeably slower.
+                and ``regions``). Advanced only applies on the default OCR
+                engine and is noticeably slower.
             include_boxes: When True, each ``result["pages"]`` entry includes a
                 ``boxes`` list of ``{"text", "bbox": [left, top, right, bottom],
-                "confidence"}`` segments. PaddleOCR only; other engines return [].
+                "confidence"}`` segments. Standard OCR engine only; the
+                layout-aware engine returns [].
             include_image: When True, each ``result["pages"]`` entry includes an
-                ``image_url`` (presigned S3 GET for the deskew-corrected page) and
+                ``image_url`` (presigned GET for the deskew-corrected page) and
                 ``dimensions`` (``{"width", "height"}`` in that image's pixel space,
-                which matches the box coordinate space). Requires appropriate IAM.
+                which matches the box coordinate space).
             use_presigned: Use the presigned-S3 upload flow (default True).
             poll_timeout: Override the constructor's poll_timeout for this call.
             poll_interval: Override the constructor's poll_interval for this call.
@@ -1200,9 +1198,8 @@ class HyperAPIClient:
         Submits asynchronously and polls until done. Bypasses any edge-timeout
         ceiling because each individual HTTP request stays sub-second.
 
-        ``mode="omni"`` routes to the omni-model extraction pipeline on a
-        dedicated backend pool; ``"default"`` runs parallel entity +
-        line-item extraction.
+        ``mode="default"`` runs the standard structured extraction path
+        (entities + line items).
 
         Returns:
             Response envelope with ``result`` containing entities and line items,
@@ -1315,10 +1312,10 @@ class HyperAPIClient:
 
         Uploads the document once, then submits the parse and extract legs
         back-to-back (two sequential POSTs from the SDK). The platform runs
-        the two legs concurrently on the backend — the second leg hits the
-        router's OCR cache via the shared ``document_key``, so total
-        wall-clock time ≈ max(parse, extract) + a small polling overhead,
-        not their sum. Polls both jobs round-robin via ``wait_for_jobs``.
+        the two legs concurrently on the backend, reusing the shared
+        ``document_key`` so OCR is computed once, so total wall-clock time
+        ≈ max(parse, extract) + a small polling overhead, not their sum.
+        Polls both jobs round-robin via ``wait_for_jobs``.
 
         Returns:
             ``{"ocr": <parse text>, "data": <extract structured fields>}``

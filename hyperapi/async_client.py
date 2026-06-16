@@ -220,9 +220,9 @@ class AsyncHyperAPIClient:
     ) -> str:
         """Upload a document via the presigned-URL flow and return its document_key.
 
-        Two awaits under the hood: presigned-URL fetch (Kong + auth) and the
-        direct S3 PUT (bypasses Kong). The returned ``document_key`` is reusable
-        across subsequent inference calls without re-uploading.
+        Two awaits under the hood: a presigned-URL fetch and the direct upload
+        PUT. The returned ``document_key`` is reusable across subsequent
+        inference calls without re-uploading.
 
         Raises:
             FileNotFoundError: If the file does not exist.
@@ -801,14 +801,15 @@ class AsyncHyperAPIClient:
     ) -> Job:
         """Submit a parse job asynchronously and return immediately.
 
-        ``mode="advanced"`` runs structured-layout OCR (Chandra): each
+        ``mode="advanced"`` runs layout-aware structured OCR: each
         ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
-        ``markdown``, and ``regions``. Only meaningful with the default
-        ``ocr_engine="paddle"``; noticeably slower than ``"fast"`` but well
-        within the default ``poll_timeout``.
+        ``markdown``, and ``regions``. Only meaningful on the default OCR
+        engine; noticeably slower than ``"fast"`` but well within the default
+        ``poll_timeout``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+        ``result["pages"]`` (standard OCR engine only; the layout-aware engine
+        returns an empty list).
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
         to each ``result["pages"]`` entry for the deskew-corrected page image.
@@ -835,9 +836,8 @@ class AsyncHyperAPIClient:
     ) -> Job:
         """Submit an extract job asynchronously and return immediately.
 
-        ``mode`` selects the extraction pipeline: ``"default"`` (parallel
-        entity + line-item extraction) or ``"omni"`` (omni-model extraction
-        on a dedicated backend pool).
+        ``mode="default"`` runs the standard structured extraction path
+        (entities + line items).
         """
         path = self._resolve_path(file_path)
         return await self._submit_via_path(
@@ -943,13 +943,14 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Parse a document using OCR. Submits asynchronously and polls until done.
 
-        ``mode="advanced"`` runs structured-layout OCR (Chandra): each
+        ``mode="advanced"`` runs layout-aware structured OCR: each
         ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
-        ``markdown``, and ``regions``. Only meaningful with the default
-        ``ocr_engine="paddle"``; noticeably slower than ``"fast"``.
+        ``markdown``, and ``regions``. Only meaningful on the default OCR
+        engine; noticeably slower than ``"fast"``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+        ``result["pages"]`` (standard OCR engine only; the layout-aware engine
+        returns an empty list).
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
         to each ``result["pages"]`` entry for the deskew-corrected page image.
@@ -977,9 +978,8 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Extract structured data (entities + line items) from a document.
 
-        ``mode="omni"`` routes to the omni-model extraction pipeline on a
-        dedicated backend pool; ``"default"`` runs parallel entity +
-        line-item extraction.
+        ``mode="default"`` runs the standard structured extraction path
+        (entities + line items).
         """
         job = await self.submit_extract(
             file_path,

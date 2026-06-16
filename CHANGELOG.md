@@ -13,7 +13,7 @@ are keyword-only with backward-compatible defaults).
 ### Added
 
 - **`parse(mode=...)` / `submit_parse(mode=...)`** (sync + async) —
-  `mode="advanced"` runs structured-layout OCR (Chandra): each
+  `mode="advanced"` runs layout-aware structured OCR: each
   `result["pages"]` entry gains a `structured` dict with `html`, `markdown`,
   and `regions`. Default `mode="fast"` is unchanged behavior.
 
@@ -48,8 +48,7 @@ are keyword-only with backward-compatible defaults).
 
 ### Documentation
 
-- `extract(mode="omni")` documented — omni-model extraction on a dedicated
-  backend pool.
+- `extract(mode="omni")` documented — schema-less grounded extraction.
 - `CREDENTIALS` PII type (passwords, API keys, tokens, secrets) documented for
   `redact()` / `pii_config`.
 
