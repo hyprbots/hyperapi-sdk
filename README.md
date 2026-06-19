@@ -41,14 +41,7 @@ HyperAPI uses a **two-stage pipeline** for document processing:
                     └─────────────────────────────┘
 ```
 
-**Stage 1** runs OCR via one of two engines (configurable per-request). **Stage 2** routes the OCR output to task-specific processing. For `parse`, Stage 2 is skipped — you get the raw OCR result directly.
-
-### OCR Engines
-
-| Engine | Best For |
-|--------|----------|
-| **Standard OCR** (default) | General documents, invoices, receipts |
-| **Layout-Aware OCR** | Complex layouts, multi-column, tables |
+**Stage 1** runs OCR server-side. **Stage 2** routes the OCR output to task-specific processing. For `parse`, Stage 2 is skipped — you get the raw OCR result directly.
 
 ## Why Choose HyperAPI?
 
@@ -128,8 +121,7 @@ ocr_result = client.parse("complex_table.pdf")
 
 `mode="advanced"` runs layout-aware structured OCR: each page gains a
 `structured` dict with `html`, `markdown`, and `regions` — tables come back as
-tables, not flattened text. Slower than the default `mode="fast"`, and applies
-on the default OCR engine.
+tables, not flattened text. Slower than the default `mode="fast"`.
 
 ```python
 result = client.parse("annual_report.pdf", mode="advanced")
@@ -362,12 +354,13 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 |--------|----------|-------------|
 | `upload_document(file)` | presigned upload | Upload file, returns `document_key` (valid 24 h). |
 | `parse(file)` | OCR only | Parse document into structured text. Submit + poll under the hood. |
-| `extract(file)` | OCR → structured extraction | Extract structured fields with validation. Submit + poll. |
+| `extract(file, *, category="financial")` | OCR → structured extraction | Basic extractor. `category="financial"` (default) or `"non_financial"`. Submit + poll. |
+| `extract_advanced(file)` | OCR → structured extraction | Advanced extractor — auto-detects the document type (no `category`). Submit + poll. |
 | `classify(file)` | OCR → classification | Classify document type. Submit + poll. |
 | `split(file)` | OCR → document splitting | Split multi-document binders. Submit + poll. |
 | `redact(file)` | OCR → redaction | Mask or deidentify PII (and optionally logos). Submit + poll. |
 | `process(file)` | OCR → parse + extract | Combined parse + extract sharing one upload. Submit + poll on both legs. |
-| `submit_parse / submit_extract / submit_classify / submit_split / submit_redact` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
+| `submit_parse / submit_extract / submit_extract_advanced / submit_classify / submit_split / submit_redact` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
 | `get_job(job_id)` | — | One-shot status poll. No waiting, no retry. |
 | `list_recent_jobs(*, limit=20, source=None)` | — | List the org's recent jobs (summary rows, newest first). |
 | `delete_job(job_id)` | — | Cancel a job. Idempotent; completed jobs keep their result. |
@@ -380,9 +373,9 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 
 | Parameter | Type | Default | Available On |
 |-----------|------|---------|-------------|
-| `ocr_engine` | `str` | standard | parse / extract / classify / split / redact / process — selects the OCR engine (standard or layout-aware) |
 | `mode` (parse) | `"fast"` \| `"advanced"` | `"fast"` | parse — `"advanced"` adds per-page `structured` layout |
 | `mode` (extract) | `str` | `"default"` | extract — `"default"` runs the standard structured extraction path |
+| `category` (extract) | `"financial"` \| `"non_financial"` | `"financial"` | extract — Basic extractor profile; `extract_advanced()` auto-detects instead (no `category`) |
 | `mode` (classify / split) | `str` | `"default"` | classify / split — task selector |
 | `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |
 | `options` | `dict \| None` | `None` | classify / split — service knobs, sent as a JSON form field |

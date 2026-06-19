@@ -31,7 +31,6 @@ class CallRecord:
     op: str                      # parse | extract | classify | split | process | upload
     target: str                  # local | preprod | custom
     base_url: str
-    ocr_engine: Optional[str]
     use_presigned: Optional[bool]
 
     doc_id: str

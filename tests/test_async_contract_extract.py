@@ -54,7 +54,7 @@ async def test_async_extract_default_path_uses_async(mock_backend, async_client,
     assert result["entities"]["vendor"] == "Acme"
     submit_req = submit_route.calls[0].request
     assert submit_req.headers["X-Async"] == "true"
-    assert submit_req.url.params["ocr_engine"] == "paddle"
+    assert "ocr_engine" not in submit_req.url.params
     assert submit_req.url.params["mode"] == "default"
     assert poll_route.called
 

@@ -240,7 +240,7 @@ def _get_params(method):
 def test_parse_signature():
     params = _get_params(HyperAPIClient.parse)
     assert "file_path" in params
-    assert "ocr_engine" in params
+    assert "ocr_engine" not in params
     assert "use_presigned" in params
     assert "image_path" in params  # deprecated alias
     assert "poll_timeout" in params
@@ -250,7 +250,7 @@ def test_parse_signature():
 def test_extract_signature():
     params = _get_params(HyperAPIClient.extract)
     assert "file_path" in params
-    assert "ocr_engine" in params
+    assert "ocr_engine" not in params
     assert "mode" in params
     assert "poll_timeout" in params
 
@@ -270,7 +270,7 @@ def test_split_signature():
 def test_process_signature():
     params = _get_params(HyperAPIClient.process)
     assert "file_path" in params
-    assert "ocr_engine" in params
+    assert "ocr_engine" not in params
     assert "image_path" in params
     assert "poll_timeout" in params
 

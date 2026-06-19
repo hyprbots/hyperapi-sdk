@@ -51,7 +51,7 @@ async def test_async_parse_submits_with_x_async_then_polls(mock_backend, async_c
     assert result["ocr"] == "Invoice #12345"
     submit_req = submit_route.calls[0].request
     assert submit_req.headers["X-Async"] == "true"
-    assert submit_req.url.params["ocr_engine"] == "paddle"
+    assert "ocr_engine" not in submit_req.url.params
     assert b"document_key=doc_parse" in submit_req.read()
     assert poll_route.called
 
@@ -142,16 +142,6 @@ async def test_async_parse_include_boxes_propagates_and_returns_boxes(
     assert box["text"] == "Invoice #4471"
     assert box["bbox"] == [120, 340, 410, 372]
     assert box["confidence"] == 0.987
-
-
-async def test_async_parse_with_doc_intent_engine(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
-
-    await async_client.parse(tiny_pdf, ocr_engine="doc-intent")
-
-    assert submit_route.calls[0].request.url.params["ocr_engine"] == "doc-intent"
 
 
 async def test_async_parse_image_path_alias_still_works(mock_backend, async_client, tiny_png):

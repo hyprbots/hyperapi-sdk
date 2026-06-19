@@ -24,7 +24,7 @@ def _rec(op="parse", bucket="small", latency=100.0, success=True, status=200,
     found = found or []
     return CallRecord(
         run_id="r", started_at="t0", ended_at="t1", op=op, target="local",
-        base_url="http://test", ocr_engine="paddle", use_presigned=True,
+        base_url="http://test", use_presigned=True,
         doc_id=f"d_{op}_{bucket}", doc_shape="invoice", doc_mime="application/pdf",
         doc_size_bytes=10_000, doc_size_bucket=bucket, doc_page_count=1,
         latency_ms=latency, success=success, http_status=status,

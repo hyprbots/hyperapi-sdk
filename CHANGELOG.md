@@ -35,6 +35,11 @@ keep their existing signatures plus a new keyword-only `category` defaulting to
   extraction is the Advanced surface (`/v1/extract-omni`), now exposed via the
   dedicated `extract_advanced()` method.
 
+### Removed
+
+- `ocr_engine` parameter from all client methods (OCR engine selection is
+  handled server-side; use `mode` for OCR depth on parse).
+
 ## [0.4.0] — 2026-06-10
 
 Platform API sync. No breaking changes — purely additive (all new parameters

@@ -72,7 +72,6 @@ from .client import (
     CONTENT_TYPES,
     ExtractCategory,
     Job,
-    OCREngine,
     ParseMode,
     _DEFAULT_POLL_INTERVAL_S,
     _DEFAULT_POLL_MAX_TRANSIENT_RETRIES,
@@ -809,7 +808,6 @@ class AsyncHyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        ocr_engine: OCREngine = "paddle",
         mode: ParseMode = "fast",
         include_boxes: bool = False,
         include_image: bool = False,
@@ -834,7 +832,6 @@ class AsyncHyperAPIClient:
         return await self._submit_via_path(
             "/v1/parse", "parse", path,
             params={
-                "ocr_engine": ocr_engine,
                 "mode": mode,
                 "include_boxes": include_boxes,
                 "include_image": include_image,
@@ -846,7 +843,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         category: ExtractCategory = "financial",
         use_presigned: bool = True,
@@ -861,7 +857,7 @@ class AsyncHyperAPIClient:
         path = self._resolve_path(file_path)
         return await self._submit_via_path(
             "/v1/extract", "extract", path,
-            params={"ocr_engine": ocr_engine, "mode": mode, "category": category},
+            params={"mode": mode, "category": category},
             use_presigned=use_presigned,
         )
 
@@ -869,7 +865,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
     ) -> Job:
         """Submit an Advanced extract job asynchronously and return immediately.
@@ -885,7 +880,7 @@ class AsyncHyperAPIClient:
         # _OP_TO_ERROR; do not "fix" this to one (it would KeyError).
         return await self._submit_via_path(
             "/v1/extract-omni", "extract", path,
-            params={"ocr_engine": ocr_engine},
+            params={},
             use_presigned=use_presigned,
         )
 
@@ -893,7 +888,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         options: dict | None = None,
         use_presigned: bool = True,
@@ -929,7 +923,7 @@ class AsyncHyperAPIClient:
         data = {"options": json.dumps(options)} if options is not None else None
         return await self._submit_via_path(
             "/v1/classify", "classify", path,
-            params={"ocr_engine": ocr_engine, "mode": mode},
+            params={"mode": mode},
             data=data,
             use_presigned=use_presigned,
         )
@@ -938,7 +932,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         options: dict | None = None,
         use_presigned: bool = True,
@@ -957,7 +950,7 @@ class AsyncHyperAPIClient:
         data = {"options": json.dumps(options)} if options is not None else None
         return await self._submit_via_path(
             "/v1/split", "split", path,
-            params={"ocr_engine": ocr_engine, "mode": mode},
+            params={"mode": mode},
             data=data,
             use_presigned=use_presigned,
         )
@@ -969,7 +962,6 @@ class AsyncHyperAPIClient:
         mode: str = "redact",
         pii_config: dict | None = None,
         include_logos: bool = False,
-        ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
     ) -> Job:
         """Submit a redact/deidentify job asynchronously and return immediately.
@@ -985,7 +977,7 @@ class AsyncHyperAPIClient:
         data = {"pii_config": json.dumps(pii_config)} if pii_config is not None else None
         return await self._submit_via_path(
             "/v1/redact", "redact", path,
-            params={"ocr_engine": ocr_engine, "mode": mode, "include_logos": include_logos},
+            params={"mode": mode, "include_logos": include_logos},
             data=data,
             use_presigned=use_presigned,
         )
@@ -997,7 +989,6 @@ class AsyncHyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        ocr_engine: OCREngine = "paddle",
         mode: ParseMode = "fast",
         include_boxes: bool = False,
         include_image: bool = False,
@@ -1022,7 +1013,6 @@ class AsyncHyperAPIClient:
         job = await self.submit_parse(
             file_path=file_path,
             image_path=image_path,
-            ocr_engine=ocr_engine,
             mode=mode,
             include_boxes=include_boxes,
             include_image=include_image,
@@ -1034,7 +1024,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         category: ExtractCategory = "financial",
         use_presigned: bool = True,
@@ -1050,7 +1039,6 @@ class AsyncHyperAPIClient:
         """
         job = await self.submit_extract(
             file_path,
-            ocr_engine=ocr_engine,
             mode=mode,
             category=category,
             use_presigned=use_presigned,
@@ -1061,7 +1049,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1074,7 +1061,6 @@ class AsyncHyperAPIClient:
         """
         job = await self.submit_extract_advanced(
             file_path,
-            ocr_engine=ocr_engine,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -1083,7 +1069,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         options: dict | None = None,
         use_presigned: bool = True,
@@ -1103,7 +1088,6 @@ class AsyncHyperAPIClient:
         """
         job = await self.submit_classify(
             file_path,
-            ocr_engine=ocr_engine,
             mode=mode,
             options=options,
             use_presigned=use_presigned,
@@ -1114,7 +1098,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         options: dict | None = None,
         use_presigned: bool = True,
@@ -1130,7 +1113,6 @@ class AsyncHyperAPIClient:
         """
         job = await self.submit_split(
             file_path,
-            ocr_engine=ocr_engine,
             mode=mode,
             options=options,
             use_presigned=use_presigned,
@@ -1144,7 +1126,6 @@ class AsyncHyperAPIClient:
         mode: str = "redact",
         pii_config: dict | None = None,
         include_logos: bool = False,
-        ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1161,7 +1142,6 @@ class AsyncHyperAPIClient:
             mode=mode,
             pii_config=pii_config,
             include_logos=include_logos,
-            ocr_engine=ocr_engine,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -1171,7 +1151,6 @@ class AsyncHyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        ocr_engine: OCREngine = "paddle",
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
@@ -1192,11 +1171,11 @@ class AsyncHyperAPIClient:
         # router serializes them anyway through the shared document_key.
         parse_job = await self._submit_via_doc_key(
             "/v1/parse", "parse", document_key,
-            params={"ocr_engine": ocr_engine},
+            params={},
         )
         extract_job = await self._submit_via_doc_key(
             "/v1/extract", "extract", document_key,
-            params={"ocr_engine": ocr_engine, "mode": "default"},
+            params={"mode": "default"},
         )
         results = await self.wait_for_jobs(
             [parse_job, extract_job],

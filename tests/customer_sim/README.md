@@ -7,7 +7,6 @@ This sits on top of the L1 mocked-contract suite (under `tests/test_contract_*.p
 ## What it covers
 
 - **Every SDK operation:** `parse`, `extract`, `classify`, `split`, `process`, `upload_document`
-- **Both OCR engines:** `paddle` and `doc-intent`
 - **Both upload paths:** presigned-S3 (default) and `multipart/form-data` legacy fallback
 - **Format coverage:** PDF (1–30 pages), PNG, JPEG, TIFF, WEBP
 - **Size buckets:** tiny (<100 KB) → small → medium → large → xl (~25 MB)
@@ -23,7 +22,7 @@ This sits on top of the L1 mocked-contract suite (under `tests/test_contract_*.p
 
 ```
 run_id, started_at, ended_at, op, target, base_url,
-ocr_engine, use_presigned,
+use_presigned,
 doc_id, doc_shape, doc_mime, doc_size_bytes, doc_size_bucket, doc_page_count,
 latency_ms, success, http_status, error_type, error_message,
 request_id, response_size_bytes,

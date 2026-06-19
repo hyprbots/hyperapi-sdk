@@ -49,7 +49,7 @@ def _score_recall(expected: list[str], blob: str) -> float:
 
 def _record_for(
     *, run_id: str, target: str, base_url: str, op: str, fixture: Fixture,
-    ocr_engine: Optional[str], use_presigned: Optional[bool],
+    use_presigned: Optional[bool],
     latency_ms: float, success: bool, http_status: Optional[int],
     error_type: Optional[str], error_message: Optional[str],
     request_id: Optional[str], response_size_bytes: Optional[int],
@@ -59,7 +59,7 @@ def _record_for(
     return CallRecord(
         run_id=run_id, started_at=started_at, ended_at=_now_iso(),
         op=op, target=target, base_url=base_url,
-        ocr_engine=ocr_engine, use_presigned=use_presigned,
+        use_presigned=use_presigned,
         doc_id=fixture.doc_id, doc_shape=fixture.shape, doc_mime=fixture.mime,
         doc_size_bytes=fixture.size_bytes, doc_size_bucket=fixture.size_bucket,
         doc_page_count=fixture.page_count,
@@ -89,7 +89,7 @@ class ScenarioContext:
 
 def _exec_call(
     ctx: ScenarioContext, fixture: Fixture, op: str,
-    ocr_engine: Optional[str], use_presigned: Optional[bool],
+    use_presigned: Optional[bool],
     func: Callable[[], dict],
 ) -> CallRecord:
     started = _now_iso()
@@ -135,7 +135,7 @@ def _exec_call(
 
     rec = _record_for(
         run_id=ctx.run_id, target=ctx.target, base_url=ctx.base_url,
-        op=op, fixture=fixture, ocr_engine=ocr_engine, use_presigned=use_presigned,
+        op=op, fixture=fixture, use_presigned=use_presigned,
         latency_ms=t["latency_ms"], success=success, http_status=http_status,
         error_type=error_type, error_message=error_message,
         request_id=request_id, response_size_bytes=response_size,
@@ -146,58 +146,57 @@ def _exec_call(
 
 
 def parse_one(ctx: ScenarioContext, fixture: Fixture, *,
-              ocr_engine: str = "paddle", use_presigned: bool = True) -> CallRecord:
+              use_presigned: bool = True) -> CallRecord:
     return _exec_call(
-        ctx, fixture, op="parse", ocr_engine=ocr_engine, use_presigned=use_presigned,
+        ctx, fixture, op="parse", use_presigned=use_presigned,
         func=lambda: ctx.client.parse(
-            fixture.path, ocr_engine=ocr_engine, use_presigned=use_presigned,
+            fixture.path, use_presigned=use_presigned,
         ),
     )
 
 
 def extract_one(ctx: ScenarioContext, fixture: Fixture, *,
-                ocr_engine: str = "paddle", use_presigned: bool = True) -> CallRecord:
+                use_presigned: bool = True) -> CallRecord:
     return _exec_call(
-        ctx, fixture, op="extract", ocr_engine=ocr_engine, use_presigned=use_presigned,
+        ctx, fixture, op="extract", use_presigned=use_presigned,
         func=lambda: ctx.client.extract(
-            fixture.path, ocr_engine=ocr_engine, use_presigned=use_presigned,
+            fixture.path, use_presigned=use_presigned,
         ),
     )
 
 
 def classify_one(ctx: ScenarioContext, fixture: Fixture, *,
-                 ocr_engine: str = "paddle", use_presigned: bool = True) -> CallRecord:
+                 use_presigned: bool = True) -> CallRecord:
     return _exec_call(
-        ctx, fixture, op="classify", ocr_engine=ocr_engine, use_presigned=use_presigned,
+        ctx, fixture, op="classify", use_presigned=use_presigned,
         func=lambda: ctx.client.classify(
-            fixture.path, ocr_engine=ocr_engine, use_presigned=use_presigned,
+            fixture.path, use_presigned=use_presigned,
         ),
     )
 
 
 def split_one(ctx: ScenarioContext, fixture: Fixture, *,
-              ocr_engine: str = "paddle", use_presigned: bool = True) -> CallRecord:
+              use_presigned: bool = True) -> CallRecord:
     return _exec_call(
-        ctx, fixture, op="split", ocr_engine=ocr_engine, use_presigned=use_presigned,
+        ctx, fixture, op="split", use_presigned=use_presigned,
         func=lambda: ctx.client.split(
-            fixture.path, ocr_engine=ocr_engine, use_presigned=use_presigned,
+            fixture.path, use_presigned=use_presigned,
         ),
     )
 
 
-def process_one(ctx: ScenarioContext, fixture: Fixture, *,
-                ocr_engine: str = "paddle") -> CallRecord:
+def process_one(ctx: ScenarioContext, fixture: Fixture) -> CallRecord:
     """process() = parse + extract sharing one document_key — exercises router OCR cache."""
     return _exec_call(
-        ctx, fixture, op="process", ocr_engine=ocr_engine, use_presigned=True,
-        func=lambda: ctx.client.process(fixture.path, ocr_engine=ocr_engine),
+        ctx, fixture, op="process", use_presigned=True,
+        func=lambda: ctx.client.process(fixture.path),
     )
 
 
 def upload_one(ctx: ScenarioContext, fixture: Fixture) -> CallRecord:
     """Just the presigned-URL upload step — surfaces S3/Kong/AES256 issues separately."""
     return _exec_call(
-        ctx, fixture, op="upload", ocr_engine=None, use_presigned=True,
+        ctx, fixture, op="upload", use_presigned=True,
         func=lambda: {"document_key": ctx.client.upload_document(fixture.path)},
     )
 
@@ -235,7 +234,7 @@ def smoke_scenarios(corpus: list[Fixture]) -> list[tuple[Callable, Fixture, dict
 
 
 def full_scenarios(corpus: list[Fixture]) -> list[tuple[Callable, Fixture, dict]]:
-    """Every non-edge-case fixture × every applicable op × both OCR engines.
+    """Every non-edge-case fixture × every applicable op.
 
     This is the "thorough customer" sweep. Expect 10-20 min wall-clock against
     a warm backend; bounded by extract latency on large PDFs.
@@ -244,12 +243,11 @@ def full_scenarios(corpus: list[Fixture]) -> list[tuple[Callable, Fixture, dict]
     for fx in corpus:
         if fx.is_edge_case:
             continue
-        for engine in ("paddle", "doc-intent"):
-            scenarios.append((parse_one, fx, {"ocr_engine": engine}))
-            scenarios.append((extract_one, fx, {"ocr_engine": engine}))
-            scenarios.append((classify_one, fx, {"ocr_engine": engine}))
-            if fx.mime == "application/pdf":
-                scenarios.append((split_one, fx, {"ocr_engine": engine}))
+        scenarios.append((parse_one, fx, {}))
+        scenarios.append((extract_one, fx, {}))
+        scenarios.append((classify_one, fx, {}))
+        if fx.mime == "application/pdf":
+            scenarios.append((split_one, fx, {}))
         scenarios.append((process_one, fx, {}))
         scenarios.append((upload_one, fx, {}))
     return scenarios
