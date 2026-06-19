@@ -130,6 +130,21 @@ print(page["structured"]["markdown"])   # layout-aware markdown
 print(page["structured"]["regions"])    # typed regions with bounding boxes
 ```
 
+## Extract: Basic vs Advanced
+
+Basic `extract()` runs the tier you select with `category`; **Advanced**
+`extract_advanced()` auto-detects the document type for you (no `category`).
+
+```python
+# Basic — you declare the document family
+fields = client.extract("invoice.pdf")                        # category="financial" (default)
+fields = client.extract("policy.pdf", category="non_financial")
+
+# Advanced — auto-detects the type, no category to pick
+fields = client.extract_advanced("mixed_document.pdf")
+print(fields["result"]["entities"])
+```
+
 ## Classify / Split Options
 
 `classify()` and `split()` accept an `options` dict of service-level knobs,
