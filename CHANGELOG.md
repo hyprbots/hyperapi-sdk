@@ -5,6 +5,36 @@ All notable changes to `hyperapi-sdk` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Basic/Advanced extract product split. Additive — `extract()`/`submit_extract()`
+keep their existing signatures plus a new keyword-only `category` defaulting to
+`"financial"` (today's behavior).
+
+### Added
+
+- **`extract(category=...)` / `submit_extract(category=...)`** (sync + async) —
+  the Basic extractor. `category="financial"` (default) runs the two-leg IDP
+  adapter (invoices/receipts); `category="non_financial"` runs a generic
+  single-pass extractor. Same envelope, same submit+poll path.
+
+- **`extract_advanced()` / `submit_extract_advanced()`** (sync + async) —
+  Advanced extraction. Auto-detects the document type (no `category`):
+  invoice-family documents route to the two-leg IDP adapter, everything else to
+  schema-less grounded extraction. Submits to `/v1/extract-omni`.
+
+  ```python
+  client.extract("invoice.pdf")                          # Basic, financial
+  client.extract("policy.pdf", category="non_financial") # Basic, generic
+  client.extract_advanced("unknown.pdf")                 # Advanced, auto-detect
+  ```
+
+### Fixed
+
+- Corrected `extract()` docstrings that described a `mode="omni"` route — omni
+  extraction is the Advanced surface (`/v1/extract-omni`), now exposed via the
+  dedicated `extract_advanced()` method.
+
 ## [0.4.0] — 2026-06-10
 
 Platform API sync. No breaking changes — purely additive (all new parameters

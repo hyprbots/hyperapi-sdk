@@ -75,6 +75,10 @@ CONTENT_TYPES = {
 
 OCREngine = str
 ParseMode = Literal["fast", "advanced"]
+# Basic extract document family. ``financial`` (default) routes to the two-leg
+# IDP adapter (invoices, receipts); ``non_financial`` routes to the generic
+# single-pass extractor. Advanced extraction (auto-detect) is a separate method.
+ExtractCategory = Literal["financial", "non_financial"]
 
 # Per-HTTP-call defaults — single submit / single poll, NOT total job time.
 _DEFAULT_TIMEOUT = 120.0
@@ -1051,26 +1055,44 @@ class HyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
-        category: str = "financial",
+        category: ExtractCategory = "financial",
         use_presigned: bool = True,
     ) -> Job:
-        """Submit an extract job asynchronously and return immediately.
+        """Submit a Basic extract job asynchronously and return immediately.
 
-        ``mode="default"`` runs the standard structured extraction path
-        (entities + line items).
-
-        ``category`` (``"financial"`` | ``"non_financial"``) selects the
-        extraction profile. **Preprod-only and flag-gated:** it is honoured
-        only on the preproduction environment and only when the server-side
-        ``EXTRACT_MODE_ROUTING_ENABLED`` flag is on (default off). When the
-        flag is off — and on production, which does not yet ship this routing
-        — the value is silently ignored and extraction behaves as
-        ``"financial"``.
+        ``category`` selects the Basic extractor: ``"financial"`` (default —
+        the two-leg IDP adapter for invoices/receipts) or ``"non_financial"``
+        (a generic single-pass extractor). For auto-detecting Advanced
+        extraction, use :py:meth:`submit_extract_advanced`.
         """
         path = self._resolve_path(file_path)
         return self._submit_via_path(
             "/v1/extract", "extract", path,
             params={"ocr_engine": ocr_engine, "mode": mode, "category": category},
+            use_presigned=use_presigned,
+        )
+
+    def submit_extract_advanced(
+        self,
+        file_path: str | Path,
+        *,
+        ocr_engine: OCREngine = "paddle",
+        use_presigned: bool = True,
+    ) -> Job:
+        """Submit an Advanced extract job asynchronously and return immediately.
+
+        Advanced extraction auto-detects the document type (no ``category``
+        needed): invoice-family documents route to the two-leg IDP adapter,
+        everything else to schema-less grounded extraction. Returns the same
+        envelope shape as :py:meth:`submit_extract`.
+        """
+        path = self._resolve_path(file_path)
+        # op_name="extract" is deliberate error-taxonomy reuse (same ExtractError,
+        # same response envelope) — NOT a typo. There is no "extract-omni" key in
+        # _OP_TO_ERROR; do not "fix" this to one (it would KeyError).
+        return self._submit_via_path(
+            "/v1/extract-omni", "extract", path,
+            params={"ocr_engine": ocr_engine},
             use_presigned=use_presigned,
         )
 
@@ -1232,7 +1254,7 @@ class HyperAPIClient:
         *,
         ocr_engine: OCREngine = "paddle",
         mode: str = "default",
-        category: str = "financial",
+        category: ExtractCategory = "financial",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1242,14 +1264,10 @@ class HyperAPIClient:
         Submits asynchronously and polls until done. Bypasses any edge-timeout
         ceiling because each individual HTTP request stays sub-second.
 
-        ``mode="default"`` runs the standard structured extraction path
-        (entities + line items).
-
-        ``category`` (``"financial"`` | ``"non_financial"``) selects the
-        extraction profile. **Preprod-only and flag-gated** (server-side
-        ``EXTRACT_MODE_ROUTING_ENABLED``, default off): ignored when the flag
-        is off and on production, where it falls back to ``"financial"``. See
-        :py:meth:`submit_extract`.
+        This is the Basic extractor. ``category="financial"`` (default) runs the
+        two-leg IDP adapter (invoices/receipts); ``"non_financial"`` runs a
+        generic single-pass extractor. For auto-detecting Advanced extraction,
+        use :py:meth:`extract_advanced`.
 
         Returns:
             Response envelope with ``result`` containing entities and line items,
@@ -1260,6 +1278,28 @@ class HyperAPIClient:
             ocr_engine=ocr_engine,
             mode=mode,
             category=category,
+            use_presigned=use_presigned,
+        )
+        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+
+    def extract_advanced(
+        self,
+        file_path: str | Path,
+        *,
+        ocr_engine: OCREngine = "paddle",
+        use_presigned: bool = True,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
+    ) -> dict:
+        """Advanced extraction — auto-detects the document type, no ``category``.
+
+        Invoice-family documents route to the two-leg IDP adapter; everything
+        else to schema-less grounded extraction. Submits asynchronously and
+        polls until done. Returns the same envelope shape as :py:meth:`extract`.
+        """
+        job = self.submit_extract_advanced(
+            file_path,
+            ocr_engine=ocr_engine,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
