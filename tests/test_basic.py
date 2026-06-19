@@ -251,7 +251,8 @@ def test_extract_signature():
     params = _get_params(HyperAPIClient.extract)
     assert "file_path" in params
     assert "ocr_engine" not in params
-    assert "mode" in params
+    assert "mode" not in params  # removed — Advanced is extract_advanced(), Basic uses category
+    assert "category" in params
     assert "poll_timeout" in params
 
 

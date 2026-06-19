@@ -55,18 +55,17 @@ async def test_async_extract_default_path_uses_async(mock_backend, async_client,
     submit_req = submit_route.calls[0].request
     assert submit_req.headers["X-Async"] == "true"
     assert "ocr_engine" not in submit_req.url.params
-    assert submit_req.url.params["mode"] == "default"
+    # Basic extract carries only `category`; `mode` was removed (parity with sync).
+    assert "mode" not in submit_req.url.params
+    assert submit_req.url.params["category"] == "financial"
     assert poll_route.called
 
 
-async def test_async_extract_custom_mode_propagates(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
-
-    await async_client.extract(tiny_pdf, mode="strict")
-
-    assert submit_route.calls[0].request.url.params["mode"] == "strict"
+async def test_async_extract_rejects_mode_kwarg(async_client, tiny_pdf):
+    # Parity with sync: `mode` is gone from Basic extract; Advanced is
+    # extract_advanced(). The silent-misroute footgun is unrepresentable.
+    with pytest.raises(TypeError):
+        await async_client.extract(tiny_pdf, mode="advanced")
 
 
 async def test_async_extract_pending_then_completed_polls_loop(mock_backend, async_client, tiny_pdf):

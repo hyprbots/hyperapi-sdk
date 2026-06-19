@@ -39,6 +39,11 @@ keep their existing signatures plus a new keyword-only `category` defaulting to
 
 - `ocr_engine` parameter from all client methods (OCR engine selection is
   handled server-side; use `mode` for OCR depth on parse).
+- `mode` parameter from `extract()` / `submit_extract()` (sync + async). It did
+  not select the Advanced tier — the server routes Basic vs Advanced by
+  `category`, never `mode`, so `mode="advanced"` silently ran Basic. Advanced
+  extraction is the dedicated `extract_advanced()` method; Basic takes only
+  `category`. (`mode` was never an OCR-depth knob on extract — that is parse-only.)
 
 ## [0.4.0] — 2026-06-10
 

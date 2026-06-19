@@ -374,7 +374,6 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | Parameter | Type | Default | Available On |
 |-----------|------|---------|-------------|
 | `mode` (parse) | `"fast"` \| `"advanced"` | `"fast"` | parse — `"advanced"` adds per-page `structured` layout |
-| `mode` (extract) | `str` | `"default"` | extract — `"default"` runs the standard structured extraction path |
 | `category` (extract) | `"financial"` \| `"non_financial"` | `"financial"` | extract — Basic extractor profile; `extract_advanced()` auto-detects instead (no `category`) |
 | `mode` (classify / split) | `str` | `"default"` | classify / split — task selector |
 | `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |

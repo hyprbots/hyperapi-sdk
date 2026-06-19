@@ -843,7 +843,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        mode: str = "default",
         category: ExtractCategory = "financial",
         use_presigned: bool = True,
     ) -> Job:
@@ -857,7 +856,7 @@ class AsyncHyperAPIClient:
         path = self._resolve_path(file_path)
         return await self._submit_via_path(
             "/v1/extract", "extract", path,
-            params={"mode": mode, "category": category},
+            params={"category": category},
             use_presigned=use_presigned,
         )
 
@@ -1024,7 +1023,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        mode: str = "default",
         category: ExtractCategory = "financial",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
@@ -1039,7 +1037,6 @@ class AsyncHyperAPIClient:
         """
         job = await self.submit_extract(
             file_path,
-            mode=mode,
             category=category,
             use_presigned=use_presigned,
         )
@@ -1175,7 +1172,7 @@ class AsyncHyperAPIClient:
         )
         extract_job = await self._submit_via_doc_key(
             "/v1/extract", "extract", document_key,
-            params={"mode": "default"},
+            params={},
         )
         results = await self.wait_for_jobs(
             [parse_job, extract_job],
