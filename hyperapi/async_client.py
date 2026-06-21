@@ -844,6 +844,7 @@ class AsyncHyperAPIClient:
         file_path: str | Path,
         *,
         category: ExtractCategory = "financial",
+        parse_mode: ParseMode = "fast",
         use_presigned: bool = True,
     ) -> Job:
         """Submit a Basic extract job asynchronously and return immediately.
@@ -852,11 +853,16 @@ class AsyncHyperAPIClient:
         the two-leg IDP adapter for invoices/receipts) or ``"non_financial"``
         (a generic single-pass extractor). For auto-detecting Advanced
         extraction, use :py:meth:`submit_extract_advanced`.
+
+        ``parse_mode`` selects the Stage-1 OCR engine, independent of
+        ``category``: ``"fast"`` (default, Paddle text extraction) or
+        ``"advanced"`` (Chandra layout-aware parsing for dense tables/forms —
+        higher accuracy, slower, costs more; available on paid tiers).
         """
         path = self._resolve_path(file_path)
         return await self._submit_via_path(
             "/v1/extract", "extract", path,
-            params={"category": category},
+            params={"category": category, "parse_mode": parse_mode},
             use_presigned=use_presigned,
         )
 
@@ -864,6 +870,7 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
+        parse_mode: ParseMode = "fast",
         use_presigned: bool = True,
     ) -> Job:
         """Submit an Advanced extract job asynchronously and return immediately.
@@ -872,6 +879,9 @@ class AsyncHyperAPIClient:
         needed): invoice-family documents route to the two-leg IDP adapter,
         everything else to schema-less grounded extraction. Returns the same
         envelope shape as :py:meth:`submit_extract`.
+
+        ``parse_mode`` selects the Stage-1 OCR engine (``"fast"``/``"advanced"``,
+        same meaning as :py:meth:`submit_extract`).
         """
         path = self._resolve_path(file_path)
         # op_name="extract" is deliberate error-taxonomy reuse (same ExtractError,
@@ -879,7 +889,7 @@ class AsyncHyperAPIClient:
         # _OP_TO_ERROR; do not "fix" this to one (it would KeyError).
         return await self._submit_via_path(
             "/v1/extract-omni", "extract", path,
-            params={},
+            params={"parse_mode": parse_mode},
             use_presigned=use_presigned,
         )
 
@@ -1024,6 +1034,7 @@ class AsyncHyperAPIClient:
         file_path: str | Path,
         *,
         category: ExtractCategory = "financial",
+        parse_mode: ParseMode = "fast",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1038,6 +1049,7 @@ class AsyncHyperAPIClient:
         job = await self.submit_extract(
             file_path,
             category=category,
+            parse_mode=parse_mode,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -1046,6 +1058,7 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
+        parse_mode: ParseMode = "fast",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1058,6 +1071,7 @@ class AsyncHyperAPIClient:
         """
         job = await self.submit_extract_advanced(
             file_path,
+            parse_mode=parse_mode,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)

@@ -145,6 +145,16 @@ fields = client.extract_advanced("mixed_document.pdf")
 print(fields["result"]["entities"])
 ```
 
+Both also accept `parse_mode` to pick the Stage-1 OCR engine — `"fast"`
+(default, quick text extraction) or `"advanced"` (Chandra layout-aware parsing
+for dense tables and forms; higher accuracy, slower, costs more, paid tiers).
+It's independent of `category` and of the Basic/Advanced split:
+
+```python
+fields = client.extract("dense_invoice.pdf", parse_mode="advanced")
+fields = client.extract_advanced("complex_form.pdf", parse_mode="advanced")
+```
+
 ## Classify / Split Options
 
 `classify()` and `split()` accept an `options` dict of service-level knobs,

@@ -123,3 +123,64 @@ async def test_async_submit_extract_advanced_returns_job_no_polling(mock_backend
     assert job.job_id == "aj_adv2"
     assert submit.calls[0].request.url.path == "/v1/extract-omni"
     assert not poll.called
+
+
+# ── parse_mode: Stage-1 OCR engine, fast (default, Paddle) vs advanced (Chandra) ──
+# Orthogonal to category and to the Basic/Advanced product split — rides as a
+# query param on both /v1/extract and /v1/extract-omni.
+def test_basic_extract_defaults_to_fast_parse_mode(mock_backend, client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, _ = _seed_completed(mock_backend, job_id="j_pm_fast", path="/v1/extract")
+
+    client.extract(tiny_pdf)
+
+    assert submit.calls[0].request.url.params["parse_mode"] == "fast"
+
+
+def test_basic_extract_advanced_parse_mode_sets_param(mock_backend, client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, _ = _seed_completed(mock_backend, job_id="j_pm_adv", path="/v1/extract")
+
+    client.extract(tiny_pdf, parse_mode="advanced")
+
+    req = submit.calls[0].request
+    assert req.url.params["parse_mode"] == "advanced"
+    assert req.url.params["category"] == "financial"      # orthogonal to category
+
+
+def test_advanced_extract_carries_parse_mode(mock_backend, client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, _ = _seed_completed(mock_backend, job_id="j_pm_omni", path="/v1/extract-omni")
+
+    client.extract_advanced(tiny_pdf, parse_mode="advanced")
+
+    req = submit.calls[0].request
+    assert req.url.path == "/v1/extract-omni"
+    assert req.url.params["parse_mode"] == "advanced"
+
+
+async def test_async_basic_extract_defaults_to_fast_parse_mode(mock_backend, async_client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, _ = _seed_completed(mock_backend, job_id="aj_pm_fast", path="/v1/extract")
+
+    await async_client.extract(tiny_pdf)
+
+    assert submit.calls[0].request.url.params["parse_mode"] == "fast"
+
+
+async def test_async_basic_extract_advanced_parse_mode_sets_param(mock_backend, async_client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, _ = _seed_completed(mock_backend, job_id="aj_pm_adv", path="/v1/extract")
+
+    await async_client.extract(tiny_pdf, parse_mode="advanced")
+
+    assert submit.calls[0].request.url.params["parse_mode"] == "advanced"
+
+
+async def test_async_advanced_extract_carries_parse_mode(mock_backend, async_client, tiny_pdf):
+    _seed_presigned(mock_backend)
+    submit, _ = _seed_completed(mock_backend, job_id="aj_pm_omni", path="/v1/extract-omni")
+
+    await async_client.extract_advanced(tiny_pdf, parse_mode="advanced")
+
+    assert submit.calls[0].request.url.params["parse_mode"] == "advanced"

@@ -29,6 +29,19 @@ keep their existing signatures plus a new keyword-only `category` defaulting to
   client.extract_advanced("unknown.pdf")                 # Advanced, auto-detect
   ```
 
+- **`parse_mode` on all extract methods** — `extract()`, `submit_extract()`,
+  `extract_advanced()`, `submit_extract_advanced()` (sync + async) take a
+  keyword-only `parse_mode` selecting the Stage-1 OCR engine: `"fast"` (default,
+  Paddle text extraction) or `"advanced"` (Chandra layout-aware parsing for
+  dense tables/forms; paid tiers). Independent of `category`; rides as
+  `?parse_mode=` on `/v1/extract` and `/v1/extract-omni`. Mirrors parse's `mode`
+  OCR-depth knob, now that the backend supports it on the extract endpoints.
+
+  ```python
+  client.extract("invoice.pdf", parse_mode="advanced")
+  client.extract_advanced("form.pdf", parse_mode="advanced")
+  ```
+
 ### Fixed
 
 - Corrected `extract()` docstrings that described a `mode="omni"` route — omni
