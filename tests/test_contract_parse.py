@@ -2,7 +2,7 @@
 
 Covers:
   - Default convenience method submits with X-Async: true and polls under the hood
-  - Per-call ocr_engine and use_presigned overrides propagate to the submit POST
+  - Per-call use_presigned override propagates to the submit POST
   - submit_parse() returns a Job and does NOT poll
   - Error mapping on submit (401 → AuthenticationError, 5xx → ParseError)
 """
@@ -56,7 +56,7 @@ def test_parse_submits_with_x_async_then_polls(mock_backend, client, tiny_pdf):
     # Submit happened with X-Async: true
     submit_req = submit_route.calls[0].request
     assert submit_req.headers["X-Async"] == "true"
-    assert submit_req.url.params["ocr_engine"] == "paddle"
+    assert "ocr_engine" not in submit_req.url.params
     assert b"document_key=doc_parse" in submit_req.read()
     # Poll happened
     assert poll_route.called
@@ -164,16 +164,6 @@ def test_submit_parse_include_boxes_propagates(mock_backend, client, tiny_pdf):
     client.submit_parse(tiny_pdf, include_boxes=True)
 
     assert submit_route.calls[0].request.url.params["include_boxes"] == "true"
-
-
-def test_parse_with_doc_intent_engine(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
-
-    client.parse(tiny_pdf, ocr_engine="doc-intent")
-
-    assert submit_route.calls[0].request.url.params["ocr_engine"] == "doc-intent"
 
 
 def test_parse_image_path_alias_still_works(mock_backend, client, tiny_png):

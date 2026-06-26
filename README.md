@@ -25,30 +25,23 @@ HyperAPI uses a **two-stage pipeline** for document processing:
                     │     Stage 1: OCR Engine      │
                     │                              │
                     │  ┌──────────┐ ┌───────────┐  │
-                    │  │ paddle   │ │ doc-intent │  │
-                    │  │ (default)│ │ (alt)      │  │
+                    │  │ standard │ │  layout-  │  │
+                    │  │ (default)│ │  aware    │  │
                     │  └──────────┘ └───────────┘  │
                     └──────────────┬──────────────┘
                                    │ ocr_pages + ocr_text
                     ┌──────────────▼──────────────┐
-                    │     Stage 2: Task LLM        │
+                    │   Stage 2: Task processing   │
                     │                              │
                     │  parse → (skip, OCR only)    │
-                    │  extract → extract-service   │
-                    │  classify → classifier       │
-                    │  split → classifier-splitter │
-                    │  redact → redact-service     │
+                    │  extract → structured extract│
+                    │  classify → classification   │
+                    │  split → document splitting  │
+                    │  redact → redaction          │
                     └─────────────────────────────┘
 ```
 
-**Stage 1** runs OCR via one of two engines (configurable per-request). **Stage 2** routes the OCR output to a task-specific LLM service. For `parse`, Stage 2 is skipped — you get the raw OCR result directly.
-
-### OCR Engines
-
-| Engine | Parameter Value | Best For |
-|--------|----------------|----------|
-| **Paddle OCR** | `"paddle"` (default) | General documents, invoices, receipts |
-| **Doc-Intent** | `"doc-intent"` | Complex layouts, multi-column, tables |
+**Stage 1** runs OCR server-side. **Stage 2** routes the OCR output to task-specific processing. For `parse`, Stage 2 is skipped — you get the raw OCR result directly.
 
 ## Why Choose HyperAPI?
 
@@ -120,22 +113,46 @@ print(ocr_result["result"]["ocr"])  # Markdown-formatted text
 fields = client.extract("invoice.png")
 print(fields["result"])
 
-# Use alternative OCR engine
-ocr_result = client.parse("complex_table.pdf", ocr_engine="doc-intent")
+# Parse a document with complex layout
+ocr_result = client.parse("complex_table.pdf")
 ```
 
 ## Advanced Parse (structured layout)
 
-`mode="advanced"` runs structured-layout OCR: each page gains a `structured`
-dict with `html`, `markdown`, and `regions` — tables come back as tables, not
-flattened text. Slower than the default `mode="fast"`, and applies on the
-default `ocr_engine="paddle"` path.
+`mode="advanced"` runs layout-aware structured OCR: each page gains a
+`structured` dict with `html`, `markdown`, and `regions` — tables come back as
+tables, not flattened text. Slower than the default `mode="fast"`.
 
 ```python
 result = client.parse("annual_report.pdf", mode="advanced")
 page = result["pages"][0]
 print(page["structured"]["markdown"])   # layout-aware markdown
 print(page["structured"]["regions"])    # typed regions with bounding boxes
+```
+
+## Extract: Basic vs Advanced
+
+Basic `extract()` runs the tier you select with `category`; **Advanced**
+`extract_advanced()` auto-detects the document type for you (no `category`).
+
+```python
+# Basic — you declare the document family
+fields = client.extract("invoice.pdf")                        # category="financial" (default)
+fields = client.extract("policy.pdf", category="non_financial")
+
+# Advanced — auto-detects the type, no category to pick
+fields = client.extract_advanced("mixed_document.pdf")
+print(fields["result"]["entities"])
+```
+
+Both also accept `parse_mode` to pick the Stage-1 OCR engine — `"fast"`
+(default, quick text extraction) or `"advanced"` (Chandra layout-aware parsing
+for dense tables and forms; higher accuracy, slower, costs more, paid tiers).
+It's independent of `category` and of the Basic/Advanced split:
+
+```python
+fields = client.extract("dense_invoice.pdf", parse_mode="advanced")
+fields = client.extract_advanced("complex_form.pdf", parse_mode="advanced")
 ```
 
 ## Classify / Split Options
@@ -360,14 +377,15 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 
 | Method | Pipeline | Description |
 |--------|----------|-------------|
-| `upload_document(file)` | presigned S3 | Upload file, returns `document_key` (valid 24 h). |
+| `upload_document(file)` | presigned upload | Upload file, returns `document_key` (valid 24 h). |
 | `parse(file)` | OCR only | Parse document into structured text. Submit + poll under the hood. |
-| `extract(file)` | OCR → extract-service | Extract structured fields with validation. Submit + poll. |
-| `classify(file)` | OCR → classifier | Classify document type. Submit + poll. |
-| `split(file)` | OCR → classifier-splitter | Split multi-document binders. Submit + poll. |
-| `redact(file)` | OCR → redact-service | Mask or deidentify PII (and optionally logos). Submit + poll. |
+| `extract(file, *, category="financial")` | OCR → structured extraction | Basic extractor. `category="financial"` (default) or `"non_financial"`. Submit + poll. |
+| `extract_advanced(file)` | OCR → structured extraction | Advanced extractor — auto-detects the document type (no `category`). Submit + poll. |
+| `classify(file)` | OCR → classification | Classify document type. Submit + poll. |
+| `split(file)` | OCR → document splitting | Split multi-document binders. Submit + poll. |
+| `redact(file)` | OCR → redaction | Mask or deidentify PII (and optionally logos). Submit + poll. |
 | `process(file)` | OCR → parse + extract | Combined parse + extract sharing one upload. Submit + poll on both legs. |
-| `submit_parse / submit_extract / submit_classify / submit_split / submit_redact` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
+| `submit_parse / submit_extract / submit_extract_advanced / submit_classify / submit_split / submit_redact` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
 | `get_job(job_id)` | — | One-shot status poll. No waiting, no retry. |
 | `list_recent_jobs(*, limit=20, source=None)` | — | List the org's recent jobs (summary rows, newest first). |
 | `delete_job(job_id)` | — | Cancel a job. Idempotent; completed jobs keep their result. |
@@ -380,9 +398,8 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 
 | Parameter | Type | Default | Available On |
 |-----------|------|---------|-------------|
-| `ocr_engine` | `"paddle"` \| `"doc-intent"` | `"paddle"` | parse / extract / classify / split / redact / process |
 | `mode` (parse) | `"fast"` \| `"advanced"` | `"fast"` | parse — `"advanced"` adds per-page `structured` layout |
-| `mode` (extract) | `str` | `"default"` | extract — `"omni"` routes to the omni-model pipeline |
+| `category` (extract) | `"financial"` \| `"non_financial"` | `"financial"` | extract — Basic extractor profile; `extract_advanced()` auto-detects instead (no `category`) |
 | `mode` (classify / split) | `str` | `"default"` | classify / split — task selector |
 | `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |
 | `options` | `dict \| None` | `None` | classify / split — service knobs, sent as a JSON form field |

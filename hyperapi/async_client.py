@@ -70,8 +70,8 @@ import httpx
 # and means bug fixes in error parsing / scrubbing land in both.
 from .client import (
     CONTENT_TYPES,
+    ExtractCategory,
     Job,
-    OCREngine,
     ParseMode,
     _DEFAULT_POLL_INTERVAL_S,
     _DEFAULT_POLL_MAX_TRANSIENT_RETRIES,
@@ -220,9 +220,9 @@ class AsyncHyperAPIClient:
     ) -> str:
         """Upload a document via the presigned-URL flow and return its document_key.
 
-        Two awaits under the hood: presigned-URL fetch (Kong + auth) and the
-        direct S3 PUT (bypasses Kong). The returned ``document_key`` is reusable
-        across subsequent inference calls without re-uploading.
+        Two awaits under the hood: a presigned-URL fetch and the direct upload
+        PUT. The returned ``document_key`` is reusable across subsequent
+        inference calls without re-uploading.
 
         Raises:
             FileNotFoundError: If the file does not exist.
@@ -239,11 +239,20 @@ class AsyncHyperAPIClient:
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
 
+        # Send the file size so the server can pre-flight the size limit and
+        # reject oversized files with a 413 here, before the S3 PUT, instead of
+        # failing later at the PUT. Best-effort: skipped if stat() fails.
+        body: dict[str, object] = {"filename": path.name, "content_type": content_type}
+        try:
+            body["content_length"] = path.stat().st_size
+        except OSError:
+            pass
+
         # Step 1 — get presigned upload URL (goes through Kong + auth)
         try:
             resp = await self._client.post(
                 f"{self.base_url}/v1/documents/upload",
-                json={"filename": path.name, "content_type": content_type},
+                json=body,
                 headers=headers,
             )
         except httpx.RequestError as e:
@@ -596,7 +605,10 @@ class AsyncHyperAPIClient:
 
         Raises:
             AuthenticationError: 401 (bad key).
-            HyperAPIError: 404 (job not found or expired), or any other ≥400.
+            HyperAPIError: 404 (job belongs to a different org), or any other
+                ≥400. A missing/expired job is *not* a 404 here — DELETE is
+                idempotent and returns 204 (success) for ids that no longer
+                exist; the only 404 is a cross-org id.
         """
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
@@ -618,8 +630,11 @@ class AsyncHyperAPIClient:
                 "Invalid API key.", status_code=401, request_id=rid
             )
         if resp.status_code == 404:
+            # On DELETE, a 404 means the job belongs to a different org
+            # (opaque enumeration guard). Missing/expired ids short-circuit to
+            # 204 above, so they never reach here.
             raise HyperAPIError(
-                "Job not found or expired.",
+                "Job not found.",
                 status_code=404,
                 request_id=rid,
             )
@@ -793,7 +808,6 @@ class AsyncHyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        ocr_engine: OCREngine = "paddle",
         mode: ParseMode = "fast",
         include_boxes: bool = False,
         include_image: bool = False,
@@ -801,14 +815,15 @@ class AsyncHyperAPIClient:
     ) -> Job:
         """Submit a parse job asynchronously and return immediately.
 
-        ``mode="advanced"`` runs structured-layout OCR (Chandra): each
+        ``mode="advanced"`` runs layout-aware structured OCR: each
         ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
-        ``markdown``, and ``regions``. Only meaningful with the default
-        ``ocr_engine="paddle"``; noticeably slower than ``"fast"`` but well
-        within the default ``poll_timeout``.
+        ``markdown``, and ``regions``. Only meaningful on the default OCR
+        engine; noticeably slower than ``"fast"`` but well within the default
+        ``poll_timeout``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+        ``result["pages"]`` (standard OCR engine only; the layout-aware engine
+        returns an empty list).
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
         to each ``result["pages"]`` entry for the deskew-corrected page image.
@@ -817,7 +832,6 @@ class AsyncHyperAPIClient:
         return await self._submit_via_path(
             "/v1/parse", "parse", path,
             params={
-                "ocr_engine": ocr_engine,
                 "mode": mode,
                 "include_boxes": include_boxes,
                 "include_image": include_image,
@@ -829,20 +843,53 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
-        mode: str = "default",
+        category: ExtractCategory = "financial",
+        parse_mode: ParseMode = "fast",
         use_presigned: bool = True,
     ) -> Job:
-        """Submit an extract job asynchronously and return immediately.
+        """Submit a Basic extract job asynchronously and return immediately.
 
-        ``mode`` selects the extraction pipeline: ``"default"`` (parallel
-        entity + line-item extraction) or ``"omni"`` (omni-model extraction
-        on a dedicated backend pool).
+        ``category`` selects the Basic extractor: ``"financial"`` (default —
+        the two-leg IDP adapter for invoices/receipts) or ``"non_financial"``
+        (a generic single-pass extractor). For auto-detecting Advanced
+        extraction, use :py:meth:`submit_extract_advanced`.
+
+        ``parse_mode`` selects the Stage-1 OCR engine, independent of
+        ``category``: ``"fast"`` (default, Paddle text extraction) or
+        ``"advanced"`` (Chandra layout-aware parsing for dense tables/forms —
+        higher accuracy, slower, costs more; available on paid tiers).
         """
         path = self._resolve_path(file_path)
         return await self._submit_via_path(
             "/v1/extract", "extract", path,
-            params={"ocr_engine": ocr_engine, "mode": mode},
+            params={"category": category, "parse_mode": parse_mode},
+            use_presigned=use_presigned,
+        )
+
+    async def submit_extract_advanced(
+        self,
+        file_path: str | Path,
+        *,
+        parse_mode: ParseMode = "fast",
+        use_presigned: bool = True,
+    ) -> Job:
+        """Submit an Advanced extract job asynchronously and return immediately.
+
+        Advanced extraction auto-detects the document type (no ``category``
+        needed): invoice-family documents route to the two-leg IDP adapter,
+        everything else to schema-less grounded extraction. Returns the same
+        envelope shape as :py:meth:`submit_extract`.
+
+        ``parse_mode`` selects the Stage-1 OCR engine (``"fast"``/``"advanced"``,
+        same meaning as :py:meth:`submit_extract`).
+        """
+        path = self._resolve_path(file_path)
+        # op_name="extract" is deliberate error-taxonomy reuse (same ExtractError,
+        # same response envelope) — NOT a typo. There is no "extract-omni" key in
+        # _OP_TO_ERROR; do not "fix" this to one (it would KeyError).
+        return await self._submit_via_path(
+            "/v1/extract-omni", "extract", path,
+            params={"parse_mode": parse_mode},
             use_presigned=use_presigned,
         )
 
@@ -850,7 +897,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         options: dict | None = None,
         use_presigned: bool = True,
@@ -858,17 +904,35 @@ class AsyncHyperAPIClient:
         """Submit a classify job asynchronously and return immediately.
 
         ``options`` is an optional dict of classifier knobs, sent as a JSON
-        form field and validated server-side: ``mode`` (``"fast"`` |
-        ``"balanced"`` | ``"thorough"`` — the pipeline depth, distinct from
-        this method's ``mode=`` task selector), ``active_classes``,
-        ``custom_llm_classes``, ``system_instruction``, and token/page
-        budgets.
+        form field and validated server-side. Accepted keys:
+
+        - ``mode`` (``"fast"`` | ``"balanced"`` | ``"thorough"``) — the
+          pipeline depth, distinct from this method's ``mode=`` task selector.
+        - ``active_classes`` — explicit list of class labels to consider.
+        - ``active_classes_type`` (``"default"`` | ``"minimal"``, default
+          ``"default"``) — picks the built-in label set (default = full set,
+          minimal = reduced set).
+        - ``custom_llm_classes`` — additional caller-defined class labels.
+        - ``system_instruction`` — extra prompt guidance.
+        - ``domain_options`` (str, optional) — pipe-separated list of allowed
+          first-stage domain labels.
+        - ``non_domain_label`` (str, optional, effective default
+          ``"non_financial"``) — label used when the document falls outside
+          the configured domain.
+        - ``non_domain_exit_label`` (str, optional, effective default
+          ``"other_non_financial"``) — terminal label for out-of-domain exits.
+        - ``confusion_neighbors`` (dict of ``{label: [neighbor_label, ...]}``,
+          optional) — disambiguation hints between easily-confused classes.
+        - Token/page budgets: ``start_token_budget`` (default 3200, range
+          256–8192), ``end_token_budget`` (default 1600, range 256–8192),
+          ``max_start_pages`` (default 4, range 1–20), ``max_end_pages``
+          (default 2, range 0–10).
         """
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
         return await self._submit_via_path(
             "/v1/classify", "classify", path,
-            params={"ocr_engine": ocr_engine, "mode": mode},
+            params={"mode": mode},
             data=data,
             use_presigned=use_presigned,
         )
@@ -877,7 +941,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         options: dict | None = None,
         use_presigned: bool = True,
@@ -887,13 +950,16 @@ class AsyncHyperAPIClient:
         ``options`` is an optional dict of splitter knobs, sent as a JSON
         form field and validated server-side: ``use_thinking``,
         ``segment_classes``, ``extend_segment_classes``, and
-        ``custom_domain_guidelines``.
+        ``custom_domain_guidelines`` — a nested object whose ``domain_name``
+        sub-field is **required** when ``custom_domain_guidelines`` is given;
+        the remaining sub-fields (``identifier_patterns``, ``binding_patterns``,
+        ``heuristics``, ``examples``) are optional.
         """
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
         return await self._submit_via_path(
             "/v1/split", "split", path,
-            params={"ocr_engine": ocr_engine, "mode": mode},
+            params={"mode": mode},
             data=data,
             use_presigned=use_presigned,
         )
@@ -905,7 +971,6 @@ class AsyncHyperAPIClient:
         mode: str = "redact",
         pii_config: dict | None = None,
         include_logos: bool = False,
-        ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
     ) -> Job:
         """Submit a redact/deidentify job asynchronously and return immediately.
@@ -921,7 +986,7 @@ class AsyncHyperAPIClient:
         data = {"pii_config": json.dumps(pii_config)} if pii_config is not None else None
         return await self._submit_via_path(
             "/v1/redact", "redact", path,
-            params={"ocr_engine": ocr_engine, "mode": mode, "include_logos": include_logos},
+            params={"mode": mode, "include_logos": include_logos},
             data=data,
             use_presigned=use_presigned,
         )
@@ -933,7 +998,6 @@ class AsyncHyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        ocr_engine: OCREngine = "paddle",
         mode: ParseMode = "fast",
         include_boxes: bool = False,
         include_image: bool = False,
@@ -943,13 +1007,14 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Parse a document using OCR. Submits asynchronously and polls until done.
 
-        ``mode="advanced"`` runs structured-layout OCR (Chandra): each
+        ``mode="advanced"`` runs layout-aware structured OCR: each
         ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
-        ``markdown``, and ``regions``. Only meaningful with the default
-        ``ocr_engine="paddle"``; noticeably slower than ``"fast"``.
+        ``markdown``, and ``regions``. Only meaningful on the default OCR
+        engine; noticeably slower than ``"fast"``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["pages"]`` (PaddleOCR only; other engines return an empty list).
+        ``result["pages"]`` (standard OCR engine only; the layout-aware engine
+        returns an empty list).
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
         to each ``result["pages"]`` entry for the deskew-corrected page image.
@@ -957,7 +1022,6 @@ class AsyncHyperAPIClient:
         job = await self.submit_parse(
             file_path=file_path,
             image_path=image_path,
-            ocr_engine=ocr_engine,
             mode=mode,
             include_boxes=include_boxes,
             include_image=include_image,
@@ -969,22 +1033,45 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
-        mode: str = "default",
+        category: ExtractCategory = "financial",
+        parse_mode: ParseMode = "fast",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
         """Extract structured data (entities + line items) from a document.
 
-        ``mode="omni"`` routes to the omni-model extraction pipeline on a
-        dedicated backend pool; ``"default"`` runs parallel entity +
-        line-item extraction.
+        This is the Basic extractor. ``category="financial"`` (default) runs the
+        two-leg IDP adapter (invoices/receipts); ``"non_financial"`` runs a
+        generic single-pass extractor. For auto-detecting Advanced extraction,
+        use :py:meth:`extract_advanced`.
         """
         job = await self.submit_extract(
             file_path,
-            ocr_engine=ocr_engine,
-            mode=mode,
+            category=category,
+            parse_mode=parse_mode,
+            use_presigned=use_presigned,
+        )
+        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+
+    async def extract_advanced(
+        self,
+        file_path: str | Path,
+        *,
+        parse_mode: ParseMode = "fast",
+        use_presigned: bool = True,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
+    ) -> dict:
+        """Advanced extraction — auto-detects the document type, no ``category``.
+
+        Invoice-family documents route to the two-leg IDP adapter; everything
+        else to schema-less grounded extraction. Submits asynchronously and
+        polls until done. Returns the same envelope shape as :py:meth:`extract`.
+        """
+        job = await self.submit_extract_advanced(
+            file_path,
+            parse_mode=parse_mode,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -993,7 +1080,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         options: dict | None = None,
         use_presigned: bool = True,
@@ -1002,15 +1088,17 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Classify a document type (invoice, contract, receipt, etc.).
 
-        ``options`` customizes the classifier (see
-        :py:meth:`submit_classify`): pipeline depth via ``options["mode"]``
+        ``options`` customizes the classifier (see :py:meth:`submit_classify`
+        for the full key list): pipeline depth via ``options["mode"]``
         (``"fast"`` | ``"balanced"`` | ``"thorough"`` — distinct from the
-        ``mode=`` task selector), ``active_classes``, ``custom_llm_classes``,
-        ``system_instruction``, and token/page budgets.
+        ``mode=`` task selector), ``active_classes``, ``active_classes_type``,
+        ``custom_llm_classes``, ``system_instruction``, ``domain_options``,
+        ``non_domain_label``, ``non_domain_exit_label``, ``confusion_neighbors``,
+        and the token/page budgets (``start_token_budget``, ``end_token_budget``,
+        ``max_start_pages``, ``max_end_pages``).
         """
         job = await self.submit_classify(
             file_path,
-            ocr_engine=ocr_engine,
             mode=mode,
             options=options,
             use_presigned=use_presigned,
@@ -1021,7 +1109,6 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        ocr_engine: OCREngine = "paddle",
         mode: str = "default",
         options: dict | None = None,
         use_presigned: bool = True,
@@ -1032,11 +1119,11 @@ class AsyncHyperAPIClient:
 
         ``options`` customizes the splitter (see :py:meth:`submit_split`):
         ``use_thinking``, ``segment_classes``, ``extend_segment_classes``,
-        and ``custom_domain_guidelines``.
+        and ``custom_domain_guidelines`` (its ``domain_name`` sub-field is
+        required when the object is supplied).
         """
         job = await self.submit_split(
             file_path,
-            ocr_engine=ocr_engine,
             mode=mode,
             options=options,
             use_presigned=use_presigned,
@@ -1050,7 +1137,6 @@ class AsyncHyperAPIClient:
         mode: str = "redact",
         pii_config: dict | None = None,
         include_logos: bool = False,
-        ocr_engine: OCREngine = "paddle",
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1067,7 +1153,6 @@ class AsyncHyperAPIClient:
             mode=mode,
             pii_config=pii_config,
             include_logos=include_logos,
-            ocr_engine=ocr_engine,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -1077,7 +1162,6 @@ class AsyncHyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        ocr_engine: OCREngine = "paddle",
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
@@ -1098,11 +1182,11 @@ class AsyncHyperAPIClient:
         # router serializes them anyway through the shared document_key.
         parse_job = await self._submit_via_doc_key(
             "/v1/parse", "parse", document_key,
-            params={"ocr_engine": ocr_engine},
+            params={},
         )
         extract_job = await self._submit_via_doc_key(
             "/v1/extract", "extract", document_key,
-            params={"ocr_engine": ocr_engine, "mode": "default"},
+            params={},
         )
         results = await self.wait_for_jobs(
             [parse_job, extract_job],

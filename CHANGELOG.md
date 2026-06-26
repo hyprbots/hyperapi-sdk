@@ -5,6 +5,59 @@ All notable changes to `hyperapi-sdk` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Basic/Advanced extract product split. Additive — `extract()`/`submit_extract()`
+keep their existing signatures plus a new keyword-only `category` defaulting to
+`"financial"` (today's behavior).
+
+### Added
+
+- **`extract(category=...)` / `submit_extract(category=...)`** (sync + async) —
+  the Basic extractor. `category="financial"` (default) runs the two-leg IDP
+  adapter (invoices/receipts); `category="non_financial"` runs a generic
+  single-pass extractor. Same envelope, same submit+poll path.
+
+- **`extract_advanced()` / `submit_extract_advanced()`** (sync + async) —
+  Advanced extraction. Auto-detects the document type (no `category`):
+  invoice-family documents route to the two-leg IDP adapter, everything else to
+  schema-less grounded extraction. Submits to `/v1/extract-omni`.
+
+  ```python
+  client.extract("invoice.pdf")                          # Basic, financial
+  client.extract("policy.pdf", category="non_financial") # Basic, generic
+  client.extract_advanced("unknown.pdf")                 # Advanced, auto-detect
+  ```
+
+- **`parse_mode` on all extract methods** — `extract()`, `submit_extract()`,
+  `extract_advanced()`, `submit_extract_advanced()` (sync + async) take a
+  keyword-only `parse_mode` selecting the Stage-1 OCR engine: `"fast"` (default,
+  Paddle text extraction) or `"advanced"` (Chandra layout-aware parsing for
+  dense tables/forms; paid tiers). Independent of `category`; rides as
+  `?parse_mode=` on `/v1/extract` and `/v1/extract-omni`. Mirrors parse's `mode`
+  OCR-depth knob, now that the backend supports it on the extract endpoints.
+
+  ```python
+  client.extract("invoice.pdf", parse_mode="advanced")
+  client.extract_advanced("form.pdf", parse_mode="advanced")
+  ```
+
+### Fixed
+
+- Corrected `extract()` docstrings that described a `mode="omni"` route — omni
+  extraction is the Advanced surface (`/v1/extract-omni`), now exposed via the
+  dedicated `extract_advanced()` method.
+
+### Removed
+
+- `ocr_engine` parameter from all client methods (OCR engine selection is
+  handled server-side; use `mode` for OCR depth on parse).
+- `mode` parameter from `extract()` / `submit_extract()` (sync + async). It did
+  not select the Advanced tier — the server routes Basic vs Advanced by
+  `category`, never `mode`, so `mode="advanced"` silently ran Basic. Advanced
+  extraction is the dedicated `extract_advanced()` method; Basic takes only
+  `category`. (`mode` was never an OCR-depth knob on extract — that is parse-only.)
+
 ## [0.4.0] — 2026-06-10
 
 Platform API sync. No breaking changes — purely additive (all new parameters
@@ -13,7 +66,7 @@ are keyword-only with backward-compatible defaults).
 ### Added
 
 - **`parse(mode=...)` / `submit_parse(mode=...)`** (sync + async) —
-  `mode="advanced"` runs structured-layout OCR (Chandra): each
+  `mode="advanced"` runs layout-aware structured OCR: each
   `result["pages"]` entry gains a `structured` dict with `html`, `markdown`,
   and `regions`. Default `mode="fast"` is unchanged behavior.
 
@@ -48,8 +101,7 @@ are keyword-only with backward-compatible defaults).
 
 ### Documentation
 
-- `extract(mode="omni")` documented — omni-model extraction on a dedicated
-  backend pool.
+- `extract(mode="omni")` documented — schema-less grounded extraction.
 - `CREDENTIALS` PII type (passwords, API keys, tokens, secrets) documented for
   `redact()` / `pii_config`.
 

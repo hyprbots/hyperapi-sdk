@@ -55,19 +55,20 @@ def test_extract_default_path_uses_async(mock_backend, client, tiny_pdf):
     assert result["entities"]["vendor"] == "Acme"
     submit_req = submit_route.calls[0].request
     assert submit_req.headers["X-Async"] == "true"
-    assert submit_req.url.params["ocr_engine"] == "paddle"
-    assert submit_req.url.params["mode"] == "default"
+    assert "ocr_engine" not in submit_req.url.params
+    # Basic extract carries only `category`; `mode` was removed (it silently ran
+    # Basic and never reached Advanced — Advanced is extract_advanced()).
+    assert "mode" not in submit_req.url.params
+    assert submit_req.url.params["category"] == "financial"
     assert poll_route.called
 
 
-def test_extract_custom_mode_propagates(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
-
-    client.extract(tiny_pdf, mode="strict")
-
-    assert submit_route.calls[0].request.url.params["mode"] == "strict"
+def test_extract_rejects_mode_kwarg(client, tiny_pdf):
+    # `mode` no longer exists on Basic extract, so the silent-misroute footgun is
+    # unrepresentable: there is no spelling of extract() that quietly runs Basic
+    # while looking like Advanced. Advanced is the dedicated extract_advanced().
+    with pytest.raises(TypeError):
+        client.extract(tiny_pdf, mode="advanced")
 
 
 def test_extract_pending_then_completed_polls_loop(mock_backend, client, tiny_pdf):
