@@ -1193,6 +1193,149 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
 
+    # ── Batch API (async, deferred) ──────────────────────────────────────
+
+    _BATCH_TERMINAL = frozenset(
+        {"completed", "completed_with_errors", "failed", "canceled"}
+    )
+
+    def _batch_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict | None = None,
+        params: dict | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict:
+        """Shared request+error handling for the /v1/batch endpoints."""
+        headers = self._get_headers()
+        request_id = headers["X-Request-ID"]
+        if extra_headers:
+            headers.update(extra_headers)
+        try:
+            resp = self._client.request(
+                method,
+                f"{self.base_url}{path}",
+                headers=headers,
+                json=json_body,
+                params=params,
+            )
+        except httpx.RequestError as e:
+            raise HyperAPIError(f"Batch request failed: {e}", request_id=request_id) from e
+
+        rid = _request_id_of(resp, request_id)
+        if resp.status_code == 401:
+            raise AuthenticationError("Invalid API key.", status_code=401, request_id=rid)
+        if resp.status_code == 404:
+            raise HyperAPIError("Batch not found.", status_code=404, request_id=rid)
+        if resp.status_code == 429:
+            raise _rate_limit_error_from(resp, rid)
+        if resp.status_code >= 400:
+            raise HyperAPIError(
+                _server_message(resp, f"Batch request failed (HTTP {resp.status_code})"),
+                status_code=resp.status_code,
+                request_id=rid,
+            )
+        try:
+            return resp.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HyperAPIError(
+                f"Malformed batch response: {e}", status_code=resp.status_code, request_id=rid
+            ) from e
+
+    def create_batch(
+        self,
+        *,
+        endpoint: str,
+        document_keys: list[str],
+        options: dict | None = None,
+        parse_mode: str | None = None,
+        webhook_url: str | None = None,
+        estimated_pages_per_doc: int = 1,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """Submit a batch of already-uploaded documents for async processing.
+
+        Returns immediately with ``{batch_id, status, total_items}``; the work
+        runs on spare capacity. Poll :meth:`get_batch` (or :meth:`wait_for_batch`)
+        for per-document results (each result lands in S3, keyed by ``doc_index``).
+
+        Args:
+            endpoint: One of ``/v1/parse``, ``/v1/classify``, ``/v1/split``,
+                ``/v1/redact`` (MVP). ``/v1/extract`` is not yet batch-supported.
+            document_keys: Keys from :meth:`upload_document`, one per document.
+            options: Task-specific options, forwarded to each document's run.
+            parse_mode: ``fast`` for ``/v1/parse`` (advanced is not yet batchable).
+            webhook_url: Optional completion webhook (delivered when available).
+            estimated_pages_per_doc: Hint for the up-front quota check.
+            idempotency_key: Resubmitting with the same key returns the existing
+                batch instead of creating a duplicate.
+        """
+        body: dict = {
+            "endpoint": endpoint,
+            "document_keys": document_keys,
+            "options": options or {},
+            "estimated_pages_per_doc": estimated_pages_per_doc,
+        }
+        if parse_mode is not None:
+            body["parse_mode"] = parse_mode
+        if webhook_url is not None:
+            body["webhook_url"] = webhook_url
+        extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        return self._batch_request("POST", "/v1/batch", json_body=body, extra_headers=extra)
+
+    def create_batch_from_files(
+        self,
+        *,
+        endpoint: str,
+        file_paths: list[str | Path],
+        **kwargs,
+    ) -> dict:
+        """Upload each file (presigned flow) then :meth:`create_batch`."""
+        document_keys = [self.upload_document(p) for p in file_paths]
+        return self.create_batch(endpoint=endpoint, document_keys=document_keys, **kwargs)
+
+    def get_batch(self, batch_id: str, *, limit: int = 200, offset: int = 0) -> dict:
+        """Batch status: ``{status, counts, items:[{doc_index, status, ...}]}``."""
+        return self._batch_request(
+            "GET", f"/v1/batch/{batch_id}", params={"limit": limit, "offset": offset}
+        )
+
+    def list_batches(self, *, limit: int = 50, offset: int = 0) -> dict:
+        """List the org's batches, newest first."""
+        return self._batch_request("GET", "/v1/batch", params={"limit": limit, "offset": offset})
+
+    def cancel_batch(self, batch_id: str) -> dict:
+        """Cancel a batch — stops queued items; in-flight items finish."""
+        return self._batch_request("DELETE", f"/v1/batch/{batch_id}")
+
+    def wait_for_batch(
+        self,
+        batch_id: str,
+        *,
+        timeout: float = 3600.0,
+        poll_interval: float = 5.0,
+    ) -> dict:
+        """Poll :meth:`get_batch` until the batch reaches a terminal state.
+
+        Raises :class:`JobTimeoutError` if ``timeout`` elapses (the batch keeps
+        running server-side — resume with a larger timeout or :meth:`get_batch`).
+        """
+        start = time.monotonic()
+        deadline = start + timeout
+        while True:
+            status = self.get_batch(batch_id)
+            if status.get("status") in self._BATCH_TERMINAL:
+                return status
+            if time.monotonic() >= deadline:
+                raise JobTimeoutError(
+                    f"Batch {batch_id} did not complete within {timeout}s.",
+                    job_id=batch_id,
+                    elapsed_s=time.monotonic() - start,
+                )
+            time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+
     # ── Public convenience methods (submit + wait) ───────────────────────
 
     def parse(
