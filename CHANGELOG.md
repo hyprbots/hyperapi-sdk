@@ -13,6 +13,20 @@ keep their existing signatures plus a new keyword-only `category` defaulting to
 
 ### Added
 
+- **Batch API** (sync + async) — async, deferred processing of many documents:
+  `create_batch(endpoint=..., document_keys=[...])` → `{batch_id, status,
+  total_items}`, plus `get_batch()`, `list_batches()`, `cancel_batch()`,
+  `wait_for_batch()`, and a `create_batch_from_files()` convenience that uploads
+  first. Supports an `Idempotency-Key` (resubmit returns the same batch). MVP
+  endpoints: `/v1/parse`, `/v1/classify`, `/v1/split`, `/v1/redact`.
+
+  ```python
+  batch = client.create_batch_from_files(
+      endpoint="/v1/classify", file_paths=["a.pdf", "b.pdf", "c.pdf"]
+  )
+  done = client.wait_for_batch(batch["batch_id"])   # or poll get_batch()
+  ```
+
 - **`extract(category=...)` / `submit_extract(category=...)`** (sync + async) —
   the Basic extractor. `category="financial"` (default) runs the two-leg IDP
   adapter (invoices/receipts); `category="non_financial"` runs a generic
