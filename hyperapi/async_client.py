@@ -991,6 +991,145 @@ class AsyncHyperAPIClient:
             use_presigned=use_presigned,
         )
 
+    # ── Batch API (async, deferred) ──────────────────────────────────────
+
+    _BATCH_TERMINAL = frozenset(
+        {"completed", "completed_with_errors", "failed", "canceled"}
+    )
+
+    async def _batch_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict | None = None,
+        params: dict | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict:
+        """Shared request+error handling for the /v1/batch endpoints."""
+        headers = self._get_headers()
+        request_id = headers["X-Request-ID"]
+        if extra_headers:
+            headers.update(extra_headers)
+        try:
+            resp = await self._client.request(
+                method,
+                f"{self.base_url}{path}",
+                headers=headers,
+                json=json_body,
+                params=params,
+            )
+        except httpx.RequestError as e:
+            raise HyperAPIError(f"Batch request failed: {e}", request_id=request_id) from e
+
+        rid = _request_id_of(resp, request_id)
+        if resp.status_code == 401:
+            raise AuthenticationError("Invalid API key.", status_code=401, request_id=rid)
+        if resp.status_code == 404:
+            raise HyperAPIError("Batch not found.", status_code=404, request_id=rid)
+        if resp.status_code == 429:
+            raise _rate_limit_error_from(resp, rid)
+        if resp.status_code >= 400:
+            raise HyperAPIError(
+                _server_message(resp, f"Batch request failed (HTTP {resp.status_code})"),
+                status_code=resp.status_code,
+                request_id=rid,
+            )
+        try:
+            return resp.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HyperAPIError(
+                f"Malformed batch response: {e}", status_code=resp.status_code, request_id=rid
+            ) from e
+
+    async def create_batch(
+        self,
+        *,
+        endpoint: str,
+        document_keys: list[str],
+        options: dict | None = None,
+        parse_mode: str | None = None,
+        webhook_url: str | None = None,
+        estimated_pages_per_doc: int = 1,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """Submit a batch of already-uploaded documents for async processing.
+
+        Returns ``{batch_id, status, total_items}``; poll :meth:`get_batch` (or
+        :meth:`wait_for_batch`) for per-document results. Endpoint is one of
+        ``/v1/parse``, ``/v1/classify``, ``/v1/split``, ``/v1/redact`` (MVP).
+        A repeated ``idempotency_key`` returns the existing batch.
+        """
+        body: dict = {
+            "endpoint": endpoint,
+            "document_keys": document_keys,
+            "options": options or {},
+            "estimated_pages_per_doc": estimated_pages_per_doc,
+        }
+        if parse_mode is not None:
+            body["parse_mode"] = parse_mode
+        if webhook_url is not None:
+            body["webhook_url"] = webhook_url
+        extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        return await self._batch_request("POST", "/v1/batch", json_body=body, extra_headers=extra)
+
+    async def create_batch_from_files(
+        self,
+        *,
+        endpoint: str,
+        file_paths: list[str | Path],
+        **kwargs,
+    ) -> dict:
+        """Upload each file concurrently (presigned flow) then :meth:`create_batch`."""
+        document_keys = await asyncio.gather(
+            *(self.upload_document(p) for p in file_paths)
+        )
+        return await self.create_batch(
+            endpoint=endpoint, document_keys=list(document_keys), **kwargs
+        )
+
+    async def get_batch(self, batch_id: str, *, limit: int = 200, offset: int = 0) -> dict:
+        """Batch status: ``{status, counts, items:[{doc_index, status, ...}]}``."""
+        return await self._batch_request(
+            "GET", f"/v1/batch/{batch_id}", params={"limit": limit, "offset": offset}
+        )
+
+    async def list_batches(self, *, limit: int = 50, offset: int = 0) -> dict:
+        """List the org's batches, newest first."""
+        return await self._batch_request(
+            "GET", "/v1/batch", params={"limit": limit, "offset": offset}
+        )
+
+    async def cancel_batch(self, batch_id: str) -> dict:
+        """Cancel a batch — stops queued items; in-flight items finish."""
+        return await self._batch_request("DELETE", f"/v1/batch/{batch_id}")
+
+    async def wait_for_batch(
+        self,
+        batch_id: str,
+        *,
+        timeout: float = 3600.0,
+        poll_interval: float = 5.0,
+    ) -> dict:
+        """Poll :meth:`get_batch` until the batch reaches a terminal state.
+
+        Raises :class:`JobTimeoutError` if ``timeout`` elapses (the batch keeps
+        running server-side).
+        """
+        start = time.monotonic()
+        deadline = start + timeout
+        while True:
+            status = await self.get_batch(batch_id)
+            if status.get("status") in self._BATCH_TERMINAL:
+                return status
+            if time.monotonic() >= deadline:
+                raise JobTimeoutError(
+                    f"Batch {batch_id} did not complete within {timeout}s.",
+                    job_id=batch_id,
+                    elapsed_s=time.monotonic() - start,
+                )
+            await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+
     # ── Public convenience methods (submit + wait) ───────────────────────
 
     async def parse(

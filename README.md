@@ -218,6 +218,41 @@ job = client.submit_extract("big_binder.pdf")
 client.delete_job(job.job_id)
 ```
 
+## Batch API (async, deferred)
+
+Process many documents in one async job. You submit already-uploaded documents,
+get a `batch_id` back immediately, and poll (or wait) for per-document results —
+the work runs on spare capacity, so it never competes with your interactive
+calls. MVP endpoints: `/v1/parse`, `/v1/classify`, `/v1/split`, `/v1/redact`.
+
+```python
+# Upload first, or use the convenience that uploads for you:
+batch = client.create_batch_from_files(
+    endpoint="/v1/classify",
+    file_paths=["a.pdf", "b.pdf", "c.pdf"],
+    idempotency_key="nightly-2026-07-07",   # resubmitting returns the same batch
+)
+print(batch["batch_id"], batch["status"], batch["total_items"])
+
+# Block until the batch finishes (or poll get_batch yourself):
+result = client.wait_for_batch(batch["batch_id"], timeout=3600)
+print(result["counts"])                      # {total, queued, processing, done, failed}
+for item in result["items"]:
+    print(item["doc_index"], item["status"], item.get("result_key"))
+
+# Or drive it manually:
+client.get_batch(batch["batch_id"])          # single status poll
+client.list_batches(limit=20)                # your recent batches
+client.cancel_batch(batch["batch_id"])       # stop queued items (in-flight finish)
+
+# Already have document_keys (from client.upload_document)? Skip the upload:
+client.create_batch(endpoint="/v1/parse", document_keys=[k1, k2], parse_mode="fast")
+```
+
+The async client mirrors every method (`await async_client.create_batch(...)`,
+`await async_client.wait_for_batch(...)`, and `create_batch_from_files` uploads
+the files concurrently).
+
 ## How It Works (Submit + Poll)
 
 Every long-running operation (`parse`, `extract`, `classify`, `split`, `process`) submits asynchronously and polls a job-status endpoint under the hood. From the caller's perspective the SDK looks synchronous — `result = client.extract(file)` blocks until the result is ready — but **each individual HTTP request stays sub-second**, so the SDK is timeout-immune at any CDN edge.
