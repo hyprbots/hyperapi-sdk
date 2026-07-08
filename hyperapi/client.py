@@ -1252,6 +1252,7 @@ class HyperAPIClient:
         options: dict | None = None,
         parse_mode: str | None = None,
         webhook_url: str | None = None,
+        metadata: dict | None = None,
         estimated_pages_per_doc: int = 1,
         idempotency_key: str | None = None,
     ) -> dict:
@@ -1268,6 +1269,9 @@ class HyperAPIClient:
             options: Task-specific options, forwarded to each document's run.
             parse_mode: ``fast`` for ``/v1/parse`` (advanced is not yet batchable).
             webhook_url: Optional completion webhook (delivered when available).
+            metadata: Optional caller-supplied key/value tags stored with the
+                batch and echoed back on :meth:`get_batch` / :meth:`list_batches`
+                and in the completion webhook payload.
             estimated_pages_per_doc: Hint for the up-front quota check.
             idempotency_key: Resubmitting with the same key returns the existing
                 batch instead of creating a duplicate.
@@ -1282,6 +1286,8 @@ class HyperAPIClient:
             body["parse_mode"] = parse_mode
         if webhook_url is not None:
             body["webhook_url"] = webhook_url
+        if metadata is not None:
+            body["metadata"] = metadata
         extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return self._batch_request("POST", "/v1/batch", json_body=body, extra_headers=extra)
 

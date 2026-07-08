@@ -20,6 +20,12 @@ keep their existing signatures plus a new keyword-only `category` defaulting to
   first. Supports an `Idempotency-Key` (resubmit returns the same batch). MVP
   endpoints: `/v1/parse`, `/v1/classify`, `/v1/split`, `/v1/redact`.
 
+- **`create_batch(webhook_url=..., metadata=...)`** (sync + async, also via
+  `create_batch_from_files`) — optional keyword args, sent in the `POST /v1/batch`
+  body only when set. `webhook_url` registers a completion callback; `metadata`
+  attaches caller-supplied key/value tags echoed back on `get_batch()` /
+  `list_batches()` and in the webhook payload.
+
   ```python
   batch = client.create_batch_from_files(
       endpoint="/v1/classify", file_paths=["a.pdf", "b.pdf", "c.pdf"]
