@@ -28,6 +28,35 @@ def test_create_batch_posts_body_and_returns(client, mock_backend):
     assert payload["options"] == {}
 
 
+def test_create_batch_sends_webhook_url_and_metadata_when_set(client, mock_backend):
+    route = mock_backend.post("/v1/batch").mock(
+        return_value=httpx.Response(
+            202, json={"batch_id": "b1", "status": "queued", "total_items": 1}
+        )
+    )
+    client.create_batch(
+        endpoint="/v1/classify",
+        document_keys=["k1"],
+        webhook_url="https://hooks.example.com/batch",
+        metadata={"run": "nightly", "team": "ap"},
+    )
+    payload = json.loads(route.calls.last.request.content)
+    assert payload["webhook_url"] == "https://hooks.example.com/batch"
+    assert payload["metadata"] == {"run": "nightly", "team": "ap"}
+
+
+def test_create_batch_omits_webhook_url_and_metadata_when_unset(client, mock_backend):
+    route = mock_backend.post("/v1/batch").mock(
+        return_value=httpx.Response(
+            202, json={"batch_id": "b1", "status": "queued", "total_items": 1}
+        )
+    )
+    client.create_batch(endpoint="/v1/classify", document_keys=["k1"])
+    payload = json.loads(route.calls.last.request.content)
+    assert "webhook_url" not in payload
+    assert "metadata" not in payload
+
+
 def test_create_batch_forwards_idempotency_key_header(client, mock_backend):
     route = mock_backend.post("/v1/batch").mock(
         return_value=httpx.Response(

@@ -1050,6 +1050,7 @@ class AsyncHyperAPIClient:
         options: dict | None = None,
         parse_mode: str | None = None,
         webhook_url: str | None = None,
+        metadata: dict | None = None,
         estimated_pages_per_doc: int = 1,
         idempotency_key: str | None = None,
     ) -> dict:
@@ -1058,7 +1059,9 @@ class AsyncHyperAPIClient:
         Returns ``{batch_id, status, total_items}``; poll :meth:`get_batch` (or
         :meth:`wait_for_batch`) for per-document results. Endpoint is one of
         ``/v1/parse``, ``/v1/classify``, ``/v1/split``, ``/v1/redact`` (MVP).
-        A repeated ``idempotency_key`` returns the existing batch.
+        A repeated ``idempotency_key`` returns the existing batch. ``webhook_url``
+        registers a completion callback; ``metadata`` attaches caller-supplied
+        key/value tags echoed back on reads and in the webhook payload.
         """
         body: dict = {
             "endpoint": endpoint,
@@ -1070,6 +1073,8 @@ class AsyncHyperAPIClient:
             body["parse_mode"] = parse_mode
         if webhook_url is not None:
             body["webhook_url"] = webhook_url
+        if metadata is not None:
+            body["metadata"] = metadata
         extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return await self._batch_request("POST", "/v1/batch", json_body=body, extra_headers=extra)
 

@@ -32,9 +32,9 @@ def test_version_is_semver():
     assert all(p.isdigit() for p in parts)
 
 
-def test_version_is_040():
-    """v0.4.0 ships parse mode, classify/split options, jobs management. Bump this when the version moves."""
-    assert __version__ == "0.4.0"
+def test_version_is_050():
+    """v0.5.0 ships the Batch API (incl. webhook_url/metadata). Bump this when the version moves."""
+    assert __version__ == "0.5.0"
 
 
 # ── Exception hierarchy ─────────────────────────────────────────────────
