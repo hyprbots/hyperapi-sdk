@@ -45,7 +45,7 @@ jobs:
     needs: test
     environment:
       name: release
-      url: https://pypi.org/project/hyperapi-sdk/
+      url: https://pypi.org/project/hyperapi/
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
