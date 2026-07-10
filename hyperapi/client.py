@@ -1267,7 +1267,12 @@ class HyperAPIClient:
                 ``/v1/redact`` (MVP). ``/v1/extract`` is not yet batch-supported.
             document_keys: Keys from :meth:`upload_document`, one per document.
             options: Task-specific options, forwarded to each document's run.
-            parse_mode: ``fast`` for ``/v1/parse`` (advanced is not yet batchable).
+            parse_mode: ``fast`` (default) or ``advanced``, for ``/v1/parse`` only.
+                ``advanced`` runs Chandra layout-aware parsing and requires a paid
+                plan (Pro/Enterprise) — the API returns 403 otherwise. Batch
+                advanced parse runs on the lowest-priority lane, yielding to
+                interactive traffic, so it may take longer under load (24h SLA).
+                Ignored by non-``/v1/parse`` endpoints.
             webhook_url: Optional completion webhook (delivered when available).
             metadata: Optional caller-supplied key/value tags stored with the
                 batch and echoed back on :meth:`get_batch` / :meth:`list_batches`
