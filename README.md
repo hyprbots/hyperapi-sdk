@@ -64,7 +64,7 @@ Invoice Line Item:
 ## Installation
 
 ```bash
-pip install hyperapi-sdk
+pip install hyperapi
 ```
 
 Or install from source:
@@ -479,7 +479,7 @@ export SSL_CERT_FILE=/path/to/corporate-ca.pem
 If your environment routes through a SOCKS proxy, install the socks extra:
 
 ```bash
-pip install hyperapi-sdk[socks]
+pip install hyperapi[socks]
 ```
 
 ### Logging
