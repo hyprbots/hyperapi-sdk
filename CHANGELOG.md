@@ -33,6 +33,13 @@ keep their existing signatures plus a new keyword-only `category` defaulting to
   done = client.wait_for_batch(batch["batch_id"])   # or poll get_batch()
   ```
 
+- **`create_batch(parse_mode="advanced")`** — advanced (Chandra layout-aware)
+  parse is now available for `/v1/parse` batches on paid plans (Pro/Enterprise;
+  403 otherwise). No signature change — `parse_mode` already existed; this
+  documents the now-live capability (the prior docstring said advanced was "not
+  yet batchable"). Advanced batch runs on the lowest-priority lane and yields to
+  interactive traffic (24h SLA).
+
 - **`extract(category=...)` / `submit_extract(category=...)`** (sync + async) —
   the Basic extractor. `category="financial"` (default) runs the two-leg IDP
   adapter (invoices/receipts); `category="non_financial"` runs a generic
