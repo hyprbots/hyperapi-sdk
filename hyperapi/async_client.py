@@ -1062,6 +1062,9 @@ class AsyncHyperAPIClient:
         A repeated ``idempotency_key`` returns the existing batch. ``webhook_url``
         registers a completion callback; ``metadata`` attaches caller-supplied
         key/value tags echoed back on reads and in the webhook payload.
+        ``parse_mode`` (``/v1/parse`` only) selects ``fast`` (default) or
+        ``advanced`` (Chandra layout-aware, paid plans only — 403 otherwise);
+        advanced batch runs on the lowest-priority lane (24h SLA).
         """
         body: dict = {
             "endpoint": endpoint,
