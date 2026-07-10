@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hyperapi-sdk"
+name = "hyperapi"
 version = "0.5.0"
 description = "HyperAPI Python SDK - Document intelligence APIs (parse, extract, classify, split, redact)"
 readme = "README.md"
