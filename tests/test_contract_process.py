@@ -44,8 +44,15 @@ def test_process_uploads_once_then_submits_both_legs_async(mock_backend, client,
             "job_id": "extract_J", "status": "pending", "poll_url": "/v1/jobs/extract_J",
         }),
     )
+    # Production double-nests the parse result: the GET /v1/jobs envelope's
+    # top-level `result` is the inference envelope, which itself nests the parse
+    # payload under `result`. wait_for_jobs unwraps one level (leaving the
+    # inference envelope), so the OCR text lives at result["result"]["ocr"].
     mock_backend.get("/v1/jobs/parse_J").mock(return_value=httpx.Response(
-        200, json={"status": "completed", "result": {"ocr": "Hello world"}},
+        200, json={
+            "status": "completed",
+            "result": {"result": {"ocr": "Hello world"}, "metadata": {"cached": False}},
+        },
     ))
     mock_backend.get("/v1/jobs/extract_J").mock(return_value=httpx.Response(
         200, json={"status": "completed", "result": {"entities": {"foo": "bar"}}},
