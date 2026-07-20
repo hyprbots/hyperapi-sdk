@@ -117,22 +117,25 @@ def test_redact_submit_5xx_raises_redact_error(mock_backend, client, tiny_pdf):
     assert ei.value.status_code == 500
 
 
-def test_redact_use_presigned_false_sends_multipart_with_pii_config(mock_backend, client, tiny_pdf):
-    """The direct-multipart path (no presigned upload) must carry the file AND
-    the extra pii_config form field together — the one genuinely new code path
-    (`data=extra_form` alongside `files=`)."""
+def test_redact_use_presigned_false_falls_back_to_presigned_with_pii_config(mock_backend, client, tiny_pdf):
+    """use_presigned=False is unsupported by the API; the SDK warns and falls
+    back to the presigned flow, still carrying the extra pii_config form field
+    alongside the presigned document_key."""
+    _seed_presigned(mock_backend)
     submit_route = _seed_submit(mock_backend)
     _seed_completed(mock_backend)
 
-    client.redact(
-        tiny_pdf,
-        use_presigned=False,
-        pii_config={"mode": "extend", "types": [{"name": "SSN"}]},
-    )
+    with pytest.warns(DeprecationWarning):
+        client.redact(
+            tiny_pdf,
+            use_presigned=False,
+            pii_config={"mode": "extend", "types": [{"name": "SSN"}]},
+        )
 
     req = submit_route.calls[0].request
-    assert req.headers["content-type"].startswith("multipart/form-data")
+    # No multipart upload — the submit carries the presigned document_key instead.
+    assert "multipart/form-data" not in req.headers.get("content-type", "")
     assert req.url.params["mode"] == "redact"
     body = req.content.decode("utf-8", errors="ignore")
-    assert "pii_config" in body and "SSN" in body  # extra form field present
-    assert 'name="file"' in body                   # file part still present
+    assert "document_key=doc_rd" in body           # presigned document_key present
+    assert "pii_config" in body and "SSN" in body  # extra form field still present

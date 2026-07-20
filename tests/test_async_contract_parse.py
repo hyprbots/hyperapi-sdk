@@ -154,17 +154,20 @@ async def test_async_parse_image_path_alias_still_works(mock_backend, async_clie
     assert result["ocr"] == "image text"
 
 
-async def test_async_parse_use_presigned_false_sends_multipart(mock_backend, async_client, tiny_pdf):
+async def test_async_parse_use_presigned_false_falls_back_to_presigned(mock_backend, async_client, tiny_pdf):
+    """use_presigned=False is no longer supported by the API (no direct-upload
+    path); the SDK warns and falls back to the presigned document_key flow."""
+    _seed_presigned(mock_backend)
     submit_route = _seed_submit(mock_backend)
     _seed_completed(mock_backend)
 
-    await async_client.parse(tiny_pdf, use_presigned=False)
+    with pytest.warns(DeprecationWarning):
+        await async_client.parse(tiny_pdf, use_presigned=False)
 
     req = submit_route.calls[0].request
-    assert "multipart/form-data" in req.headers["content-type"]
-    body = req.read()
-    assert b"doc.pdf" in body
-    assert b"application/pdf" in body
+    # No multipart upload — the submit carries the presigned document_key instead.
+    assert "multipart/form-data" not in req.headers.get("content-type", "")
+    assert b"document_key=doc_parse" in req.read()
     assert req.headers["X-Async"] == "true"
 
 
