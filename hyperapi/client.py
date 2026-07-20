@@ -35,6 +35,7 @@ import os
 import sys
 import time
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -157,6 +158,18 @@ def _server_message(response: httpx.Response, fallback: str) -> str:
 def _request_id_of(response: httpx.Response, sent: str | None = None) -> str | None:
     """Best-effort extraction of the request id we should attach to errors."""
     return response.headers.get("x-request-id") or response.headers.get("x-correlation-id") or sent
+
+
+def _parse_ocr_text(parse_result: Any) -> Any:
+    """OCR text from a parse job result. The parse envelope nests its payload
+    under `result` (parse_result["result"]["ocr"]); a flattened shape would put
+    it at the top level. None if absent. See BUG-04."""
+    if not isinstance(parse_result, dict):
+        return None
+    inner = parse_result.get("result")
+    if isinstance(inner, dict) and "ocr" in inner:
+        return inner["ocr"]
+    return parse_result.get("ocr")
 
 
 def _rate_limit_error_from(resp: httpx.Response, rid: str | None) -> RateLimitError:
@@ -518,8 +531,12 @@ class HyperAPIClient:
         """Submit a pipeline op asynchronously. Returns a Job handle.
 
         ``data`` carries extra form fields beyond ``document_key`` (e.g. redact's
-        ``pii_config``). Sent in the form body on both the presigned and the
-        direct-multipart paths.
+        ``pii_config``), sent in the form body alongside ``document_key``.
+
+        The op always uploads via the presigned-S3 flow: the API has no
+        direct-upload path and only accepts a ``document_key``. ``use_presigned``
+        is retained for backward compatibility; ``use_presigned=False`` emits a
+        ``DeprecationWarning`` and falls back to the presigned flow.
         """
         request_timeout = timeout or self.timeout
         error_cls = _OP_TO_ERROR[op_name]
@@ -530,27 +547,24 @@ class HyperAPIClient:
         request_id = headers["X-Request-ID"]
         extra_form = data or {}
 
+        if not use_presigned:
+            warnings.warn(
+                "use_presigned=False is no longer supported: the API has no "
+                "direct-upload path and only accepts a presigned document_key. "
+                "Falling back to the presigned upload flow.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         try:
-            if use_presigned:
-                document_key = self.upload_document(file_path, content_type=content_type)
-                response = self._client.post(
-                    f"{self.base_url}{endpoint}",
-                    data={"document_key": document_key, **extra_form},
-                    params=params,
-                    headers=headers,
-                    timeout=request_timeout,
-                )
-            else:
-                with open(file_path, "rb") as f:
-                    files = {"file": (file_path.name, f, content_type)}
-                    response = self._client.post(
-                        f"{self.base_url}{endpoint}",
-                        files=files,
-                        data=extra_form,
-                        params=params,
-                        headers=headers,
-                        timeout=request_timeout,
-                    )
+            document_key = self.upload_document(file_path, content_type=content_type)
+            response = self._client.post(
+                f"{self.base_url}{endpoint}",
+                data={"document_key": document_key, **extra_form},
+                params=params,
+                headers=headers,
+                timeout=request_timeout,
+            )
         except httpx.TimeoutException as e:
             raise error_cls(
                 "Request timed out",
@@ -1017,17 +1031,17 @@ class HyperAPIClient:
         that historically accepted bare images via that name.
 
         ``mode="advanced"`` runs layout-aware structured OCR: each
-        ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
+        ``result["result"]["pages"]`` entry gains a ``structured`` dict with ``html``,
         ``markdown``, and ``regions``. Only meaningful on the default OCR
         engine; noticeably slower than ``"fast"`` but well within the default
         ``poll_timeout``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["pages"]`` (standard OCR engine only; the layout-aware engine
+        ``result["result"]["pages"]`` (standard OCR engine only; the layout-aware engine
         returns an empty list).
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
-        to each ``result["pages"]`` entry, pointing to the deskew-corrected
+        to each ``result["result"]["pages"]`` entry, pointing to the deskew-corrected
         page image.
         """
         path = self._resolve_path(file_path, image_path)
@@ -1363,28 +1377,33 @@ class HyperAPIClient:
     ) -> dict:
         """Parse a document using OCR. Submits asynchronously and polls until done.
 
+        The returned dict is the response envelope; the parse payload is nested
+        one level under ``result`` — OCR text at ``result["result"]["ocr"]`` and
+        the page list at ``result["result"]["pages"]``.
+
         Args:
             file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF, GIF).
             image_path: Deprecated alias for file_path.
             mode: ``"fast"`` (default — plain text + boxes) or ``"advanced"``
-                (layout-aware structured OCR: each ``result["pages"]``
+                (layout-aware structured OCR: each ``result["result"]["pages"]``
                 entry gains a ``structured`` dict with ``html``, ``markdown``,
                 and ``regions``). Advanced only applies on the default OCR
                 engine and is noticeably slower.
-            include_boxes: When True, each ``result["pages"]`` entry includes a
-                ``boxes`` list of ``{"text", "bbox": [left, top, right, bottom],
-                "confidence"}`` segments. Standard OCR engine only; the
+            include_boxes: When True, each ``result["result"]["pages"]`` entry
+                includes a ``boxes`` list of ``{"text", "bbox": [left, top, right,
+                bottom], "confidence"}`` segments. Standard OCR engine only; the
                 layout-aware engine returns [].
-            include_image: When True, each ``result["pages"]`` entry includes an
-                ``image_url`` (presigned GET for the deskew-corrected page) and
-                ``dimensions`` (``{"width", "height"}`` in that image's pixel space,
-                which matches the box coordinate space).
+            include_image: When True, each ``result["result"]["pages"]`` entry
+                includes an ``image_url`` (presigned GET for the deskew-corrected
+                page) and ``dimensions`` (``{"width", "height"}`` in that image's
+                pixel space, which matches the box coordinate space).
             use_presigned: Use the presigned-S3 upload flow (default True).
             poll_timeout: Override the constructor's poll_timeout for this call.
             poll_interval: Override the constructor's poll_interval for this call.
 
         Returns:
-            Response envelope with ``result["ocr"]``.
+            Response envelope; OCR text at ``result["result"]["ocr"]`` and pages
+            at ``result["result"]["pages"]``.
         """
         job = self.submit_parse(
             file_path=file_path,
@@ -1571,7 +1590,7 @@ class HyperAPIClient:
         )
         parse_result, extract_result = results
         return {
-            "ocr": parse_result.get("ocr") if isinstance(parse_result, dict) else None,
+            "ocr": _parse_ocr_text(parse_result),
             "data": extract_result if isinstance(extract_result, dict) else {},
         }
 
