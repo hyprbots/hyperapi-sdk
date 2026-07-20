@@ -1277,8 +1277,8 @@ class HyperAPIClient:
         for per-document results (each result lands in S3, keyed by ``doc_index``).
 
         Args:
-            endpoint: One of ``/v1/parse``, ``/v1/classify``, ``/v1/split``,
-                ``/v1/redact`` (MVP). ``/v1/extract`` is not yet batch-supported.
+            endpoint: One of ``/v1/parse``, ``/v1/extract``, ``/v1/classify``,
+                ``/v1/split``, ``/v1/redact``.
             document_keys: Keys from :meth:`upload_document`, one per document.
             options: Task-specific options, forwarded to each document's run.
             parse_mode: ``fast`` (default) or ``advanced``, for ``/v1/parse`` only.
