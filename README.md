@@ -223,7 +223,7 @@ client.delete_job(job.job_id)
 Process many documents in one async job. You submit already-uploaded documents,
 get a `batch_id` back immediately, and poll (or wait) for per-document results —
 the work runs on spare capacity, so it never competes with your interactive
-calls. MVP endpoints: `/v1/parse`, `/v1/classify`, `/v1/split`, `/v1/redact`.
+calls. Supported endpoints: `/v1/parse`, `/v1/extract`, `/v1/classify`, `/v1/split`, `/v1/redact`.
 
 ```python
 # Upload first, or use the convenience that uploads for you:

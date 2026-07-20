@@ -1061,7 +1061,7 @@ class AsyncHyperAPIClient:
 
         Returns ``{batch_id, status, total_items}``; poll :meth:`get_batch` (or
         :meth:`wait_for_batch`) for per-document results. Endpoint is one of
-        ``/v1/parse``, ``/v1/classify``, ``/v1/split``, ``/v1/redact`` (MVP).
+        ``/v1/parse``, ``/v1/extract``, ``/v1/classify``, ``/v1/split``, ``/v1/redact``.
         A repeated ``idempotency_key`` returns the existing batch. ``webhook_url``
         registers a completion callback; ``metadata`` attaches caller-supplied
         key/value tags echoed back on reads and in the webhook payload.
