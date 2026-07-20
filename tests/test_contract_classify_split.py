@@ -7,7 +7,7 @@ tests focus on per-op specifics: endpoint, error class, mode parameter.
 import httpx
 import pytest
 
-from hyperapi import ClassifyError, Job, SplitError
+from hyperapi import ClassifyError, Job
 
 
 def _seed(mock_backend, key, op_endpoint, *, job_id, result):
@@ -185,27 +185,25 @@ def test_split_options_ride_in_form_body(mock_backend, client, tiny_pdf):
     assert "use_thinking" in body
 
 
-def test_split_use_presigned_false_sends_multipart_with_options(mock_backend, client, tiny_pdf):
-    """The direct-multipart path must carry the file AND the options form
-    field together (mirror of redact's pii_config multipart test)."""
-    submit = mock_backend.post("/v1/split").mock(
-        return_value=httpx.Response(202, json={
-            "job_id": "sj_3", "status": "pending", "poll_url": "/v1/jobs/sj_3",
-        }),
-    )
-    mock_backend.get("/v1/jobs/sj_3").mock(
-        return_value=httpx.Response(200, json={
-            "status": "completed", "result": {"segments": []}, "request_id": "req-x",
-        }),
+def test_split_use_presigned_false_falls_back_to_presigned_with_options(mock_backend, client, tiny_pdf):
+    """use_presigned=False is unsupported by the API; the SDK warns and falls
+    back to the presigned flow, still carrying the extra options form field
+    alongside the presigned document_key."""
+    submit = _seed(
+        mock_backend, "doc_sp4", "/v1/split",
+        job_id="sj_3",
+        result={"segments": []},
     )
 
-    client.split(tiny_pdf, use_presigned=False, options={"use_thinking": False})
+    with pytest.warns(DeprecationWarning):
+        client.split(tiny_pdf, use_presigned=False, options={"use_thinking": False})
 
     req = submit.calls[0].request
-    assert req.headers["content-type"].startswith("multipart/form-data")
+    # No multipart upload — the submit carries the presigned document_key instead.
+    assert "multipart/form-data" not in req.headers.get("content-type", "")
     body = req.content.decode("utf-8", errors="ignore")
-    assert "options" in body and "use_thinking" in body  # extra form field present
-    assert 'name="file"' in body                          # file part still present
+    assert "document_key=doc_sp4" in body                 # presigned document_key present
+    assert "options" in body and "use_thinking" in body   # extra form field still present
 
 
 def test_classify_invalid_options_400_raises_classify_error(mock_backend, client, tiny_pdf):

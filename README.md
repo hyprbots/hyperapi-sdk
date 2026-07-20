@@ -125,7 +125,7 @@ tables, not flattened text. Slower than the default `mode="fast"`.
 
 ```python
 result = client.parse("annual_report.pdf", mode="advanced")
-page = result["pages"][0]
+page = result["result"]["pages"][0]
 print(page["structured"]["markdown"])   # layout-aware markdown
 print(page["structured"]["regions"])    # typed regions with bounding boxes
 ```

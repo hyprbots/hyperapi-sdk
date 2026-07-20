@@ -59,6 +59,7 @@ import os
 import sys
 import time
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any
 from collections.abc import Iterable
@@ -79,6 +80,7 @@ from .client import (
     _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S,
     _DEFAULT_TIMEOUT,
     _OP_TO_ERROR,
+    _parse_ocr_text,
     _rate_limit_error_from,
     _request_id_of,
     _server_message,
@@ -384,7 +386,12 @@ class AsyncHyperAPIClient:
         """Submit a pipeline op asynchronously. Returns a Job handle.
 
         ``data`` carries extra form fields beyond ``document_key`` (e.g. redact's
-        ``pii_config``), sent in the form body on both submit paths.
+        ``pii_config``), sent in the form body alongside ``document_key``.
+
+        The op always uploads via the presigned-S3 flow: the API has no
+        direct-upload path and only accepts a ``document_key``. ``use_presigned``
+        is retained for backward compatibility; ``use_presigned=False`` emits a
+        ``DeprecationWarning`` and falls back to the presigned flow.
         """
         request_timeout = timeout or self.timeout
         error_cls = _OP_TO_ERROR[op_name]
@@ -395,28 +402,24 @@ class AsyncHyperAPIClient:
         request_id = headers["X-Request-ID"]
         extra_form = data or {}
 
+        if not use_presigned:
+            warnings.warn(
+                "use_presigned=False is no longer supported: the API has no "
+                "direct-upload path and only accepts a presigned document_key. "
+                "Falling back to the presigned upload flow.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         try:
-            if use_presigned:
-                document_key = await self.upload_document(file_path, content_type=content_type)
-                response = await self._client.post(
-                    f"{self.base_url}{endpoint}",
-                    data={"document_key": document_key, **extra_form},
-                    params=params,
-                    headers=headers,
-                    timeout=request_timeout,
-                )
-            else:
-                with open(file_path, "rb") as f:
-                    file_bytes = f.read()
-                files = {"file": (file_path.name, file_bytes, content_type)}
-                response = await self._client.post(
-                    f"{self.base_url}{endpoint}",
-                    files=files,
-                    data=extra_form,
-                    params=params,
-                    headers=headers,
-                    timeout=request_timeout,
-                )
+            document_key = await self.upload_document(file_path, content_type=content_type)
+            response = await self._client.post(
+                f"{self.base_url}{endpoint}",
+                data={"document_key": document_key, **extra_form},
+                params=params,
+                headers=headers,
+                timeout=request_timeout,
+            )
         except httpx.TimeoutException as e:
             raise error_cls(
                 "Request timed out",
@@ -816,17 +819,17 @@ class AsyncHyperAPIClient:
         """Submit a parse job asynchronously and return immediately.
 
         ``mode="advanced"`` runs layout-aware structured OCR: each
-        ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
+        ``result["result"]["pages"]`` entry gains a ``structured`` dict with ``html``,
         ``markdown``, and ``regions``. Only meaningful on the default OCR
         engine; noticeably slower than ``"fast"`` but well within the default
         ``poll_timeout``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["pages"]`` (standard OCR engine only; the layout-aware engine
+        ``result["result"]["pages"]`` (standard OCR engine only; the layout-aware engine
         returns an empty list).
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
-        to each ``result["pages"]`` entry for the deskew-corrected page image.
+        to each ``result["result"]["pages"]`` entry for the deskew-corrected page image.
         """
         path = self._resolve_path(file_path, image_path)
         return await self._submit_via_path(
@@ -1155,16 +1158,16 @@ class AsyncHyperAPIClient:
         """Parse a document using OCR. Submits asynchronously and polls until done.
 
         ``mode="advanced"`` runs layout-aware structured OCR: each
-        ``result["pages"]`` entry gains a ``structured`` dict with ``html``,
+        ``result["result"]["pages"]`` entry gains a ``structured`` dict with ``html``,
         ``markdown``, and ``regions``. Only meaningful on the default OCR
         engine; noticeably slower than ``"fast"``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["pages"]`` (standard OCR engine only; the layout-aware engine
+        ``result["result"]["pages"]`` (standard OCR engine only; the layout-aware engine
         returns an empty list).
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
-        to each ``result["pages"]`` entry for the deskew-corrected page image.
+        to each ``result["result"]["pages"]`` entry for the deskew-corrected page image.
         """
         job = await self.submit_parse(
             file_path=file_path,
@@ -1342,7 +1345,7 @@ class AsyncHyperAPIClient:
         )
         parse_result, extract_result = results
         return {
-            "ocr": parse_result.get("ocr") if isinstance(parse_result, dict) else None,
+            "ocr": _parse_ocr_text(parse_result),
             "data": extract_result if isinstance(extract_result, dict) else {},
         }
 
