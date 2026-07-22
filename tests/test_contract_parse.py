@@ -220,7 +220,7 @@ def test_parse_failed_job_raises_parse_error(mock_backend, client, tiny_pdf):
         return_value=httpx.Response(200, json={
             "status": "failed",
             "error": "OCR pipeline failed",
-            "error_status_code": 500,
+            "status_code": 500,
             "request_id": "req-x",
         }),
     )

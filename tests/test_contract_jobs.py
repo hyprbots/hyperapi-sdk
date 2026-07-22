@@ -34,7 +34,7 @@ def _failed_response(error="Insufficient credits", status_code=402):
         json={
             "status": "failed",
             "error": error,
-            "error_status_code": status_code,
+            "status_code": status_code,
             "request_id": "req-x",
         },
     )
@@ -304,7 +304,7 @@ def test_failed_job_request_id_carries_to_exception(mock_backend, client):
         200,
         json={
             "status": "failed", "error": "service down",
-            "error_status_code": 500, "request_id": "req-zzz",
+            "status_code": 500, "request_id": "req-zzz",
         },
     ))
     job = Job(job_id="j-11", status="pending", poll_url="/v1/jobs/j-11", op="parse")
@@ -414,7 +414,7 @@ def test_failed_job_message_includes_http_status(mock_backend, client):
         json={
             "status": "failed",
             "error": "extract pipeline crashed",
-            "error_status_code": 500,
+            "status_code": 500,
         },
     ))
     job = Job(job_id="j-msg", status="pending", poll_url="/v1/jobs/j-msg", op="extract")

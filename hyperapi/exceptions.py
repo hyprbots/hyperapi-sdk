@@ -141,6 +141,15 @@ class RedactError(HyperAPIError):
     pass
 
 
+class EditError(HyperAPIError):
+    """Raised when form detect/fill fails (sync HTTP error or job status=failed).
+
+    Covers both legs of the two-call edit flow — `/v1/edit/detect` and
+    `/v1/edit/fill` — since they share one job taxonomy server-side.
+    """
+    pass
+
+
 class DocumentUploadError(HyperAPIError):
     """Raised when the presigned-URL flow fails (presigned fetch or S3 PUT)."""
     pass

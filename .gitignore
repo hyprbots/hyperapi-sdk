@@ -42,3 +42,6 @@ tests/customer_sim/reports/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Scratch file for composing the next commit message (git commit -F commit.txt)
+commit.txt

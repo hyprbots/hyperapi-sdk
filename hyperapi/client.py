@@ -47,6 +47,7 @@ from .exceptions import (
     AuthenticationError,
     ClassifyError,
     DocumentUploadError,
+    EditError,
     ExtractError,
     HyperAPIError,
     JobTimeoutError,
@@ -96,6 +97,9 @@ _OP_TO_ERROR: dict[str, type] = {
     "classify": ClassifyError,
     "split": SplitError,
     "redact": RedactError,
+    # Both legs of the two-call edit flow (detect + fill) share one op key —
+    # the server meters and fails them under the same /v1/edit endpoint.
+    "edit": EditError,
 }
 
 
@@ -112,7 +116,7 @@ class Job:
     job_id: str
     status: str
     poll_url: str
-    op: str  # "parse" | "extract" | "classify" | "split" | "redact"
+    op: str  # "parse" | "extract" | "classify" | "split" | "redact" | "edit"
     submitted_at: float = field(default_factory=time.monotonic)
 
 
@@ -170,6 +174,101 @@ def _parse_ocr_text(parse_result: Any) -> Any:
     if isinstance(inner, dict) and "ocr" in inner:
         return inner["ocr"]
     return parse_result.get("ocr")
+
+
+def _edit_fill_body(
+    detect_job_id: str,
+    *,
+    values: dict | list | None,
+    content: str | None,
+    natural_language: bool,
+) -> dict[str, Any]:
+    """Build (and pre-validate) the JSON body for ``POST /v1/edit/fill``.
+
+    The server rejects both mode/field mismatches with a 400; catching them
+    here turns a round-trip into an immediate ``ValueError``. Shared by both
+    clients so the two stay in lockstep.
+    """
+    if natural_language:
+        if not (content or "").strip():
+            raise ValueError("natural_language=True requires non-empty content")
+        return {
+            "detect_job_id": detect_job_id,
+            "natural_language": True,
+            "content": content,
+        }
+    if values is None:
+        raise ValueError(
+            "natural_language=False requires values "
+            '({"0": "Jane"} or [{"index": 0, "value": "Jane"}])'
+        )
+    return {
+        "detect_job_id": detect_job_id,
+        "natural_language": False,
+        "values": values,
+    }
+
+
+def _pages_of(result: Any) -> list[dict]:
+    """Find the page list in any op's result, whichever nesting it arrived in.
+
+    ``edit_detect``/``edit_fill``/``parse`` return the platform envelope, so the pages sit at
+    ``result["result"]["pages"]``; the composite ``edit()`` flattens them to ``result["pages"]``.
+    Accepting both means callers can hand us whatever they just got back.
+    """
+    if not isinstance(result, dict):
+        raise ValueError("Expected the dict returned by edit_detect/edit_fill/edit/parse")
+    for candidate in (result.get("result"), result):
+        if isinstance(candidate, dict) and isinstance(candidate.get("pages"), list):
+            return candidate["pages"]
+    raise ValueError(
+        "No 'pages' in this result. Pass the value returned by edit_detect(), edit_fill(), "
+        "edit(), or parse(include_image=True)."
+    )
+
+
+def _page_number(page: dict, fallback: int) -> int:
+    """edit pages are keyed `page`; parse pages are keyed `page_number`."""
+    for key in ("page", "page_number"):
+        value = page.get(key)
+        if isinstance(value, int):
+            return value
+    return fallback
+
+
+def _image_suffix(url: str) -> str:
+    """Extension from the URL path — edit serves .png, parse serves .webp. Never guess:
+    writing webp bytes into a .png name breaks anything that trusts the extension."""
+    stem = url.split("?", 1)[0].rsplit("/", 1)[-1]
+    suffix = Path(stem).suffix.lower()
+    return suffix if suffix in {".png", ".webp", ".jpg", ".jpeg", ".tif", ".tiff"} else ".png"
+
+
+def _page_targets(result: Any, dest_dir: str | Path, prefix: str) -> list[tuple[str, Path]]:
+    """Pair each page's presigned URL with the local path it should be written to."""
+    pages = _pages_of(result)
+    dest = Path(dest_dir)
+    out: list[tuple[str, Path]] = []
+    for i, page in enumerate(pages):
+        page = page or {}
+        url = page.get("image_url")
+        if not url:
+            raise ValueError(
+                f"Page {_page_number(page, i + 1)} has no 'image_url' to download. "
+                "For parse(), pass include_image=True."
+            )
+        out.append((url, dest / f"{prefix}-{_page_number(page, i + 1)}{_image_suffix(url)}"))
+    return out
+
+
+def _download_error(page_path: Path, status: int) -> HyperAPIError:
+    hint = ""
+    if status in (403, 401):
+        # SigV4 presigned URLs live ~15 min; the job itself survives 24 h.
+        hint = (" The presigned URL has most likely expired — re-poll the job with "
+                "get_job(job_id) for fresh URLs, then download again.")
+    return HyperAPIError(f"Could not download {page_path.name} (HTTP {status}).{hint}",
+                         status_code=status)
 
 
 def _rate_limit_error_from(resp: httpx.Response, rid: str | None) -> RateLimitError:
@@ -630,6 +729,51 @@ class HyperAPIClient:
 
         return self._job_from_envelope(response.json(), op=op_name)
 
+    def _submit_json(
+        self,
+        endpoint: str,
+        op_name: str,
+        body: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> Job:
+        """Submit a pipeline op whose request body is JSON and carries no file.
+
+        Only ``/v1/edit/fill`` uses this today: it references a prior detect
+        job by id rather than uploading anything, so neither of the
+        form-data + ``document_key`` helpers above fits.
+        """
+        request_timeout = timeout or self.timeout
+        error_cls = _OP_TO_ERROR[op_name]
+        headers = self._get_headers(async_mode=True)
+        request_id = headers["X-Request-ID"]
+
+        try:
+            response = self._client.post(
+                f"{self.base_url}{endpoint}",
+                json=body,
+                headers=headers,
+                timeout=request_timeout,
+            )
+        except httpx.TimeoutException as e:
+            raise error_cls(
+                "Request timed out", status_code=504, request_id=request_id
+            ) from e
+        except httpx.RequestError as e:
+            raise error_cls(f"Request failed: {e}", request_id=request_id) from e
+
+        self._raise_for_known_status(
+            response, request_id=request_id, error_cls=error_cls, op_name=op_name
+        )
+        if response.status_code not in (200, 202):
+            raise error_cls(
+                _server_message(response, f"{op_name} submission failed"),
+                status_code=response.status_code,
+                request_id=_request_id_of(response, request_id),
+            )
+
+        return self._job_from_envelope(response.json(), op=op_name)
+
     @staticmethod
     def _job_from_envelope(envelope: dict, *, op: str) -> Job:
         return Job(
@@ -997,12 +1141,12 @@ class HyperAPIClient:
         (``ParseError``, ``ExtractError``, …) and falls back to
         ``HyperAPIError`` for raw-job-id calls where we couldn't determine
         which op originated the job. The HTTP status (if present in the
-        envelope's ``error_status_code``) is prefixed onto the message so
+        envelope's ``status_code``) is prefixed onto the message so
         ``str(e)`` is self-describing in support tickets without needing the
         caller to also surface ``e.status_code``.
         """
         raw = _strip_api_key(envelope.get("error")) or "Job failed"
-        status_code = envelope.get("error_status_code")
+        status_code = envelope.get("status_code")
         message = f"(HTTP {status_code}) {raw}" if status_code else raw
         cls = _OP_TO_ERROR.get(op, HyperAPIError)
         return cls(
@@ -1206,6 +1350,67 @@ class HyperAPIClient:
             data=data,
             use_presigned=use_presigned,
         )
+
+    def submit_edit_detect(
+        self,
+        file_path: str | Path,
+        *,
+        markdown_assist: bool = False,
+        use_presigned: bool = True,
+    ) -> Job:
+        """Submit a form-field detection job asynchronously and return immediately.
+
+        Leg 1 of the two-call edit flow. Detects every blank fillable field on
+        a form (PDF or image) and returns a ``form_schema`` plus rendered page
+        images. Feed the resulting ``job_id`` to :py:meth:`submit_edit_fill`.
+
+        ``markdown_assist=True`` routes detection through layout-aware parsing
+        (Chandra markdown/form blocks) — more precise on dense forms, slower.
+
+        Edit is metered **once, here**; the fill leg is included.
+        """
+        path = self._resolve_path(file_path)
+        return self._submit_via_path(
+            "/v1/edit/detect", "edit", path,
+            params={"markdown_assist": markdown_assist},
+            use_presigned=use_presigned,
+        )
+
+    def submit_edit_fill(
+        self,
+        detect_job_id: str,
+        *,
+        values: dict | list | None = None,
+        content: str | None = None,
+        natural_language: bool = False,
+    ) -> Job:
+        """Submit a form-fill job asynchronously and return immediately.
+
+        Leg 2 of the two-call edit flow. References the completed detect job by
+        id — the schema and page images stay server-side, so nothing heavy
+        crosses the wire.
+
+        Two mutually exclusive modes:
+
+        - ``natural_language=False`` (default) — you supply every value in
+          ``values``, either ``{"0": "Jane", "3": "X"}`` or
+          ``[{"index": 0, "value": "Jane"}]``, where the key/index is the
+          field's position in ``form_schema``. No model call, deterministic.
+        - ``natural_language=True`` — ``content`` is free text that one model
+          call maps onto the schema. The mapped ``fills`` come back in the
+          result so a UI can show them for review and re-submit the corrected
+          set with ``natural_language=False``.
+
+        Raises:
+            ValueError: If the supplied fields don't match the chosen mode.
+        """
+        body = _edit_fill_body(
+            detect_job_id,
+            values=values,
+            content=content,
+            natural_language=natural_language,
+        )
+        return self._submit_json("/v1/edit/fill", "edit", body)
 
     # ── Batch API (async, deferred) ──────────────────────────────────────
 
@@ -1552,6 +1757,180 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+
+    def edit_detect(
+        self,
+        file_path: str | Path,
+        *,
+        markdown_assist: bool = False,
+        use_presigned: bool = True,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
+    ) -> dict:
+        """Detect the blank fillable fields on a form. Submits async + polls until done.
+
+        Leg 1 of the two-call edit flow — pass the returned job's id to
+        :py:meth:`edit_fill`. Because the fill leg needs that id, this method
+        also stamps it onto the envelope as ``detect_job_id``.
+
+        Returns:
+            Response envelope. The payload is nested one level under
+            ``result``: ``result["result"]["form_schema"]`` is a flat,
+            page-numbered list of fields (**a field's position in that list is
+            its fill index**), and ``result["result"]["pages"]`` is the page
+            images the boxes are relative to.
+
+        Note:
+            Each page carries a presigned ``image_url``, not image bytes. Those
+            URLs are short-lived — download them promptly, or re-poll the job
+            with :py:meth:`get_job` to have the server mint fresh ones.
+        """
+        job = self.submit_edit_detect(
+            file_path,
+            markdown_assist=markdown_assist,
+            use_presigned=use_presigned,
+        )
+        envelope = self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        # The server's envelope has no field pointing back at the job, but the
+        # fill leg needs exactly that — surface it so callers don't have to
+        # hold onto the Job separately.
+        if isinstance(envelope, dict):
+            envelope.setdefault("detect_job_id", job.job_id)
+        return envelope
+
+    def edit_fill(
+        self,
+        detect_job_id: str,
+        *,
+        values: dict | list | None = None,
+        content: str | None = None,
+        natural_language: bool = False,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
+    ) -> dict:
+        """Fill the fields found by a prior :py:meth:`edit_detect` call.
+
+        See :py:meth:`submit_edit_fill` for the two modes. Not separately
+        metered — the document was charged at detect time.
+
+        Returns:
+            Response envelope with ``result["result"]["fills"]`` (the
+            index/value pairs that were drawn, including the model's mapping
+            when ``natural_language=True``) and ``result["result"]["pages"]``
+            (the rendered pages, as presigned ``image_url`` s).
+        """
+        job = self.submit_edit_fill(
+            detect_job_id,
+            values=values,
+            content=content,
+            natural_language=natural_language,
+        )
+        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+
+    def edit(
+        self,
+        file_path: str | Path,
+        *,
+        content: str,
+        markdown_assist: bool = False,
+        poll_timeout: float | None = None,
+        poll_interval: float | None = None,
+    ) -> dict:
+        """Detect and fill a form in one call, from free text.
+
+        Chains :py:meth:`edit_detect` + :py:meth:`edit_fill`. ``content`` is
+        free text that one model call maps onto the schema this call just
+        detected.
+
+        **There is deliberately no ``values=`` here.** Values are keyed by a
+        field's position in ``form_schema``, and this call detects that schema
+        for the first time — so the caller cannot know the indices yet, and
+        detection is a model call whose field ordering is not stable between
+        runs. To fill by index, run the two legs: :py:meth:`edit_detect` to see
+        the schema, then :py:meth:`edit_fill` with ``values``. That is also the
+        human-in-the-loop flow — show the detected fields, let the user correct
+        the mapped values, re-render.
+
+        Returns:
+            ``{"detect_job_id": str, "form_schema": [...], "fills": [...],
+            "pages": [...]}`` — ``pages`` being the *filled* pages. The
+            ``detect_job_id`` is returned so a correction round can follow with
+            :py:meth:`edit_fill` without re-detecting (and without re-paying).
+
+        Raises:
+            ValueError: If ``content`` is empty or whitespace.
+        """
+        # Check before the detect leg — that is the metered one.
+        if not (content or "").strip():
+            raise ValueError("edit() requires non-empty content=")
+
+        detected = self.edit_detect(
+            file_path,
+            markdown_assist=markdown_assist,
+            poll_timeout=poll_timeout,
+            poll_interval=poll_interval,
+        )
+        detect_job_id = detected["detect_job_id"]
+        filled = self.edit_fill(
+            detect_job_id,
+            content=content,
+            natural_language=True,
+            poll_timeout=poll_timeout,
+            poll_interval=poll_interval,
+        )
+        detect_payload = detected.get("result") or {}
+        fill_payload = filled.get("result") or {}
+        return {
+            "detect_job_id": detect_job_id,
+            "form_schema": detect_payload.get("form_schema") or [],
+            "fills": fill_payload.get("fills") or [],
+            "pages": fill_payload.get("pages") or [],
+        }
+
+    def download_pages(
+        self,
+        result: dict,
+        dest_dir: str | Path,
+        *,
+        prefix: str = "page",
+    ) -> list[Path]:
+        """Download a result's page images to a folder.
+
+        Works with whatever you just got back — :py:meth:`edit_detect` (the blank detected
+        pages), :py:meth:`edit_fill` / :py:meth:`edit` (the filled ones), or
+        :py:meth:`parse` with ``include_image=True``. Files are written as
+        ``<dest_dir>/<prefix>-<page number>.png``; the directory is created if needed.
+
+        Page images are served as **short-lived presigned URLs** (~15 min), so download
+        promptly. If they have expired, re-poll with :py:meth:`get_job` — the server mints
+        fresh URLs for the full 24 h the job lives — and call this again.
+
+        Args:
+            result: The dict returned by an op that produced page images.
+            dest_dir: Folder to write into. Created if it does not exist.
+            prefix: Filename stem; defaults to ``page`` → ``page-1.png``.
+
+        Returns:
+            The written paths, in page order.
+
+        Raises:
+            ValueError: If the result carries no pages, or a page has no ``image_url``.
+            HyperAPIError: If a download fails — an expired URL reports as such.
+        """
+        targets = _page_targets(result, dest_dir, prefix)
+        Path(dest_dir).mkdir(parents=True, exist_ok=True)
+
+        written: list[Path] = []
+        for url, path in targets:
+            # Presigned URLs carry their own SigV4 signature — send no API-key headers.
+            # follow_redirects: S3 answers a cross-region GET with a 307 to the regional
+            # endpoint, which would otherwise surface as a baffling "HTTP 307".
+            resp = self._client.get(url, follow_redirects=True)
+            if resp.status_code >= 400:
+                raise _download_error(path, resp.status_code)
+            path.write_bytes(resp.content)
+            written.append(path)
+        return written
 
     def process(
         self,

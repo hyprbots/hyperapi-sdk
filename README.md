@@ -10,7 +10,7 @@
 
 ---
 
-**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Classify, Split, Redact, and more APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
+**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Classify, Split, Redact, Edit, and more APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
 
 ## Architecture
 
@@ -205,6 +205,159 @@ client.redact(
     pii_config={"mode": "extend", "types": [{"name": "SSN"}]},
 )
 ```
+
+## Edit (form detect + fill)
+
+Detect every blank fillable field on a form, then draw values onto it and get
+back rendered page images. A two-call flow: `edit_detect()` returns the schema,
+`edit_fill()` renders — the schema and page images stay server-side, so you only
+ever carry the field list and your values.
+
+```python
+# One call — detect + natural-language fill. `content` only: this call is detecting
+# the schema for the first time, so there are no field indices for you to key
+# `values` by yet. Use the two legs below to fill by index.
+result = client.edit("intake_form.pdf", content="Patient is Jane Doe, DOB 1985-04-02")
+print(result["form_schema"])        # every detected field, in fill-index order
+print(result["fills"])              # what the model mapped onto each field
+print(result["pages"][0]["image_url"])
+print(result["detect_job_id"])      # reuse it to correct values — no re-detect, no re-charge
+```
+
+The two legs separately, for the human-in-the-loop flow — show the user what was
+detected, let them correct the mapped values, re-render:
+
+```python
+detected = client.edit_detect("intake_form.pdf", markdown_assist=True)
+schema = detected["result"]["form_schema"]
+job_id = detected["detect_job_id"]
+
+# 1. Model maps free text onto the schema — returns `fills` for review
+proposed = client.edit_fill(job_id, content="Jane Doe, female, +1 302 405 1234",
+                            natural_language=True)
+
+# 2. User edits a value → resubmit ALL values deterministically (no model call)
+final = client.edit_fill(job_id, values={"0": "Jane A. Doe", "3": "X"})
+for page in final["result"]["pages"]:
+    print(page["page"], page["image_url"])
+```
+
+A field's **position in `form_schema` is its fill index**. `values` accepts either
+`{"0": "Jane"}` or `[{"index": 0, "value": "Jane"}]`. `markdown_assist=True` routes
+detection through layout-aware parsing — more precise on dense forms, slower.
+
+### `edit_detect` — input / output
+
+| Argument | Type | Default | |
+|---|---|---|---|
+| `file_path` | `str \| Path` | *required* | PDF or image to detect on |
+| `markdown_assist` | `bool` | `False` | Layout-aware detection. Also changes the returned image: `True` on a scan yields the **deskewed** page, so pixel dimensions differ from `False` |
+| `use_presigned` | `bool` | `True` | Upload via presigned URL rather than multipart |
+| `poll_timeout` / `poll_interval` | `float \| None` | `None` | Override the client's polling defaults |
+
+```jsonc
+{
+  "status": "success", "task": "edit", "request_id": "req-…",
+  "detect_job_id": "job_…",              // added by the SDK — pass to edit_fill
+  "result": {
+    "phase": "detect",                   // "detect" | "fill"
+    "page_count": 2,
+    "pages": [
+      { "page": 1,
+        "image_url": "https://s3…?sig=…", // presigned, ~15 min
+        "size": { "w": 1195, "h": 1536 } }
+    ],
+    "form_schema": [
+      { "field_name": "PATIENT INTAKE FORM:First Name",
+        "description": "Enter the patient's first name.",
+        "type": "text",                  // text|checkbox|radio|dropdown|signature
+        "bbox": { "left": 0.35, "top": 0.12, "width": 0.55,
+                  "height": 0.03, "page": 1 } }
+    ]
+  }
+}
+```
+
+`bbox` is **normalized 0..1**, origin top-left, relative to `pages[bbox.page - 1]` — so it
+scales to whatever size you display the image at. There is **no `fills`** on this leg;
+nothing has been drawn yet. The envelope also carries the usual `model_used`, `duration_ms`
+and `metadata`, plus a legacy `mode` that is now always `null`.
+
+### `edit_fill` — input / output
+
+| Argument | Type | Default | |
+|---|---|---|---|
+| `detect_job_id` | `str` | *required* | From `edit_detect`; valid **24 h** |
+| `values` | `dict \| list \| None` | `None` | Required when `natural_language=False`. `{"0": "Jane"}` or `[{"index": 0, "value": "Jane"}]` |
+| `content` | `str \| None` | `None` | Required when `natural_language=True` — and it must be passed **with** that flag, or the call raises |
+| `natural_language` | `bool` | `False` | `False` draws `values` verbatim (no model call); `True` maps `content` onto the schema (one model call) |
+
+```jsonc
+{
+  "status": "success", "task": "edit", "request_id": "req-…",
+  "result": {
+    "phase": "fill",
+    "pages": [ { "page": 1, "image_url": "https://s3…?sig=…",
+                 "size": { "w": 1195, "h": 1536 } } ],
+    "fills": [ { "index": 0, "value": "Jane" } ]
+  }
+}
+```
+
+Note the differences from the detect leg: `fills` **is** present (it's the only place you
+see what was actually drawn, including the model's mapping in `natural_language` mode),
+and `form_schema` is **not** echoed back — you already hold it.
+
+`edit()` flattens both legs into one flat dict instead of the envelope:
+`{"detect_job_id", "form_schema", "fills", "pages"}`, where `pages` are the **filled** ones.
+
+> Page images come back as **short-lived presigned `image_url`s**, not bytes.
+> Download them promptly; re-polling the job with `get_job()` mints fresh URLs.
+
+Billing: charged once at **detect** (by page count). The fill leg is included, so
+re-rendering after a user correction costs nothing.
+
+## Saving page images
+
+`download_pages()` writes any result's page images into a folder, so you don't have
+to chase presigned URLs before they expire. It works with the blank pages from
+`edit_detect()`, the rendered ones from `edit_fill()` / `edit()`, and with
+`parse(include_image=True)`.
+
+```python
+detected = client.edit_detect("intake_form.pdf")
+client.download_pages(detected, "out/blank")                    # out/blank/page-1.png …
+
+# Deterministic fill — you supply the values (no model call)
+filled = client.edit_fill(detected["detect_job_id"], values={"0": "Jane"})
+paths = client.download_pages(filled, "out/filled", prefix="filled")
+print(paths)                                                    # [PosixPath('out/filled/filled-1.png'), …]
+
+# Natural-language fill — one model call maps the text onto the schema.
+# `content` needs natural_language=True; on its own it raises (the default mode expects `values`).
+described = client.edit_fill(
+    detected["detect_job_id"],
+    content="Patient is Jane Doe, DOB 1985-04-02, phone +1 302 405 1234",
+    natural_language=True,
+)
+print(described["result"]["fills"])                             # what the model mapped, for review
+client.download_pages(described, "out/described", prefix="nl")  # out/described/nl-1.png …
+
+# One-shot detect + fill. Its pages sit at the top level, not under "result" —
+# download_pages() accepts either nesting.
+result = client.edit("intake_form.pdf", content="Patient is Jane Doe, DOB 1985-04-02")
+client.download_pages(result, "out/oneshot")                    # out/oneshot/page-1.png …
+```
+
+The folder is created if missing, files are named `<prefix>-<page number>.<ext>`, and the
+extension follows what the server actually served — `.png` for edit, `.webp` for parse.
+On the async client it's the same call with `await`, and pages download concurrently.
+
+If the URLs have already expired you get a clear error rather than a bare 403 — re-poll
+with `get_job(job_id)` for fresh ones (the job lives 24 h) and call it again.
+
+> `redact()` is the exception: it returns `images` as **inline base64 strings**, not URLs,
+> so there is nothing to download — decode them yourself with `base64.b64decode()`.
 
 ## Jobs Management
 
@@ -419,8 +572,12 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `classify(file)` | OCR → classification | Classify document type. Submit + poll. |
 | `split(file)` | OCR → document splitting | Split multi-document binders. Submit + poll. |
 | `redact(file)` | OCR → redaction | Mask or deidentify PII (and optionally logos). Submit + poll. |
+| `edit_detect(file)` | form-field detection | Detect blank fillable fields → `form_schema` + page images. Submit + poll. |
+| `edit_fill(detect_job_id, *, values=… \| content=…)` | form fill | Draw values onto a detected form → rendered pages. Submit + poll. |
+| `edit(file, *, content=…)` | detect → fill | Both legs in one call. Content-only — no `values`, since this call is detecting the schema for the first time. |
+| `download_pages(result, dir)` | — | Write any result's page images to a folder (edit legs, or `parse(include_image=True)`). |
 | `process(file)` | OCR → parse + extract | Combined parse + extract sharing one upload. Submit + poll on both legs. |
-| `submit_parse / submit_extract / submit_extract_advanced / submit_classify / submit_split / submit_redact` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
+| `submit_parse / submit_extract / submit_extract_advanced / submit_classify / submit_split / submit_redact / submit_edit_detect / submit_edit_fill` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
 | `get_job(job_id)` | — | One-shot status poll. No waiting, no retry. |
 | `list_recent_jobs(*, limit=20, source=None)` | — | List the org's recent jobs (summary rows, newest first). |
 | `delete_job(job_id)` | — | Cancel a job. Idempotent; completed jobs keep their result. |
@@ -439,9 +596,11 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |
 | `options` | `dict \| None` | `None` | classify / split — service knobs, sent as a JSON form field |
 | `pii_config` / `include_logos` | `dict \| None` / `bool` | `None` / `False` | redact |
-| `use_presigned` | `bool` | `True` | parse / extract / classify / split / redact |
-| `poll_timeout` | `float` | constructor's | parse / extract / classify / split / redact / process |
-| `poll_interval` | `float` | constructor's | parse / extract / classify / split / redact / process |
+| `markdown_assist` | `bool` | `False` | edit_detect / edit — layout-aware detection (more precise, slower) |
+| `values` / `content` | `dict \| list \| None` / `str \| None` | `None` | edit_fill / edit — deterministic values vs. natural-language text (exactly one) |
+| `use_presigned` | `bool` | `True` | parse / extract / classify / split / redact / edit_detect |
+| `poll_timeout` | `float` | constructor's | parse / extract / classify / split / redact / process / edit* |
+| `poll_interval` | `float` | constructor's | parse / extract / classify / split / redact / process / edit* |
 
 ### Exceptions
 
@@ -450,7 +609,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `HyperAPIError` | Base — anything not specifically classified |
 | `AuthenticationError` | 401 from server, missing API key |
 | `RateLimitError` | 429 from server (carries `retry_after`, `tier`, `limit`) |
-| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` / `RedactError` | The corresponding op fails |
+| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` / `RedactError` / `EditError` | The corresponding op fails |
 | `DocumentUploadError` | Presigned-URL flow or S3 PUT fails |
 | `JobTimeoutError` | `wait_for_job` exceeded its timeout (job still running on server) |
 
