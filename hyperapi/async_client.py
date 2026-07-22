@@ -858,8 +858,8 @@ class AsyncHyperAPIClient:
         extraction, use :py:meth:`submit_extract_advanced`.
 
         ``parse_mode`` selects the Stage-1 OCR engine, independent of
-        ``category``: ``"fast"`` (default, Paddle text extraction) or
-        ``"advanced"`` (Chandra layout-aware parsing for dense tables/forms —
+        ``category``: ``"fast"`` (default, fast text extraction) or
+        ``"advanced"`` (advanced layout-aware parsing for dense tables/forms —
         higher accuracy, slower, costs more; available on paid tiers).
         """
         path = self._resolve_path(file_path)
@@ -1066,7 +1066,7 @@ class AsyncHyperAPIClient:
         registers a completion callback; ``metadata`` attaches caller-supplied
         key/value tags echoed back on reads and in the webhook payload.
         ``parse_mode`` (``/v1/parse`` only) selects ``fast`` (default) or
-        ``advanced`` (Chandra layout-aware, paid plans only — 403 otherwise);
+        ``advanced`` (advanced layout-aware, paid plans only — 403 otherwise);
         advanced batch runs on the lowest-priority lane (24h SLA).
         """
         body: dict = {

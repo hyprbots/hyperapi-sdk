@@ -146,7 +146,7 @@ print(fields["result"]["entities"])
 ```
 
 Both also accept `parse_mode` to pick the Stage-1 OCR engine — `"fast"`
-(default, quick text extraction) or `"advanced"` (Chandra layout-aware parsing
+(default, quick text extraction) or `"advanced"` (advanced layout-aware parsing
 for dense tables and forms; higher accuracy, slower, costs more, paid tiers).
 It's independent of `category` and of the Basic/Advanced split:
 
