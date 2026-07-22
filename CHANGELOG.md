@@ -33,7 +33,7 @@ keep their existing signatures plus a new keyword-only `category` defaulting to
   done = client.wait_for_batch(batch["batch_id"])   # or poll get_batch()
   ```
 
-- **`create_batch(parse_mode="advanced")`** — advanced (Chandra layout-aware)
+- **`create_batch(parse_mode="advanced")`** — advanced (layout-aware)
   parse is now available for `/v1/parse` batches on paid plans (Pro/Enterprise;
   403 otherwise). No signature change — `parse_mode` already existed; this
   documents the now-live capability (the prior docstring said advanced was "not
@@ -59,7 +59,7 @@ keep their existing signatures plus a new keyword-only `category` defaulting to
 - **`parse_mode` on all extract methods** — `extract()`, `submit_extract()`,
   `extract_advanced()`, `submit_extract_advanced()` (sync + async) take a
   keyword-only `parse_mode` selecting the Stage-1 OCR engine: `"fast"` (default,
-  Paddle text extraction) or `"advanced"` (Chandra layout-aware parsing for
+  fast text extraction) or `"advanced"` (advanced layout-aware parsing for
   dense tables/forms; paid tiers). Independent of `category`; rides as
   `?parse_mode=` on `/v1/extract` and `/v1/extract-omni`. Mirrors parse's `mode`
   OCR-depth knob, now that the backend supports it on the extract endpoints.
