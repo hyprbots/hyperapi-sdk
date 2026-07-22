@@ -1071,8 +1071,8 @@ class HyperAPIClient:
         extraction, use :py:meth:`submit_extract_advanced`.
 
         ``parse_mode`` selects the Stage-1 OCR engine, independent of
-        ``category``: ``"fast"`` (default, Paddle text extraction) or
-        ``"advanced"`` (Chandra layout-aware parsing for dense tables/forms —
+        ``category``: ``"fast"`` (default, fast text extraction) or
+        ``"advanced"`` (advanced layout-aware parsing for dense tables/forms —
         higher accuracy, slower, costs more; available on paid tiers).
         """
         path = self._resolve_path(file_path)
@@ -1282,7 +1282,7 @@ class HyperAPIClient:
             document_keys: Keys from :meth:`upload_document`, one per document.
             options: Task-specific options, forwarded to each document's run.
             parse_mode: ``fast`` (default) or ``advanced``, for ``/v1/parse`` only.
-                ``advanced`` runs Chandra layout-aware parsing and requires a paid
+                ``advanced`` runs layout-aware parsing and requires a paid
                 plan (Pro/Enterprise) — the API returns 403 otherwise. Batch
                 advanced parse runs on the lowest-priority lane, yielding to
                 interactive traffic, so it may take longer under load (24h SLA).

@@ -125,7 +125,7 @@ async def test_async_submit_extract_advanced_returns_job_no_polling(mock_backend
     assert not poll.called
 
 
-# ── parse_mode: Stage-1 OCR engine, fast (default, Paddle) vs advanced (Chandra) ──
+# ── parse_mode: Stage-1 OCR engine, fast (default) vs advanced (layout-aware) ──
 # Orthogonal to category and to the Basic/Advanced product split — rides as a
 # query param on both /v1/extract and /v1/extract-omni.
 def test_basic_extract_defaults_to_fast_parse_mode(mock_backend, client, tiny_pdf):
