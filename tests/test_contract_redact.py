@@ -100,7 +100,7 @@ def test_redact_failed_job_raises_redact_error(mock_backend, client, tiny_pdf):
     _seed_presigned(mock_backend)
     _seed_submit(mock_backend)
     mock_backend.get("/v1/jobs/job_rd_1").mock(return_value=httpx.Response(
-        200, json={"status": "failed", "error": "redact pipeline crashed", "error_status_code": 500},
+        200, json={"status": "failed", "error": "redact pipeline crashed", "status_code": 500},
     ))
 
     with pytest.raises(RedactError) as ei:

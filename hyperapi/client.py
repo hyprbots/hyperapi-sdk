@@ -1141,12 +1141,12 @@ class HyperAPIClient:
         (``ParseError``, ``ExtractError``, …) and falls back to
         ``HyperAPIError`` for raw-job-id calls where we couldn't determine
         which op originated the job. The HTTP status (if present in the
-        envelope's ``error_status_code``) is prefixed onto the message so
+        envelope's ``status_code``) is prefixed onto the message so
         ``str(e)`` is self-describing in support tickets without needing the
         caller to also surface ``e.status_code``.
         """
         raw = _strip_api_key(envelope.get("error")) or "Job failed"
-        status_code = envelope.get("error_status_code")
+        status_code = envelope.get("status_code")
         message = f"(HTTP {status_code}) {raw}" if status_code else raw
         cls = _OP_TO_ERROR.get(op, HyperAPIError)
         return cls(

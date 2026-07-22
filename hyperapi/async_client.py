@@ -843,7 +843,7 @@ class AsyncHyperAPIClient:
         (ParseError, ExtractError, …), HyperAPIError otherwise.
         """
         raw = _strip_api_key(envelope.get("error")) or "Job failed"
-        status_code = envelope.get("error_status_code")
+        status_code = envelope.get("status_code")
         message = f"(HTTP {status_code}) {raw}" if status_code else raw
         cls = _OP_TO_ERROR.get(op, HyperAPIError)
         return cls(

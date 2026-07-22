@@ -279,7 +279,7 @@ def test_failed_detect_job_raises_edit_error(mock_backend, client, tiny_pdf):
         return_value=httpx.Response(200, json={
             "status": "failed",
             "error": "edit-service /detect failed (502)",
-            "error_status_code": 502,
+            "status_code": 502,
         }),
     )
 

@@ -97,7 +97,7 @@ def test_extract_failed_job_raises_extract_error(mock_backend, client, tiny_pdf)
         200, json={
             "status": "failed",
             "error": "extract pipeline crashed",
-            "error_status_code": 500,
+            "status_code": 500,
         },
     ))
 
