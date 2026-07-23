@@ -423,6 +423,8 @@ client.extract(file)
 
 This is the pattern used by [LlamaParse](https://docs.llamaindex.ai/en/stable/llama_cloud/llama_parse/) and [Reducto](https://docs.reducto.ai/) for the same reason.
 
+> **Rate limits and polling.** The gateway rate-limits requests **per organization**, and job-status polls (`GET /v1/jobs/{id}`) count against the same limit as the submit — the window is a rolling 60 seconds. The **free tier allows 1 request per 60 s**, so a submit immediately followed by a poll would otherwise trip a `429`. The SDK handles this for you: when a poll is rate-limited, `wait_for_job` / `wait_for_jobs` / `wait_for_batch` **sleep for the server's `Retry-After` and resume**, rather than failing the call. If the job's remaining `poll_timeout` is shorter than the rate window the call raises `RateLimitError` (with `retry_after` set) so you can wait and resume via `submit_<op>` + `wait_for_job`. A single-shot `get_job()` still raises `RateLimitError` immediately — only the *waiting* helpers back off. On the free tier, prefer one blocking convenience call at a time over manual tight-loop polling.
+
 ## Async client (new in 0.2.0)
 
 `AsyncHyperAPIClient` is an `async`/`await` twin of `HyperAPIClient` for code that already runs inside an event loop — FastAPI / Starlette / aiohttp servers, LLM agent loops, Discord/Slack bots, and any high-concurrency processor that fans out with `asyncio.gather`. Same constructor signature, same method names, same `Job` dataclass, same typed exceptions — swap the import and add `await`.

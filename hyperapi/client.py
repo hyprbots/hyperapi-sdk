@@ -32,11 +32,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import sys
 import time
 import uuid
 import warnings
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal
 from collections.abc import Iterable
@@ -123,13 +126,31 @@ class Job:
 # ── Helpers (module-private) ────────────────────────────────────────────────
 
 def _parse_retry_after(value: str | None, *, default: int = 60) -> int:
-    """Parse a `Retry-After` header. Server emits seconds-since-now."""
+    """Parse a `Retry-After` header into whole seconds-from-now.
+
+    RFC 7231 permits two forms: ``delta-seconds`` (what Kong emits) and an
+    ``HTTP-date``. A fronting CDN/ALB — not just Kong — can 429/503 and emit the
+    date form; parsing only the integer form silently fell back to ``default``
+    and produced a wrong backoff. Handle both; floor at 0.
+    """
     if not value:
         return default
+    value = value.strip()
     try:
         return max(0, int(value))
     except (TypeError, ValueError):
+        pass
+    # HTTP-date form, e.g. "Wed, 21 Oct 2026 07:28:00 GMT".
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
         return default
+    if dt is None:  # some Python versions return None on unparseable input
+        return default
+    if dt.tzinfo is None:  # RFC dates are UTC; treat naive as UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = (dt - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(delta))
 
 
 def _safe_text(response: httpx.Response) -> str:
@@ -308,6 +329,36 @@ def _rate_limit_error_from(resp: httpx.Response, rid: str | None) -> RateLimitEr
         status_code=429,
         request_id=rid,
     )
+
+
+def _rate_limit_wait(err: RateLimitError, remaining: float) -> float | None:
+    """Decide how to handle a 429 raised *during a poll loop*.
+
+    The gateway rate-limits job-status polls in the same per-org bucket as the
+    submit — so on a low tier (free = 1 req / 60 s) the submit spends the token
+    and the first poll(s) 429. That's transient: the window clears, so the poll
+    loop should sleep ``Retry-After`` and resume rather than fail the whole wait.
+
+    Returns the seconds to sleep before re-polling, or ``None`` when the job's
+    remaining deadline can't outlast the rate window — in which case the caller
+    re-raises the ``RateLimitError`` (it still carries ``retry_after`` so the
+    user can wait and resume via ``submit_<op>`` + ``wait_for_job``). Shared by
+    both clients so the sync/async decision can't drift; each loop supplies its
+    own sleep primitive.
+    """
+    if remaining <= 0:
+        return None
+    # `retry_after` defaults to 60 and is floored at 0 by _parse_retry_after;
+    # floor to 1 here so a server-sent "retry now" (0) can't hot-spin the loop.
+    # `... or 0` guards a None from any future RateLimitError construction path.
+    wait = max(err.retry_after or 0, 1)
+    if wait > remaining:
+        return None
+    # Add a little jitter so a concurrent async fan-out (asyncio.gather over N
+    # jobs) doesn't wake every poller on the same tick and re-poll in a
+    # synchronized burst. Capped so wait+jitter never exceeds the budget.
+    jitter = random.uniform(0.0, min(0.5, remaining - wait))
+    return float(wait) + jitter
 
 
 # ── Client ─────────────────────────────────────────────────────────────────
@@ -1038,7 +1089,21 @@ class HyperAPIClient:
         wait_s = interval if interval is not None else self._poll_interval
 
         while True:
-            envelope = self._poll_with_retry(job_id)
+            try:
+                envelope = self._poll_with_retry(job_id)
+            except RateLimitError as e:
+                # The poll shares the submit's per-org rate bucket; on low tiers
+                # the submit spent the token so the poll 429s. Back off and
+                # resume within the deadline instead of failing the wait.
+                wait = _rate_limit_wait(e, deadline - time.monotonic())
+                if wait is None:
+                    raise
+                logger.info(
+                    "poll_rate_limited",
+                    extra={"job_id": job_id, "retry_after": wait, "degraded": e.degraded},
+                )
+                time.sleep(wait)
+                continue
             status = envelope.get("status")
             if status == "completed":
                 logger.info(
@@ -1049,7 +1114,13 @@ class HyperAPIClient:
                         "duration_ms": envelope.get("duration_ms"),
                     },
                 )
-                return envelope.get("result", envelope)
+                # Return only the `result` payload — never the raw envelope,
+                # which carries server-side status/timing/receipt fields. Coerce
+                # a missing/null result to {} so the return is always a dict:
+                # `.get("result")` never hits None (a bare `["result"]` still
+                # KeyErrors, but never the old None TypeError). Matches wait_for_jobs.
+                res = envelope.get("result")
+                return res if isinstance(res, dict) else {}
             if status == "failed":
                 raise self._exception_for_failed_job(op, envelope, job_id)
 
@@ -1099,14 +1170,32 @@ class HyperAPIClient:
 
         while pending:
             still_pending: list[int] = []
-            for idx in pending:
-                envelope = self._poll_with_retry(jobs_list[idx].job_id)
+            rate_limited = False
+            for pos, idx in enumerate(pending):
+                try:
+                    envelope = self._poll_with_retry(jobs_list[idx].job_id)
+                except RateLimitError as e:
+                    # Shared per-org rate bucket: one 429 means the window is
+                    # spent for everyone this pass. Sleep Retry-After once, keep
+                    # this and all not-yet-polled jobs pending, and retry.
+                    wait = _rate_limit_wait(e, deadline - time.monotonic())
+                    if wait is None:
+                        raise
+                    logger.info(
+                        "poll_rate_limited",
+                        extra={"job_id": jobs_list[idx].job_id, "retry_after": wait,
+                               "degraded": e.degraded},
+                    )
+                    time.sleep(wait)
+                    still_pending.extend(pending[pos:])
+                    rate_limited = True
+                    break
                 status = envelope.get("status")
                 if status == "completed":
-                    # `envelope.get("result", envelope)` falls back to the full envelope
-                    # if `result` key is absent; if it's explicitly None, coerce to {}
-                    # so the position in the returned list is preserved.
-                    res = envelope.get("result", envelope)
+                    # Return only the `result` payload (never the raw envelope,
+                    # which carries status/timing/receipt fields); coerce a
+                    # missing/null result to {} to preserve list position.
+                    res = envelope.get("result")
                     results[idx] = res if isinstance(res, dict) else {}
                 elif status == "failed":
                     raise self._exception_for_failed_job(
@@ -1125,6 +1214,9 @@ class HyperAPIClient:
                     job_id=pending_ids,
                     elapsed_s=time.monotonic() - start,
                 )
+            if rate_limited:
+                # Already slept Retry-After above; don't double-sleep the poll gap.
+                continue
             remaining = deadline - time.monotonic()
             time.sleep(min(wait_s, max(0.0, remaining)))
 
@@ -1555,7 +1647,18 @@ class HyperAPIClient:
         start = time.monotonic()
         deadline = start + timeout
         while True:
-            status = self.get_batch(batch_id)
+            try:
+                status = self.get_batch(batch_id)
+            except RateLimitError as e:
+                wait = _rate_limit_wait(e, deadline - time.monotonic())
+                if wait is None:
+                    raise
+                logger.info(
+                    "batch_poll_rate_limited",
+                    extra={"batch_id": batch_id, "retry_after": wait, "degraded": e.degraded},
+                )
+                time.sleep(wait)
+                continue
             if status.get("status") in self._BATCH_TERMINAL:
                 return status
             if time.monotonic() >= deadline:

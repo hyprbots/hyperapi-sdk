@@ -241,6 +241,98 @@ async def test_async_get_job_429_raises_rate_limit_error(mock_backend, async_cli
     assert ei.value.limit == 1
 
 
+async def test_async_wait_for_job_backs_off_on_429_then_completes(
+    mock_backend, async_client, monkeypatch
+):
+    """Async twin: a 429 during the poll loop backs off (Retry-After) and resumes
+    rather than aborting the wait — the free-tier submit+poll collision."""
+    slept: list[float] = []
+
+    async def _fake_sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr("hyperapi.async_client.asyncio.sleep", _fake_sleep)
+    mock_backend.get("/v1/jobs/j-rl2").mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "2"},
+                       json={"message": "Rate limit exceeded", "tier": "free", "limit": 1}),
+        _completed_response({"ok": 1}),
+    ])
+    job = Job(job_id="j-rl2", status="pending", poll_url="/v1/jobs/j-rl2", op="parse")
+
+    result = await async_client.wait_for_job(job)
+
+    assert result == {"ok": 1}
+    assert any(2.0 <= s < 3.0 for s in slept), slept   # Retry-After + jitter
+
+
+async def test_async_wait_for_job_429_deadline_too_short_fails_fast(mock_backend):
+    from hyperapi import RateLimitError
+    mock_backend.get("/v1/jobs/j-rl3").mock(return_value=httpx.Response(
+        429, headers={"Retry-After": "120"},
+        json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
+    ))
+    client = AsyncHyperAPIClient(
+        api_key="hk_test_s", base_url="http://test.local",
+        poll_interval=0.0, poll_timeout=0.05,
+    )
+    job = Job(job_id="j-rl3", status="pending", poll_url="/v1/jobs/j-rl3", op="parse")
+
+    with pytest.raises(RateLimitError) as ei:
+        await client.wait_for_job(job)
+    assert ei.value.retry_after == 120
+    await client.aclose()
+
+
+async def test_async_wait_for_job_result_null_returns_empty_dict(mock_backend, async_client):
+    mock_backend.get("/v1/jobs/j-nr").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": None, "request_id": "req-x"},
+    ))
+    job = Job(job_id="j-nr", status="pending", poll_url="/v1/jobs/j-nr", op="parse")
+
+    assert await async_client.wait_for_job(job) == {}
+
+
+async def test_async_wait_for_job_missing_result_key_does_not_leak_envelope(
+    mock_backend, async_client
+):
+    """Async twin of the sync leak test: a completed envelope with no `result`
+    key returns {}, never the raw envelope (status/timing/usage fields)."""
+    mock_backend.get("/v1/jobs/j-leak").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "request_id": "req-x",
+                   "duration_ms": 9, "usage": {"pages": 3}},
+    ))
+    job = Job(job_id="j-leak", status="pending", poll_url="/v1/jobs/j-leak", op="parse")
+
+    out = await async_client.wait_for_job(job)
+    assert out == {}
+    assert "usage" not in out and "request_id" not in out
+
+
+async def test_async_wait_for_jobs_cancels_siblings_on_failure(mock_backend):
+    """When one job fails, wait_for_jobs must CANCEL the sibling pollers rather
+    than orphan them. `asyncio.gather` alone does not cancel siblings; combined
+    with 429-backoff (which no longer fast-fails) an orphan would poll for up to
+    poll_timeout. Verify the sibling's polling stops once the failure propagates."""
+    mock_backend.get("/v1/jobs/FAIL").mock(return_value=_failed_response())
+    slow_route = mock_backend.get("/v1/jobs/SLOW").mock(return_value=_pending_response())
+    client = AsyncHyperAPIClient(
+        api_key="hk_test_c", base_url="http://test.local",
+        poll_interval=0.0, poll_timeout=30.0,   # would poll ~forever if not cancelled
+    )
+    fail = Job(job_id="FAIL", status="pending", poll_url="/v1/jobs/FAIL", op="extract")
+    slow = Job(job_id="SLOW", status="pending", poll_url="/v1/jobs/SLOW", op="parse")
+
+    with pytest.raises(HyperAPIError):
+        await client.wait_for_jobs([fail, slow])
+
+    count_at_raise = slow_route.call_count
+    await asyncio.sleep(0.05)
+    # Cancelled → the sibling's poll count is frozen after the failure. Without
+    # the cancel it would keep climbing during this sleep (poll_interval=0).
+    assert slow_route.call_count == count_at_raise
+    await client.aclose()
+
+
 async def test_async_get_job_malformed_json_raises_typed(mock_backend, async_client):
     mock_backend.get("/v1/jobs/j-bad").mock(return_value=httpx.Response(
         200,
