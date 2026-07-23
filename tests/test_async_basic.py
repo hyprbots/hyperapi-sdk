@@ -26,9 +26,9 @@ def test_async_client_imports_from_top_level():
     assert AsyncHyperAPIClient is not None
 
 
-def test_version_is_050():
-    """v0.5.0 ships the Batch API (incl. webhook_url/metadata); the version bump must be visible."""
-    assert __version__ == "0.5.0"
+def test_version_is_060():
+    """v0.6.0 ships the Edit API (detect + fill); the version bump must be visible."""
+    assert __version__ == "0.6.0"
 
 
 # ── Async-ness of methods ───────────────────────────────────────────────

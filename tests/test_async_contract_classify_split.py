@@ -58,7 +58,7 @@ async def test_async_classify_failed_job_raises_classify_error(mock_backend, asy
         "job_id": "j", "status": "pending", "poll_url": "/v1/jobs/j",
     }))
     mock_backend.get("/v1/jobs/j").mock(return_value=httpx.Response(200, json={
-        "status": "failed", "error": "model unavailable", "error_status_code": 503,
+        "status": "failed", "error": "model unavailable", "status_code": 503,
     }))
 
     with pytest.raises(ClassifyError) as ei:
