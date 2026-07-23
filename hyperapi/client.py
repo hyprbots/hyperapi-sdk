@@ -1457,7 +1457,7 @@ class HyperAPIClient:
         images. Feed the resulting ``job_id`` to :py:meth:`submit_edit_fill`.
 
         ``markdown_assist=True`` routes detection through layout-aware parsing
-        (Chandra markdown/form blocks) — more precise on dense forms, slower.
+        (markdown/form-block extraction) — more precise on dense forms, slower.
 
         Edit is metered **once, here**; the fill leg is included.
         """
