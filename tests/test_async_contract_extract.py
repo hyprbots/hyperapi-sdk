@@ -92,7 +92,7 @@ async def test_async_extract_failed_job_raises_extract_error(mock_backend, async
         200, json={
             "status": "failed",
             "error": "extract pipeline crashed",
-            "error_status_code": 500,
+            "status_code": 500,
         },
     ))
 

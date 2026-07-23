@@ -87,7 +87,7 @@ async def test_async_process_parse_failure_surfaces_parse_error(
         "job_id": "e", "status": "pending", "poll_url": "/v1/jobs/e",
     }))
     mock_backend.get("/v1/jobs/p").mock(return_value=httpx.Response(
-        200, json={"status": "failed", "error": "ocr failed", "error_status_code": 500},
+        200, json={"status": "failed", "error": "ocr failed", "status_code": 500},
     ))
     mock_backend.get("/v1/jobs/e").mock(return_value=httpx.Response(
         200, json={"status": "pending"},

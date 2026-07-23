@@ -32,9 +32,9 @@ def test_version_is_semver():
     assert all(p.isdigit() for p in parts)
 
 
-def test_version_is_050():
-    """v0.5.0 ships the Batch API (incl. webhook_url/metadata). Bump this when the version moves."""
-    assert __version__ == "0.5.0"
+def test_version_is_060():
+    """v0.6.0 ships the Edit API (detect + fill). Bump this when the version moves."""
+    assert __version__ == "0.6.0"
 
 
 # ── Exception hierarchy ─────────────────────────────────────────────────
@@ -137,8 +137,16 @@ def test_exception_message_redacts_api_keys():
             ["hk_live_abc-123_xyz"],
             ["hk_***redacted"],
         ),
+        # Service-account keys (hk_service_*) are a first-class key family and
+        # must be scrubbed too — a leaked service key is the highest-value one.
+        (
+            "svc auth failed for hk_service_prod0987secret",
+            ["hk_service_prod0987secret"],
+            ["hk_***redacted"],
+        ),
     ],
-    ids=["test_prefix", "multiple_keys", "punctuation_after_key", "internal_dash_underscore"],
+    ids=["test_prefix", "multiple_keys", "punctuation_after_key",
+         "internal_dash_underscore", "service_prefix"],
 )
 def test_strip_api_key_redaction(raw, must_not_contain, must_contain):
     from hyperapi.exceptions import _strip_api_key
@@ -149,6 +157,37 @@ def test_strip_api_key_redaction(raw, must_not_contain, must_contain):
         assert needle not in scrubbed, f"{needle!r} should have been redacted from {scrubbed!r}"
     for needle in must_contain:
         assert needle in scrubbed, f"{needle!r} should remain in {scrubbed!r}"
+
+
+# ── _parse_retry_after: delta-seconds AND HTTP-date forms (A6) ────────────
+
+
+def test_parse_retry_after_delta_seconds():
+    from hyperapi.client import _parse_retry_after
+
+    assert _parse_retry_after("30") == 30
+    assert _parse_retry_after("  0 ") == 0          # floored, whitespace tolerated
+    assert _parse_retry_after(None) == 60           # default
+    assert _parse_retry_after("garbage") == 60      # unparseable → default
+
+
+def test_parse_retry_after_http_date_form():
+    """A CDN/ALB (not just Kong) may emit the RFC-7231 HTTP-date form of
+    Retry-After. Parsing only integers silently fell back to 60 and produced a
+    wrong backoff — now the date form is honored."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    from hyperapi.client import _parse_retry_after
+
+    future = datetime.now(timezone.utc) + timedelta(seconds=120)
+    secs = _parse_retry_after(format_datetime(future, usegmt=True))
+    # Allow a couple seconds of clock/exec slack around the 120s target.
+    assert 110 <= secs <= 120
+
+    # A date already in the past → 0 (retry now), never negative.
+    past = datetime.now(timezone.utc) - timedelta(seconds=300)
+    assert _parse_retry_after(format_datetime(past, usegmt=True)) == 0
 
 
 # ── Client constructor ──────────────────────────────────────────────────

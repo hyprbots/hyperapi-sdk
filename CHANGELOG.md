@@ -11,7 +11,80 @@ Basic/Advanced extract product split. Additive — `extract()`/`submit_extract()
 keep their existing signatures plus a new keyword-only `category` defaulting to
 `"financial"` (today's behavior).
 
+### Fixed
+
+- **Async job polling no longer fails on a rate-limit `429`.** Job-status polls
+  share the submit's per-organization rate bucket (rolling 60 s window), so on
+  the **free tier (1 req / 60 s)** the submit spent the token and the immediate
+  first poll `429`ed — aborting the whole `wait_for_job`. This affected *every*
+  submit-then-poll convenience method (`parse`, `extract`, `extract_advanced`,
+  `classify`, `split`, `redact`, `edit` / `edit_detect` / `edit_fill`,
+  `process`), not just `extract_advanced`.
+  Now `wait_for_job` / `wait_for_jobs` / `wait_for_batch` catch the `429`, sleep
+  the server's `Retry-After`, and resume within the job's `poll_timeout`; if the
+  remaining budget can't outlast the window they raise `RateLimitError` (with
+  `retry_after` intact) so you can resume manually. A single-shot `get_job()`
+  still raises immediately — only the waiting helpers back off.
+- **`Retry-After` HTTP-date form is now honored.** `_parse_retry_after` parsed
+  only delta-seconds; an RFC-7231 HTTP-date (which a fronting CDN/ALB may emit)
+  silently fell back to 60 s, producing a wrong backoff. Both forms are parsed.
+- **`wait_for_job` no longer returns `None` / leaks the raw envelope.** A
+  completed job whose `result` is `null` or absent now returns `{}` (matching
+  `wait_for_jobs`) instead of `None` — which crashed documented
+  `result["result"]` access — or the raw job envelope, which carried server-side
+  status/timing/receipt fields.
+- **API-key scrubbing now covers service-account keys.** `_strip_api_key`
+  redacted `hk_live_*` / `hk_test_*` but not `hk_service_*`; a leaked service key
+  echoed in a server error body could reach exception text and logs.
+
 ### Added
+
+- **Edit API** (sync + async) — detect the blank fillable fields on a form, then
+  render values onto it. Two legs, mirroring the server's two-call flow:
+  `edit_detect(file, *, markdown_assist=False)` → `form_schema` + page images,
+  and `edit_fill(detect_job_id, *, values=... | content=...)` → rendered pages +
+  the `fills` that were drawn. A field's position in `form_schema` is its fill
+  index; `values` accepts `{"0": "Jane"}` or `[{"index": 0, "value": "Jane"}]`.
+  `content` (with `natural_language=True`) has one model call map free text onto
+  the schema and returns the mapping for review, so a UI can let the user correct
+  values and re-submit deterministically. Also `edit(file, *, content=...)`,
+  which chains both legs in one call, and the matching `submit_edit_detect()` /
+  `submit_edit_fill()` for explicit job control.
+
+  The one-call `edit()` is **content-only by design** — it detects the schema for
+  the first time, so the caller cannot yet know the indices `values` are keyed by,
+  and detection is a model call whose field ordering is not stable between runs.
+  Fill by index through the two legs instead.
+
+  ```python
+  detected = client.edit_detect("intake_form.pdf", markdown_assist=True)
+  filled = client.edit_fill(detected["detect_job_id"], values={"0": "Jane Doe"})
+  print(filled["result"]["pages"][0]["image_url"])
+  ```
+
+  Page images arrive as short-lived presigned `image_url`s (not bytes) — download
+  promptly, or re-poll with `get_job()` for fresh URLs. Metered once at detect;
+  the fill leg is included, so re-rendering after a correction is free. Failures
+  raise the new `EditError`.
+
+- **`download_pages(result, dest_dir, *, prefix="page")`** (sync + async) — writes a
+  result's page images into a folder, so callers stop hand-rolling a fetch loop against
+  presigned URLs. Accepts whatever the op returned: `edit_detect()` (blank pages),
+  `edit_fill()` / `edit()` (rendered pages, at either nesting), and
+  `parse(include_image=True)`. Files are `<prefix>-<page number>.<ext>`, with the page
+  number read from `page` or `page_number` and the extension taken from the URL (edit
+  serves `.png`, parse `.webp`). The destination folder is created if missing; the async
+  client downloads pages concurrently. An expired URL raises a `HyperAPIError` that says
+  so and points at `get_job()` rather than surfacing a bare 403.
+
+  ```python
+  detected = client.edit_detect("intake_form.pdf")
+  filled = client.edit_fill(detected["detect_job_id"], values={"0": "Jane Doe"})
+  client.download_pages(filled, "out/", prefix="filled")   # out/filled-1.png …
+  ```
+
+  Not applicable to `redact()`, which returns `images` as inline base64 strings rather
+  than URLs — decode those with `base64.b64decode()`.
 
 - **Batch API** (sync + async) — async, deferred processing of many documents:
   `create_batch(endpoint=..., document_keys=[...])` → `{batch_id, status,
