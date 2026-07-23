@@ -18,7 +18,8 @@ keep their existing signatures plus a new keyword-only `category` defaulting to
   the **free tier (1 req / 60 s)** the submit spent the token and the immediate
   first poll `429`ed — aborting the whole `wait_for_job`. This affected *every*
   submit-then-poll convenience method (`parse`, `extract`, `extract_advanced`,
-  `classify`, `split`, `redact`, `edit`, `process`), not just `extract_advanced`.
+  `classify`, `split`, `redact`, `edit` / `edit_detect` / `edit_fill`,
+  `process`), not just `extract_advanced`.
   Now `wait_for_job` / `wait_for_jobs` / `wait_for_batch` catch the `429`, sleep
   the server's `Retry-After`, and resume within the job's `poll_timeout`; if the
   remaining budget can't outlast the window they raise `RateLimitError` (with

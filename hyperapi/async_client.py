@@ -789,8 +789,9 @@ class AsyncHyperAPIClient:
                 )
                 # Return only the `result` payload — never the raw envelope,
                 # which carries server-side status/timing/receipt fields. Coerce
-                # a missing/null result to {} so documented `result["result"]`
-                # access can't hit None (matches wait_for_jobs).
+                # a missing/null result to {} so the return is always a dict:
+                # `.get("result")` never hits None (a bare `["result"]` still
+                # KeyErrors, but never the old None TypeError). Matches wait_for_jobs.
                 res = envelope.get("result")
                 return res if isinstance(res, dict) else {}
             if status == "failed":
@@ -835,16 +836,30 @@ class AsyncHyperAPIClient:
         if not jobs_list:
             return []
 
-        # Each task waits up to `budget`; gather raises on the first failure
-        # and cancels the rest, matching the sync semantics ("first failure
-        # wins; pending jobs abandoned by the SDK").
+        # Each task waits up to `budget`. `gather` propagates the first failure
+        # but does NOT cancel its siblings — so on failure we cancel them
+        # explicitly. This matters more now that a rate-limited poll backs off
+        # (sleeps Retry-After) instead of fast-failing: without the cancel, one
+        # failed/timed-out job would leave the others polling for up to the full
+        # poll_timeout. Cancelling gives the sync round-robin's "first failure
+        # wins; pending jobs abandoned" semantics.
         budget = timeout if timeout is not None else self._poll_timeout
 
-        coros = [
-            self.wait_for_job(j, timeout=budget, interval=interval)
+        tasks = [
+            asyncio.ensure_future(
+                self.wait_for_job(j, timeout=budget, interval=interval)
+            )
             for j in jobs_list
         ]
-        results = await asyncio.gather(*coros)
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            # Drain the cancellations so they don't surface as "Task exception
+            # was never retrieved" on the event loop.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         # `wait_for_job` returns the envelope's `result` payload ({} if missing
         # or null). Coerce non-dicts to {} so positional ordering is preserved

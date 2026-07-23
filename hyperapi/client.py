@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import sys
 import time
 import uuid
@@ -353,7 +354,11 @@ def _rate_limit_wait(err: RateLimitError, remaining: float) -> float | None:
     wait = max(err.retry_after or 0, 1)
     if wait > remaining:
         return None
-    return float(wait)
+    # Add a little jitter so a concurrent async fan-out (asyncio.gather over N
+    # jobs) doesn't wake every poller on the same tick and re-poll in a
+    # synchronized burst. Capped so wait+jitter never exceeds the budget.
+    jitter = random.uniform(0.0, min(0.5, remaining - wait))
+    return float(wait) + jitter
 
 
 # ── Client ─────────────────────────────────────────────────────────────────
@@ -1111,8 +1116,9 @@ class HyperAPIClient:
                 )
                 # Return only the `result` payload — never the raw envelope,
                 # which carries server-side status/timing/receipt fields. Coerce
-                # a missing/null result to {} so documented `result["result"]`
-                # access can't hit None (matches wait_for_jobs).
+                # a missing/null result to {} so the return is always a dict:
+                # `.get("result")` never hits None (a bare `["result"]` still
+                # KeyErrors, but never the old None TypeError). Matches wait_for_jobs.
                 res = envelope.get("result")
                 return res if isinstance(res, dict) else {}
             if status == "failed":

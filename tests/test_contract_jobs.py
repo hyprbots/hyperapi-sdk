@@ -259,7 +259,8 @@ def test_wait_for_job_backs_off_on_429_then_completes(mock_backend, client, monk
     result = client.wait_for_job(job)
 
     assert result == {"ok": 1}          # recovered, did not raise
-    assert 2 in slept                    # slept the Retry-After value, not the 0 poll interval
+    # Slept ~Retry-After (2s + up to 0.5s jitter), not the 0s poll interval.
+    assert any(2.0 <= s < 3.0 for s in slept), slept
 
 
 def test_wait_for_job_429_deadline_too_short_fails_fast(mock_backend):
@@ -307,6 +308,47 @@ def test_wait_for_job_missing_result_key_does_not_leak_envelope(mock_backend, cl
     out = client.wait_for_job(job)
     assert out == {}
     assert "usage" not in out and "request_id" not in out
+
+
+def test_wait_for_jobs_backs_off_on_429_then_completes(mock_backend, client, monkeypatch):
+    """The sync round-robin wait_for_jobs has bespoke 429 handling
+    (still_pending.extend(pending[pos:]) + the rate_limited flag). Cover it: A
+    completes, B 429s mid-pass then completes — both returned in input order,
+    nothing dropped/reordered, and the whole call doesn't abort."""
+    slept: list[float] = []
+    monkeypatch.setattr("hyperapi.client.time.sleep", lambda s: slept.append(s))
+    mock_backend.get("/v1/jobs/A").mock(return_value=_completed_response({"a": 1}))
+    mock_backend.get("/v1/jobs/B").mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "2"},
+                       json={"message": "Rate limit exceeded", "tier": "free", "limit": 1}),
+        _completed_response({"b": 2}),
+    ])
+    job_a = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="parse")
+    job_b = Job(job_id="B", status="pending", poll_url="/v1/jobs/B", op="extract")
+
+    results = client.wait_for_jobs([job_a, job_b])
+
+    assert results == [{"a": 1}, {"b": 2}]              # order preserved, none dropped
+    assert any(2.0 <= s < 3.0 for s in slept), slept    # backed off Retry-After, resumed
+
+
+def test_wait_for_jobs_429_deadline_too_short_fails_fast(mock_backend):
+    """Round-robin path: a persistent 429 whose Retry-After exceeds the remaining
+    budget re-raises RateLimitError (not JobTimeoutError necessarily), promptly."""
+    from hyperapi import RateLimitError
+    mock_backend.get("/v1/jobs/A").mock(return_value=httpx.Response(
+        429, headers={"Retry-After": "120"},
+        json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
+    ))
+    client = HyperAPIClient(
+        api_key="hk_test_s", base_url="http://test.local",
+        poll_interval=0.0, poll_timeout=0.05,
+    )
+    job_a = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="parse")
+
+    with pytest.raises(RateLimitError):
+        client.wait_for_jobs([job_a])
+    client.close()
 
 
 def test_get_job_malformed_json_raises_typed(mock_backend, client):

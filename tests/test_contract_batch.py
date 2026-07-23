@@ -140,4 +140,4 @@ def test_wait_for_batch_backs_off_on_429_then_completes(client, mock_backend, mo
     out = client.wait_for_batch("b2", timeout=5.0, poll_interval=0.0)
 
     assert out["status"] == "completed"
-    assert 2 in slept
+    assert any(2.0 <= s < 3.0 for s in slept), slept   # Retry-After + jitter
