@@ -122,3 +122,22 @@ def test_wait_for_batch_polls_until_terminal(client, mock_backend):
     )
     out = client.wait_for_batch("b1", timeout=5.0, poll_interval=0.0)
     assert out["status"] == "completed"
+
+
+def test_wait_for_batch_backs_off_on_429_then_completes(client, mock_backend, monkeypatch):
+    """wait_for_batch shares the poll-loop 429-backoff contract: a 429 mid-wait
+    sleeps Retry-After and resumes instead of aborting the (potentially hours-long)
+    batch wait."""
+    slept: list[float] = []
+    monkeypatch.setattr("hyperapi.client.time.sleep", lambda s: slept.append(s))
+    mock_backend.get("/v1/batch/b2").mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "2"},
+                       json={"message": "Rate limit exceeded", "tier": "free", "limit": 1}),
+        httpx.Response(200, json={"batch_id": "b2", "status": "completed",
+                                  "counts": {"total": 1, "done": 1}, "items": []}),
+    ])
+
+    out = client.wait_for_batch("b2", timeout=5.0, poll_interval=0.0)
+
+    assert out["status"] == "completed"
+    assert 2 in slept

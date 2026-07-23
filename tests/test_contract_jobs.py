@@ -242,6 +242,73 @@ def test_get_job_429_raises_rate_limit_error(mock_backend, client):
     assert ei.value.limit == 1
 
 
+def test_wait_for_job_backs_off_on_429_then_completes(mock_backend, client, monkeypatch):
+    """A 429 *during a poll loop* (free tier: submit spends the 1/60s token, the
+    first poll 429s) must NOT abort the wait — the loop honors Retry-After and
+    resumes. This is the reported extract_advanced-on-free-tier failure."""
+    from hyperapi import RateLimitError  # noqa: F401  (kept for symmetry/readability)
+    slept: list[float] = []
+    monkeypatch.setattr("hyperapi.client.time.sleep", lambda s: slept.append(s))
+    mock_backend.get("/v1/jobs/j-rl2").mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "2"},
+                       json={"message": "Rate limit exceeded", "tier": "free", "limit": 1}),
+        _completed_response({"ok": 1}),
+    ])
+    job = Job(job_id="j-rl2", status="pending", poll_url="/v1/jobs/j-rl2", op="parse")
+
+    result = client.wait_for_job(job)
+
+    assert result == {"ok": 1}          # recovered, did not raise
+    assert 2 in slept                    # slept the Retry-After value, not the 0 poll interval
+
+
+def test_wait_for_job_429_deadline_too_short_fails_fast(mock_backend):
+    """If the job's remaining budget can't outlast the rate window, re-raise the
+    RateLimitError promptly (with retry_after intact so the caller can resume via
+    submit + wait_for_job) rather than sleeping past the deadline or hanging."""
+    from hyperapi import RateLimitError
+    mock_backend.get("/v1/jobs/j-rl3").mock(return_value=httpx.Response(
+        429, headers={"Retry-After": "120"},
+        json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
+    ))
+    client = HyperAPIClient(
+        api_key="hk_test_s", base_url="http://test.local",
+        poll_interval=0.0, poll_timeout=0.05,  # window (120s) >> budget
+    )
+    job = Job(job_id="j-rl3", status="pending", poll_url="/v1/jobs/j-rl3", op="parse")
+
+    with pytest.raises(RateLimitError) as ei:
+        client.wait_for_job(job)
+    assert ei.value.retry_after == 120   # preserved for a manual resume
+    client.close()
+
+
+def test_wait_for_job_result_null_returns_empty_dict(mock_backend, client):
+    """A single-job completed envelope with result=null must return {} (not None)
+    so documented result["result"] access can't raise TypeError."""
+    mock_backend.get("/v1/jobs/j-nr").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "result": None, "request_id": "req-x"},
+    ))
+    job = Job(job_id="j-nr", status="pending", poll_url="/v1/jobs/j-nr", op="parse")
+
+    assert client.wait_for_job(job) == {}
+
+
+def test_wait_for_job_missing_result_key_does_not_leak_envelope(mock_backend, client):
+    """When a completed envelope has no `result` key, wait_for_job must return {},
+    never the raw envelope — which would leak server-side status/timing/usage
+    fields to the caller."""
+    mock_backend.get("/v1/jobs/j-leak").mock(return_value=httpx.Response(
+        200, json={"status": "completed", "request_id": "req-x",
+                   "duration_ms": 9, "usage": {"pages": 3}},
+    ))
+    job = Job(job_id="j-leak", status="pending", poll_url="/v1/jobs/j-leak", op="parse")
+
+    out = client.wait_for_job(job)
+    assert out == {}
+    assert "usage" not in out and "request_id" not in out
+
+
 def test_get_job_malformed_json_raises_typed(mock_backend, client):
     """A 200 with non-JSON body (misconfigured proxy returning HTML) must surface
     as a typed HyperAPIError, not a raw JSONDecodeError."""

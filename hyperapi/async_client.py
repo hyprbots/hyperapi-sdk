@@ -85,6 +85,7 @@ from .client import (
     _page_targets,
     _parse_ocr_text,
     _rate_limit_error_from,
+    _rate_limit_wait,
     _request_id_of,
     _server_message,
 )
@@ -761,7 +762,21 @@ class AsyncHyperAPIClient:
         wait_s = interval if interval is not None else self._poll_interval
 
         while True:
-            envelope = await self._poll_with_retry(job_id)
+            try:
+                envelope = await self._poll_with_retry(job_id)
+            except RateLimitError as e:
+                # The poll shares the submit's per-org rate bucket; on low tiers
+                # the submit spent the token so the poll 429s. Back off and
+                # resume within the deadline instead of failing the wait.
+                wait = _rate_limit_wait(e, deadline - time.monotonic())
+                if wait is None:
+                    raise
+                logger.info(
+                    "poll_rate_limited",
+                    extra={"job_id": job_id, "retry_after": wait, "degraded": e.degraded},
+                )
+                await asyncio.sleep(wait)
+                continue
             status = envelope.get("status")
             if status == "completed":
                 logger.info(
@@ -772,7 +787,12 @@ class AsyncHyperAPIClient:
                         "duration_ms": envelope.get("duration_ms"),
                     },
                 )
-                return envelope.get("result", envelope)
+                # Return only the `result` payload — never the raw envelope,
+                # which carries server-side status/timing/receipt fields. Coerce
+                # a missing/null result to {} so documented `result["result"]`
+                # access can't hit None (matches wait_for_jobs).
+                res = envelope.get("result")
+                return res if isinstance(res, dict) else {}
             if status == "failed":
                 raise self._exception_for_failed_job(op, envelope, job_id)
 
@@ -826,9 +846,9 @@ class AsyncHyperAPIClient:
         ]
         results = await asyncio.gather(*coros)
 
-        # `wait_for_job` returns the envelope's `result` field (or the full
-        # envelope if there's no `result`). Coerce non-dicts to {} so positional
-        # ordering is preserved exactly like the sync version.
+        # `wait_for_job` returns the envelope's `result` payload ({} if missing
+        # or null). Coerce non-dicts to {} so positional ordering is preserved
+        # exactly like the sync version.
         normalized: list[dict] = []
         for res in results:
             normalized.append(res if isinstance(res, dict) else {})
@@ -1239,7 +1259,18 @@ class AsyncHyperAPIClient:
         start = time.monotonic()
         deadline = start + timeout
         while True:
-            status = await self.get_batch(batch_id)
+            try:
+                status = await self.get_batch(batch_id)
+            except RateLimitError as e:
+                wait = _rate_limit_wait(e, deadline - time.monotonic())
+                if wait is None:
+                    raise
+                logger.info(
+                    "batch_poll_rate_limited",
+                    extra={"batch_id": batch_id, "retry_after": wait, "degraded": e.degraded},
+                )
+                await asyncio.sleep(wait)
+                continue
             if status.get("status") in self._BATCH_TERMINAL:
                 return status
             if time.monotonic() >= deadline:

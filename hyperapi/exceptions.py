@@ -10,13 +10,17 @@ from __future__ import annotations
 import re
 
 
-_API_KEY_PATTERN = re.compile(r"hk_(?:live|test)_[A-Za-z0-9_\-]+")
+# Covers every issued key family: external `hk_live_*` / `hk_test_*`, plus
+# service-account `hk_service_*` (per the platform's four auth strategies). A
+# secret scrubber must fail safe — a new prefix should be added here the moment
+# it ships, since an un-scrubbed key in an error body is a credential leak.
+_API_KEY_PATTERN = re.compile(r"hk_(?:live|test|service)_[A-Za-z0-9_\-]+")
 
 
 def _strip_api_key(text: str | None) -> str | None:
-    """Scrub `hk_live_*` / `hk_test_*` substrings from server messages before
-    they end up in exception text. Defends against the rare server response
-    that echoes the request header into the error body."""
+    """Scrub `hk_live_*` / `hk_test_*` / `hk_service_*` substrings from server
+    messages before they end up in exception text. Defends against the rare
+    server response that echoes the request header into the error body."""
     if not text:
         return text
     return _API_KEY_PATTERN.sub("hk_***redacted", text)

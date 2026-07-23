@@ -11,6 +11,31 @@ Basic/Advanced extract product split. Additive — `extract()`/`submit_extract()
 keep their existing signatures plus a new keyword-only `category` defaulting to
 `"financial"` (today's behavior).
 
+### Fixed
+
+- **Async job polling no longer fails on a rate-limit `429`.** Job-status polls
+  share the submit's per-organization rate bucket (rolling 60 s window), so on
+  the **free tier (1 req / 60 s)** the submit spent the token and the immediate
+  first poll `429`ed — aborting the whole `wait_for_job`. This affected *every*
+  submit-then-poll convenience method (`parse`, `extract`, `extract_advanced`,
+  `classify`, `split`, `redact`, `edit`, `process`), not just `extract_advanced`.
+  Now `wait_for_job` / `wait_for_jobs` / `wait_for_batch` catch the `429`, sleep
+  the server's `Retry-After`, and resume within the job's `poll_timeout`; if the
+  remaining budget can't outlast the window they raise `RateLimitError` (with
+  `retry_after` intact) so you can resume manually. A single-shot `get_job()`
+  still raises immediately — only the waiting helpers back off.
+- **`Retry-After` HTTP-date form is now honored.** `_parse_retry_after` parsed
+  only delta-seconds; an RFC-7231 HTTP-date (which a fronting CDN/ALB may emit)
+  silently fell back to 60 s, producing a wrong backoff. Both forms are parsed.
+- **`wait_for_job` no longer returns `None` / leaks the raw envelope.** A
+  completed job whose `result` is `null` or absent now returns `{}` (matching
+  `wait_for_jobs`) instead of `None` — which crashed documented
+  `result["result"]` access — or the raw job envelope, which carried server-side
+  status/timing/receipt fields.
+- **API-key scrubbing now covers service-account keys.** `_strip_api_key`
+  redacted `hk_live_*` / `hk_test_*` but not `hk_service_*`; a leaked service key
+  echoed in a server error body could reach exception text and logs.
+
 ### Added
 
 - **Edit API** (sync + async) — detect the blank fillable fields on a form, then
