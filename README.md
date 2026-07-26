@@ -195,9 +195,9 @@ secrets).
 
 ```python
 result = client.redact("contract.pdf", mode="deidentify", include_logos=True)
-for page_png_b64 in result["images"]:
+for page_png_b64 in result["result"]["images"]:
     ...                                  # masked page images
-print(result["summary"])                 # {"PERSON_NAME": 2, "EMAIL": 1, ...}
+print(result["result"]["summary"])       # {"PERSON_NAME": 2, "EMAIL": 1, ...}
 
 # Customize the detected PII type set
 client.redact(

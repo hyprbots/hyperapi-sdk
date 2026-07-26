@@ -173,8 +173,16 @@ def _server_message(response: httpx.Response, fallback: str) -> str:
         parsed = json.loads(body)
         if isinstance(parsed, dict):
             for key in ("message", "detail", "error"):
-                if key in parsed and parsed[key]:
-                    return str(parsed[key])
+                val = parsed.get(key)
+                if not val:
+                    continue
+                # Structured errors nest the human text: FastAPI wraps e.g.
+                # {"detail": {"code": "page_quota_exceeded", "message": "..."}}.
+                # Prefer that inner message over stringifying the whole dict
+                # (which would surface a Python dict repr like "{'code': ...}").
+                if isinstance(val, dict):
+                    val = val.get("message") or val.get("detail") or val.get("error") or str(val)
+                return str(val)
     except (json.JSONDecodeError, ValueError):
         pass
     return body or fallback
