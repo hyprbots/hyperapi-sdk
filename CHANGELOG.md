@@ -5,7 +5,12 @@ All notable changes to `hyperapi-sdk` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] — 2026-07-24
+
+Ships everything below. The **Basic/Advanced extract product split** landed in
+0.5.0 (the `category` keyword) and the **Edit API** + reliability fixes in 0.6.0;
+they are grouped here because both minors released together. `pyproject`/
+`__version__` are at 0.6.0.
 
 Basic/Advanced extract product split. Additive — `extract()`/`submit_extract()`
 keep their existing signatures plus a new keyword-only `category` defaulting to
