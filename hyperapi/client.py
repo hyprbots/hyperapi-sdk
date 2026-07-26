@@ -1752,8 +1752,12 @@ class HyperAPIClient:
         use :py:meth:`extract_advanced`.
 
         Returns:
-            Response envelope with ``result`` containing entities and line items,
-            and ``result["ocr_text"]`` with the raw OCR.
+            Response envelope. The structured payload is one level under
+            ``result``: ``result["result"]["entities"]`` (header/party fields),
+            ``result["result"]["line_items"]`` (per-line rows), and
+            ``result["result"]["summary"]`` (document-level totals/tax/currency —
+            e.g. the grand total lives here, ``summary["total_amount"]``, NOT in
+            entities). Raw OCR is at the envelope top level, ``result["ocr_text"]``.
         """
         job = self.submit_extract(
             file_path,
@@ -1805,6 +1809,13 @@ class HyperAPIClient:
         ``non_domain_label``, ``non_domain_exit_label``, ``confusion_neighbors``,
         and the token/page budgets (``start_token_budget``, ``end_token_budget``,
         ``max_start_pages``, ``max_end_pages``).
+
+        Returns:
+            Response envelope. The prediction is one level under ``result``:
+            ``result["result"]["document_type"]`` (e.g. ``"invoice"``), with
+            ``confidence`` (a categorical label such as ``"very_high"``, not a
+            float), ``domain``, and ``needs_review`` alongside it. Raw OCR is at
+            the envelope top level in ``result["ocr_text"]``.
         """
         job = self.submit_classify(
             file_path,
@@ -1830,6 +1841,13 @@ class HyperAPIClient:
         ``use_thinking``, ``segment_classes``, ``extend_segment_classes``,
         and ``custom_domain_guidelines`` (its ``domain_name`` sub-field is
         required when the object is supplied).
+
+        Returns:
+            Response envelope. The detected parts are at
+            ``result["result"]["segmentation"]["splits"]`` — a list where each
+            item has ``split_label``, ``start_page``, ``end_page``,
+            ``confidence``, and ``sub_documents``. (Note the ``segmentation``
+            wrapper: this is one level deeper than the other operations' payloads.)
         """
         job = self.submit_split(
             file_path,
