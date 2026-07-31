@@ -529,7 +529,7 @@ Polling cadence is configurable on the constructor (defaults match the platform 
 client = HyperAPIClient(
     api_key="hk_live_…",
     poll_interval=3.0,            # seconds between polls (default 3)
-    poll_timeout=1800.0,          # max wait per job in seconds (default 1800)
+    poll_timeout=3600.0,          # max wait per job in seconds (default 3600)
     poll_max_transient_retries=3, # per-poll retries on transient 5xx (default 3)
 )
 ```
@@ -550,7 +550,7 @@ client = HyperAPIClient(
     base_url: str = None,               # API endpoint (default: https://apis.hyperbots.com)
     timeout: float = 120.0,             # per-HTTP-call timeout (NOT total job time)
     poll_interval: float = 3.0,         # seconds between job-status polls
-    poll_timeout: float = 1800.0,       # max wall-clock seconds to wait for a job
+    poll_timeout: float = 3600.0,       # max wall-clock seconds to wait for a job
     poll_max_transient_retries: int = 3,# transient-5xx retries on a single poll
 )
 
