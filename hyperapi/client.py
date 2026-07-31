@@ -82,10 +82,18 @@ ExtractCategory = Literal["financial", "non_financial"]
 # Per-HTTP-call defaults — single submit / single poll, NOT total job time.
 _DEFAULT_TIMEOUT = 120.0
 
-# Polling defaults — match the playground (hyperapi/src/app/(dashboard)/dashboard/playground/page.tsx)
-# so operational characteristics are identical to what the team has already validated in production.
+# Polling defaults. The interval still matches the dashboard playground
+# (hyperapi/src/app/(dashboard)/dashboard/playground/page.tsx, POLL_INTERVAL_MS = 3000).
+#
+# The DEADLINE deliberately no longer matches it. The playground stays at 30 min
+# because a human watching a browser tab that long isn't a real workflow; an SDK
+# caller is a script and can afford to wait. Server-side, background jobs run on
+# ASYNC_PIPELINE_TIMEOUT_MS (up to 60 min) rather than the Kong-bounded sync
+# budget, so a 30 min client deadline would abandon jobs the platform would still
+# go on to finish. Consequence to expect: the same document can time out in the
+# dashboard while succeeding through the SDK.
 _DEFAULT_POLL_INTERVAL_S = 3.0           # POLL_INTERVAL_MS = 3000 in the playground
-_DEFAULT_POLL_TIMEOUT_S = 1800.0         # HARD_TIMEOUT_MS = 1_800_000
+_DEFAULT_POLL_TIMEOUT_S = 3600.0         # 60 min — covers the max async server budget
 _DEFAULT_POLL_MAX_TRANSIENT_RETRIES = 3
 _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S = 0.5
 
@@ -432,7 +440,9 @@ class HyperAPIClient:
                 playground).
             poll_timeout: Total wall-clock seconds the SDK will wait for a
                 single job to complete. Raises ``JobTimeoutError`` past this.
-                Default 1800.0 (30 min, matches playground).
+                Default 3600.0 (60 min) — covers the maximum server-side
+                async job budget. The dashboard playground deliberately
+                stays at 30 min; see the module-level note.
             poll_max_transient_retries: How many times to retry a single
                 ``/v1/jobs/{id}`` GET if it returns 5xx or has a connection
                 error. Default 3. Fast-fails on 401/404.
