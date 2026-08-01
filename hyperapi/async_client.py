@@ -236,14 +236,21 @@ class AsyncHyperAPIClient:
             raw = schema.read_text()
         else:
             raw = str(schema)
-            # Leading "{" or "[" means JSON text. "[" is included deliberately:
-            # an array is not a valid template, but it must reach json.loads so
-            # the caller gets "must resolve to a JSON object" rather than a
-            # confusing "file not found".
-            if raw.lstrip()[:1] not in ("{", "["):
-                path = Path(raw)
+            # Treat the string as a FILE REFERENCE only when it plausibly is
+            # one: a single line that either ends in .json or actually exists.
+            # Everything else goes to json.loads, so free-form text (markdown,
+            # prose, a bare array) is reported as invalid JSON rather than as a
+            # missing file — naming the real rule instead of the wrong problem.
+            stripped = raw.strip()
+            looks_like_path = (
+                "\n" not in stripped
+                and len(stripped) < 4096
+                and (stripped.lower().endswith(".json") or Path(stripped).exists())
+            )
+            if looks_like_path:
+                path = Path(stripped)
                 if not path.exists():
-                    raise FileNotFoundError(f"Schema file not found: {raw}")
+                    raise FileNotFoundError(f"Schema file not found: {stripped}")
                 raw = path.read_text()
 
         try:
