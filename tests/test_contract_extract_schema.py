@@ -151,3 +151,50 @@ class TestDocstrings:
             for name in ("submit_extract", "extract"):
                 doc = getattr(cls, name).__doc__ or ""
                 assert "extract_fast" not in doc, f"{cls.__name__}.{name}"
+
+
+class TestPathVsJsonHeuristic:
+    """Free-form text must be reported as invalid JSON, not as a missing file.
+
+    The first cut treated any string not starting with "{" or "[" as a
+    filesystem path, so markdown produced
+    `FileNotFoundError: Schema file not found: # Patient\n- name` — which
+    names the wrong problem and hides that the real rule is "templates are
+    JSON objects".
+    """
+
+    def test_markdown_is_reported_as_invalid_json(self, client, tiny_pdf):
+        with pytest.raises(ValueError, match="JSON"):
+            client.submit_extract(
+                tiny_pdf,
+                category="non_financial",
+                schema="# Patient\n- name\n- dob",
+            )
+
+    def test_prose_is_reported_as_invalid_json(self, client, tiny_pdf):
+        with pytest.raises(ValueError, match="JSON"):
+            client.submit_extract(
+                tiny_pdf, category="non_financial", schema="just some words"
+            )
+
+    def test_json_filename_that_is_missing_still_says_file_not_found(
+        self, client, tiny_pdf, tmp_path
+    ):
+        # A .json path is unambiguously a file reference, so this must stay a
+        # FileNotFoundError — the fix must not swallow the case #31 added.
+        with pytest.raises(FileNotFoundError):
+            client.submit_extract(
+                tiny_pdf, category="non_financial", schema=str(tmp_path / "nope.json")
+            )
+
+    def test_existing_file_without_json_suffix_is_still_read(
+        self, mock_backend, client, tiny_pdf, tmp_path
+    ):
+        _seed_presigned(mock_backend)
+        route = _seed_submit(mock_backend)
+        f = tmp_path / "template.txt"
+        f.write_text(json.dumps(TEMPLATE))
+
+        client.submit_extract(tiny_pdf, category="non_financial", schema=str(f))
+
+        assert _sent_schema(route) == TEMPLATE
