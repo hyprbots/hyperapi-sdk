@@ -217,6 +217,24 @@ class AsyncHyperAPIClient:
             raise FileNotFoundError(f"File not found: {path}")
         return path
 
+    def _resolve_schema(self, schema: dict | str | Path | None) -> dict | None:
+        """Accept a schema as an already-loaded dict, a path to a JSON file,
+        or a raw pasted JSON string — whichever is most convenient for the
+        caller. Returns None unchanged (no schema given)."""
+        if schema is None or isinstance(schema, dict):
+            return schema
+        raw = str(schema)
+        path = Path(raw)
+        if path.exists():
+            raw = path.read_text()
+        try:
+            parsed = json.loads(raw)
+        except ValueError as e:
+            raise ValueError(f"schema must be a dict, a path to a JSON file, or a JSON string: {e}")
+        if not isinstance(parsed, dict):
+            raise ValueError("schema must resolve to a JSON object")
+        return parsed
+
     # ── Upload ───────────────────────────────────────────────────────────
 
     async def upload_document(
@@ -931,24 +949,39 @@ class AsyncHyperAPIClient:
         *,
         category: ExtractCategory = "financial",
         parse_mode: ParseMode = "fast",
+        schema: dict | str | Path | None = None,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a Basic extract job asynchronously and return immediately.
 
         ``category`` selects the Basic extractor: ``"financial"`` (default —
         the two-leg IDP adapter for invoices/receipts) or ``"non_financial"``
-        (a generic single-pass extractor). For auto-detecting Advanced
+        (extract-fast — see ``schema`` below). For auto-detecting Advanced
         extraction, use :py:meth:`submit_extract_advanced`.
 
         ``parse_mode`` selects the Stage-1 OCR engine, independent of
         ``category``: ``"fast"`` (default, fast text extraction) or
         ``"advanced"`` (advanced layout-aware parsing for dense tables/forms —
         higher accuracy, slower, costs more; available on paid tiers).
+
+        ``schema`` (``category="non_financial"`` only): a blank template —
+        the exact shape you want back, with ``None``/``False``/``"unselected"``
+        as placeholders, e.g. ``{"patient_name": None, "insurance":
+        {"Medicare": "unselected", "Self-Pay": "unselected"}}``. Pass it as an
+        already-loaded dict, a path to a JSON file, or a raw pasted JSON
+        string. The response fills in that SAME structure from the document.
+        Ephemeral — used for this call only, nothing is stored server-side;
+        pass a different ``schema`` next call for a different shape, no
+        merge/versioning to reason about. Omit to use this org's stored
+        default template instead (set up separately, offline).
         """
         path = self._resolve_path(file_path)
+        resolved_schema = self._resolve_schema(schema)
+        data = {"schema": json.dumps(resolved_schema)} if resolved_schema is not None else None
         return await self._submit_via_path(
             "/v1/extract", "extract", path,
             params={"category": category, "parse_mode": parse_mode},
+            data=data,
             use_presigned=use_presigned,
         )
 
@@ -1340,21 +1373,29 @@ class AsyncHyperAPIClient:
         *,
         category: ExtractCategory = "financial",
         parse_mode: ParseMode = "fast",
+        schema: dict | str | Path | None = None,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
-        """Extract structured data (entities + line items) from a document.
+        """Extract structured data from a document.
 
-        This is the Basic extractor. ``category="financial"`` (default) runs the
-        two-leg IDP adapter (invoices/receipts); ``"non_financial"`` runs a
-        generic single-pass extractor. For auto-detecting Advanced extraction,
-        use :py:meth:`extract_advanced`.
+        This is the Basic extractor. ``category="financial"`` (default) runs
+        the two-leg IDP adapter (invoices/receipts). ``category="non_financial"``
+        is extract-fast: no document-type detection at all — pass ``schema``,
+        a blank template (dict, path to a JSON file, or raw JSON string) with
+        ``None``/``False``/``"unselected"`` placeholders, and the response
+        fills in that SAME structure from the document at
+        ``result["result"]["data"]``. Omit ``schema`` to use this org's
+        stored default template instead (set up separately, offline). For
+        auto-detecting Advanced extraction (no ``category`` needed), use
+        :py:meth:`extract_advanced`.
         """
         job = await self.submit_extract(
             file_path,
             category=category,
             parse_mode=parse_mode,
+            schema=schema,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
