@@ -223,10 +223,29 @@ class AsyncHyperAPIClient:
         caller. Returns None unchanged (no schema given)."""
         if schema is None or isinstance(schema, dict):
             return schema
-        raw = str(schema)
-        path = Path(raw)
-        if path.exists():
-            raw = path.read_text()
+
+        # A Path, or a string that is not JSON text, is a filesystem path — and
+        # a path that does not exist must say so. Previously any missing path
+        # fell through to json.loads("/some/missing.json") and reported "must be
+        # a dict, a path to a JSON file, or a JSON string", pointing the caller
+        # at the wrong problem. _resolve_path (the sibling helper for documents)
+        # already raises FileNotFoundError here.
+        if isinstance(schema, Path):
+            if not schema.exists():
+                raise FileNotFoundError(f"Schema file not found: {schema}")
+            raw = schema.read_text()
+        else:
+            raw = str(schema)
+            # Leading "{" or "[" means JSON text. "[" is included deliberately:
+            # an array is not a valid template, but it must reach json.loads so
+            # the caller gets "must resolve to a JSON object" rather than a
+            # confusing "file not found".
+            if raw.lstrip()[:1] not in ("{", "["):
+                path = Path(raw)
+                if not path.exists():
+                    raise FileNotFoundError(f"Schema file not found: {raw}")
+                raw = path.read_text()
+
         try:
             parsed = json.loads(raw)
         except ValueError as e:
@@ -977,6 +996,15 @@ class AsyncHyperAPIClient:
         """
         path = self._resolve_path(file_path)
         resolved_schema = self._resolve_schema(schema)
+        # The router honours `schema` on non_financial only; on financial it is
+        # ignored server-side. Silently dropping it would return plausible
+        # output shaped by a different extractor, with nothing to tell the
+        # caller their template never applied — so this fails loudly instead.
+        if resolved_schema is not None and category != "non_financial":
+            raise ValueError(
+                'schema applies to category="non_financial" only '
+                f'(got category="{category}")'
+            )
         data = {"schema": json.dumps(resolved_schema)} if resolved_schema is not None else None
         return await self._submit_via_path(
             "/v1/extract", "extract", path,
