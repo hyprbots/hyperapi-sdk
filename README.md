@@ -130,6 +130,88 @@ print(page["structured"]["markdown"])   # layout-aware markdown
 print(page["structured"]["regions"])    # typed regions with bounding boxes
 ```
 
+### Large documents (beyond the advanced page cap)
+
+Advanced parse normally caps at **60 pages / 50 MB** — past either limit the
+server returns `413`. Selected deployments raise that to **500 pages / 512 MiB**
+for a narrow case. Every one of these must hold, or you get the ordinary `413`:
+
+| Condition | Why |
+|---|---|
+| `mode="advanced"` | `mode="fast"` was never page-capped |
+| Submitted **asynchronously** | A multi-hour job can't be served on one connection |
+| Org on the **`custom`** tier | Hours of GPU time is a provisioned privilege |
+| Called with an **API key** (not the dashboard) | The playground has a human waiting on a short timeout |
+| ≤ 500 pages, ≤ 512 MiB | The hard ceiling for this path |
+
+The SDK already satisfies the async and API-key conditions — every convenience
+method submits with `X-Async: true`, and the gateway tags API-key traffic as
+`api` for you. Nothing to pass; the server decides. The server never tells you
+*which* condition you missed, so a surprise `413` on a large document is most
+likely tier or deployment.
+
+> **Availability.** This is enabled per-deployment and is not on everywhere.
+> Check with HyperAPI support before relying on it; without it the 60-page /
+> 50 MB `413` stands.
+
+The document runs as page-range segments on the batch queue, but stays **one**
+request — one `request_id`, one usage record, one job. Two things differ from an
+ordinary parse:
+
+**1. The result arrives as a URL, not inline.** A 500-page structured result is
+far too large to embed in the job, so `pages` and `ocr` are *absent* and you get
+a presigned `result_url` instead:
+
+```python
+import httpx
+
+job = client.submit_parse("500_page_report.pdf", mode="advanced")
+result = client.wait_for_job(job, timeout=7200)     # see the deadline note below
+
+if url := result.get("result_url"):                 # large-document delivery
+    payload = httpx.get(url).json()                 # fetch promptly — expires in minutes
+    pages = payload["result"]["pages"]
+else:
+    pages = result["result"]["pages"]                # ordinary inline result
+
+meta = result["metadata"]
+print(meta["total_pages"], meta["segments_total"], meta["segments_failed"])
+```
+
+`result_url` is re-signed on **every poll** and expires in minutes. If it lapses,
+call `get_job(job.job_id)` again for a fresh one — the job itself lives 24 h.
+
+**2. It can complete with `gaps`.** Page ranges that failed after retries are
+reported in `metadata["gaps"]`; the document still completes, and **only pages
+that actually processed are billed**. `gaps` is always present on a large-document
+result, empty when every segment succeeded — so test the field, don't infer
+completeness from counts:
+
+```python
+for gap in result["metadata"]["gaps"]:
+    print(f"pages {gap} missing")
+```
+
+To watch progress while it runs, poll `get_job()` yourself — the segment counters
+sit on the job envelope, and `wait_for_job` returns only the result:
+
+```python
+import time
+
+job = client.submit_parse("500_page_report.pdf", mode="advanced")
+while (envelope := client.get_job(job.job_id))["status"] == "pending":
+    print(envelope.get("segments_done"), "/", envelope.get("segments_total"))
+    time.sleep(30)
+```
+
+> **Raise `poll_timeout` for these.** The default is **3600 s (60 min)**, and a
+> 500-page advanced parse can exceed it. `wait_for_job` gives up at the deadline,
+> but the job **keeps running** server-side — a `JobTimeoutError` is the client
+> abandoning the wait, not the platform abandoning the work. Re-attach with
+> `client.get_job(job.job_id)` (jobs live 24 h, and progress refreshes that
+> window). Pass a deadline that matches the document, e.g.
+> `client.parse(..., poll_timeout=7200)`.
+
 ## Extract: Basic vs Advanced
 
 Basic `extract()` runs the tier you select with `category`; **Advanced**

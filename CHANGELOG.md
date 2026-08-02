@@ -5,6 +5,37 @@ All notable changes to `hyperapi-sdk` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- **Large advanced-parse documents are now described.** A server-side change
+  admits advanced parses beyond the 60-page / 50 MB `413` — up to 500 pages and
+  512 MiB — for callers that satisfy every condition: `mode="advanced"`,
+  asynchronous submission, an org on the `custom` tier, and an API key rather
+  than the dashboard. Availability is per-deployment.
+
+  **No SDK code change was needed and none was made.** The SDK already submits
+  with `X-Async: true`, already imposes no client-side size or page limit, and
+  the gateway tags API-key traffic as `api` on its own. What was missing was any
+  description of how such a job *behaves*, which differs from an ordinary parse:
+
+  - the completed result carries **no inline `pages`/`ocr`** — the payload sits
+    behind a presigned `result["result_url"]`, re-signed on every poll and valid
+    for minutes;
+  - `result["metadata"]["gaps"]` lists page ranges that failed after retries.
+    The document still completes, and only pages that processed are billed;
+  - segment progress (`segments_total` / `segments_done` / `segments_failed`)
+    is on the job envelope from `get_job()`, not on what `wait_for_job()`
+    returns.
+
+  Documented in the README, `submit_parse()`, and `parse()` (sync + async).
+
+  Note the default `poll_timeout` of **3600 s can be shorter than a 500-page
+  job**. `wait_for_job` raises `JobTimeoutError` at the deadline, but the job
+  keeps running server-side and stays retrievable via `get_job()` for 24 h. Pass
+  a larger `poll_timeout` for these documents.
+
 ## [0.6.0] — 2026-07-24
 
 Ships everything below. The **Basic/Advanced extract product split** landed in
