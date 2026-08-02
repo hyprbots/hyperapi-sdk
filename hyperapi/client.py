@@ -1355,9 +1355,12 @@ class HyperAPIClient:
         Such a document runs as page-range segments but stays ONE job. Its
         completed result differs in shape, so branch on it:
 
-        - ``pages`` / ``ocr`` are NOT inline. The payload is delivered via a
-          presigned ``result["result_url"]``, re-signed on every poll and valid
-          for minutes — fetch it promptly or re-poll for a fresh one.
+        - ``pages`` / ``ocr`` are NOT inline. Only the *delivery* changes,
+          nothing is lost: GET the presigned ``result["result_url"]`` and the
+          JSON behind it is the ordinary envelope, with every page at
+          ``payload["result"]["pages"]`` and the text at
+          ``payload["result"]["ocr"]``. The URL is re-signed on every poll and
+          valid for minutes — fetch it promptly, or re-poll for a fresh one.
         - ``result["metadata"]["gaps"]`` lists page ranges that failed after
           retries. The document still completes; only pages that actually
           processed are billed. Always present, empty when nothing failed.

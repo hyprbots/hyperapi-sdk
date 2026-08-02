@@ -159,8 +159,11 @@ request — one `request_id`, one usage record, one job. Two things differ from 
 ordinary parse:
 
 **1. The result arrives as a URL, not inline.** A 500-page structured result is
-far too large to embed in the job, so `pages` and `ocr` are *absent* and you get
-a presigned `result_url` instead:
+far too large to embed in the job, so the *poll response* carries a pointer:
+`pages` and `ocr` are absent from it and you get a presigned `result_url`
+instead. **Nothing is lost — only the delivery changes.** Fetch that URL and the
+JSON behind it is the ordinary envelope, every page present at
+`payload["result"]["pages"]`:
 
 ```python
 import httpx
