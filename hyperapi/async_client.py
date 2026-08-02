@@ -948,8 +948,8 @@ class AsyncHyperAPIClient:
         ``mode="advanced"`` runs layout-aware structured OCR: each
         ``result["result"]["pages"]`` entry gains a ``structured`` dict with ``html``,
         ``markdown``, and ``regions``. Only meaningful on the default OCR
-        engine; noticeably slower than ``"fast"`` but well within the default
-        ``poll_timeout``.
+        engine; noticeably slower than ``"fast"`` but, for documents under the
+        page cap, well within the default ``poll_timeout``.
 
         ``include_boxes=True`` adds per-segment bounding boxes to each entry of
         ``result["result"]["pages"]`` (standard OCR engine only; the layout-aware engine
@@ -957,6 +957,33 @@ class AsyncHyperAPIClient:
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
         to each ``result["result"]["pages"]`` entry for the deskew-corrected page image.
+
+        Large documents
+        ---------------
+        Advanced parse caps at 60 pages / 50 MB (``413`` past either). Selected
+        deployments raise that to 500 pages / 512 MiB, but only when *every*
+        condition holds: ``mode="advanced"``, submitted asynchronously (this
+        method always is), the org is on the ``custom`` tier, and the caller is
+        an API key rather than the dashboard. Anything else keeps the ordinary
+        ``413``, and the server does not report which condition was missed.
+        Availability is per-deployment — check with support before relying on it.
+
+        Such a document runs as page-range segments but stays ONE job. Its
+        completed result differs in shape, so branch on it:
+
+        - ``pages`` / ``ocr`` are NOT inline. The payload is delivered via a
+          presigned ``result["result_url"]``, re-signed on every poll and valid
+          for minutes — fetch it promptly or re-poll for a fresh one.
+        - ``result["metadata"]["gaps"]`` lists page ranges that failed after
+          retries. The document still completes; only pages that actually
+          processed are billed. Always present, empty when nothing failed.
+        - Segment progress (``segments_total`` / ``segments_done`` /
+          ``segments_failed``) sits on the job envelope from
+          :py:meth:`get_job`, not on the result :py:meth:`wait_for_job` returns.
+
+        These can run past the default 3600 s ``poll_timeout``. Exceeding it
+        raises ``JobTimeoutError`` but does NOT stop the job — re-attach with
+        :py:meth:`get_job` (jobs live 24 h) or pass a larger ``poll_timeout``.
         """
         path = self._resolve_path(file_path, image_path)
         return await self._submit_via_path(
@@ -1391,6 +1418,14 @@ class AsyncHyperAPIClient:
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
         to each ``result["result"]["pages"]`` entry for the deskew-corrected page image.
+
+        A large advanced document (over the 60-page cap, admitted on deployments
+        that allow it — see :py:meth:`submit_parse`) returns a different shape:
+        no inline ``pages``/``ocr``, the payload behind a presigned
+        ``result["result_url"]``, and failed page ranges in
+        ``result["metadata"]["gaps"]``. Branch on ``result_url`` being present
+        rather than assuming the inline shape, and raise ``poll_timeout`` — such
+        a job can outlast the 3600 s default.
         """
         job = await self.submit_parse(
             file_path=file_path,
