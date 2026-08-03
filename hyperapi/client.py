@@ -92,8 +92,8 @@ _DEFAULT_TIMEOUT = 120.0
 # budget, so a 30 min client deadline would abandon jobs the platform would still
 # go on to finish. Consequence to expect: the same document can time out in the
 # dashboard while succeeding through the SDK.
-_DEFAULT_POLL_INTERVAL_S = 3.0           # POLL_INTERVAL_MS = 3000 in the playground
-_DEFAULT_POLL_TIMEOUT_S = 3600.0         # 60 min — covers the max async server budget
+_DEFAULT_POLL_INTERVAL_S = 3.0  # POLL_INTERVAL_MS = 3000 in the playground
+_DEFAULT_POLL_TIMEOUT_S = 3600.0  # 60 min — covers the max async server budget
 _DEFAULT_POLL_MAX_TRANSIENT_RETRIES = 3
 _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S = 0.5
 
@@ -132,6 +132,7 @@ class Job:
 
 
 # ── Helpers (module-private) ────────────────────────────────────────────────
+
 
 def _parse_retry_after(value: str | None, *, default: int = 60) -> int:
     """Parse a `Retry-After` header into whole seconds-from-now.
@@ -189,7 +190,12 @@ def _server_message(response: httpx.Response, fallback: str) -> str:
                 # Prefer that inner message over stringifying the whole dict
                 # (which would surface a Python dict repr like "{'code': ...}").
                 if isinstance(val, dict):
-                    val = val.get("message") or val.get("detail") or val.get("error") or str(val)
+                    val = (
+                        val.get("message")
+                        or val.get("detail")
+                        or val.get("error")
+                        or str(val)
+                    )
                 return str(val)
     except (json.JSONDecodeError, ValueError):
         pass
@@ -198,7 +204,11 @@ def _server_message(response: httpx.Response, fallback: str) -> str:
 
 def _request_id_of(response: httpx.Response, sent: str | None = None) -> str | None:
     """Best-effort extraction of the request id we should attach to errors."""
-    return response.headers.get("x-request-id") or response.headers.get("x-correlation-id") or sent
+    return (
+        response.headers.get("x-request-id")
+        or response.headers.get("x-correlation-id")
+        or sent
+    )
 
 
 def _parse_ocr_text(parse_result: Any) -> Any:
@@ -254,7 +264,9 @@ def _pages_of(result: Any) -> list[dict]:
     Accepting both means callers can hand us whatever they just got back.
     """
     if not isinstance(result, dict):
-        raise ValueError("Expected the dict returned by edit_detect/edit_fill/edit/parse")
+        raise ValueError(
+            "Expected the dict returned by edit_detect/edit_fill/edit/parse"
+        )
     for candidate in (result.get("result"), result):
         if isinstance(candidate, dict) and isinstance(candidate.get("pages"), list):
             return candidate["pages"]
@@ -278,10 +290,16 @@ def _image_suffix(url: str) -> str:
     writing webp bytes into a .png name breaks anything that trusts the extension."""
     stem = url.split("?", 1)[0].rsplit("/", 1)[-1]
     suffix = Path(stem).suffix.lower()
-    return suffix if suffix in {".png", ".webp", ".jpg", ".jpeg", ".tif", ".tiff"} else ".png"
+    return (
+        suffix
+        if suffix in {".png", ".webp", ".jpg", ".jpeg", ".tif", ".tiff"}
+        else ".png"
+    )
 
 
-def _page_targets(result: Any, dest_dir: str | Path, prefix: str) -> list[tuple[str, Path]]:
+def _page_targets(
+    result: Any, dest_dir: str | Path, prefix: str
+) -> list[tuple[str, Path]]:
     """Pair each page's presigned URL with the local path it should be written to."""
     pages = _pages_of(result)
     dest = Path(dest_dir)
@@ -294,7 +312,9 @@ def _page_targets(result: Any, dest_dir: str | Path, prefix: str) -> list[tuple[
                 f"Page {_page_number(page, i + 1)} has no 'image_url' to download. "
                 "For parse(), pass include_image=True."
             )
-        out.append((url, dest / f"{prefix}-{_page_number(page, i + 1)}{_image_suffix(url)}"))
+        out.append(
+            (url, dest / f"{prefix}-{_page_number(page, i + 1)}{_image_suffix(url)}")
+        )
     return out
 
 
@@ -302,10 +322,14 @@ def _download_error(page_path: Path, status: int) -> HyperAPIError:
     hint = ""
     if status in (403, 401):
         # SigV4 presigned URLs live ~15 min; the job itself survives 24 h.
-        hint = (" The presigned URL has most likely expired — re-poll the job with "
-                "get_job(job_id) for fresh URLs, then download again.")
-    return HyperAPIError(f"Could not download {page_path.name} (HTTP {status}).{hint}",
-                         status_code=status)
+        hint = (
+            " The presigned URL has most likely expired — re-poll the job with "
+            "get_job(job_id) for fresh URLs, then download again."
+        )
+    return HyperAPIError(
+        f"Could not download {page_path.name} (HTTP {status}).{hint}",
+        status_code=status,
+    )
 
 
 def _rate_limit_error_from(resp: httpx.Response, rid: str | None) -> RateLimitError:
@@ -378,6 +402,7 @@ def _rate_limit_wait(err: RateLimitError, remaining: float) -> float | None:
 
 
 # ── Client ─────────────────────────────────────────────────────────────────
+
 
 class HyperAPIClient:
     """Client for the HyperAPI document intelligence platform.
@@ -458,9 +483,7 @@ class HyperAPIClient:
             )
 
         self.base_url = (
-            base_url
-            or os.environ.get("HYPERAPI_URL")
-            or "https://apis.hyperbots.com"
+            base_url or os.environ.get("HYPERAPI_URL") or "https://apis.hyperbots.com"
         ).rstrip("/")
         self.timeout = timeout
         self._poll_interval = poll_interval
@@ -469,6 +492,7 @@ class HyperAPIClient:
         self._poll_transient_retry_delay = poll_transient_retry_delay
 
         from . import __version__  # local import to avoid circular at module load
+
         # User-Agent includes the httpx + Python versions so backend log analytics
         # and customer firewalls can identify the underlying HTTP stack + runtime
         # without sniffing other headers. Format mirrors the de-facto convention
@@ -557,7 +581,9 @@ class HyperAPIClient:
         try:
             parsed = json.loads(raw)
         except ValueError as e:
-            raise ValueError(f"schema must be a dict, a path to a JSON file, or a JSON string: {e}")
+            raise ValueError(
+                f"schema must be a dict, a path to a JSON file, or a JSON string: {e}"
+            )
         if not isinstance(parsed, dict):
             raise ValueError("schema must resolve to a JSON object")
         return parsed
@@ -592,7 +618,9 @@ class HyperAPIClient:
             raise FileNotFoundError(f"File not found: {path}")
 
         if content_type is None:
-            content_type = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+            content_type = CONTENT_TYPES.get(
+                path.suffix.lower(), "application/octet-stream"
+            )
 
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
@@ -647,7 +675,9 @@ class HyperAPIClient:
                     },
                 )
         except httpx.RequestError as e:
-            raise DocumentUploadError(f"S3 upload failed: {e}", request_id=request_id) from e
+            raise DocumentUploadError(
+                f"S3 upload failed: {e}", request_id=request_id
+            ) from e
 
         if s3_resp.status_code not in (200, 204):
             raise DocumentUploadError(
@@ -909,9 +939,7 @@ class HyperAPIClient:
                 f"{self.base_url}/v1/jobs/{job_id}", headers=headers
             )
         except httpx.RequestError as e:
-            raise HyperAPIError(
-                f"Job poll failed: {e}", request_id=request_id
-            ) from e
+            raise HyperAPIError(f"Job poll failed: {e}", request_id=request_id) from e
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code == 401:
@@ -996,7 +1024,9 @@ class HyperAPIClient:
             raise _rate_limit_error_from(resp, rid)
         if resp.status_code >= 400:
             raise HyperAPIError(
-                _server_message(resp, f"Recent-jobs request failed (HTTP {resp.status_code})"),
+                _server_message(
+                    resp, f"Recent-jobs request failed (HTTP {resp.status_code})"
+                ),
                 status_code=resp.status_code,
                 request_id=rid,
             )
@@ -1039,9 +1069,7 @@ class HyperAPIClient:
                 f"{self.base_url}/v1/jobs/{job_id}", headers=headers
             )
         except httpx.RequestError as e:
-            raise HyperAPIError(
-                f"Job cancel failed: {e}", request_id=request_id
-            ) from e
+            raise HyperAPIError(f"Job cancel failed: {e}", request_id=request_id) from e
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code in (200, 204):
@@ -1102,7 +1130,9 @@ class HyperAPIClient:
         # Unreachable in practice: the loop either returns, raises, or re-raises last_err on the final attempt.
         if last_err:  # pragma: no cover
             raise last_err
-        raise HyperAPIError("Poll exhausted retries with no response")  # pragma: no cover
+        raise HyperAPIError(
+            "Poll exhausted retries with no response"
+        )  # pragma: no cover
 
     def wait_for_job(
         self,
@@ -1162,7 +1192,11 @@ class HyperAPIClient:
                     raise
                 logger.info(
                     "poll_rate_limited",
-                    extra={"job_id": job_id, "retry_after": wait, "degraded": e.degraded},
+                    extra={
+                        "job_id": job_id,
+                        "retry_after": wait,
+                        "degraded": e.degraded,
+                    },
                 )
                 time.sleep(wait)
                 continue
@@ -1245,8 +1279,11 @@ class HyperAPIClient:
                         raise
                     logger.info(
                         "poll_rate_limited",
-                        extra={"job_id": jobs_list[idx].job_id, "retry_after": wait,
-                               "degraded": e.degraded},
+                        extra={
+                            "job_id": jobs_list[idx].job_id,
+                            "retry_after": wait,
+                            "degraded": e.degraded,
+                        },
                     )
                     time.sleep(wait)
                     still_pending.extend(pending[pos:])
@@ -1316,7 +1353,7 @@ class HyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        mode: ParseMode = "fast",
+        mode: ParseMode | None = None,
         include_boxes: bool = False,
         include_image: bool = False,
         use_presigned: bool = True,
@@ -1328,7 +1365,8 @@ class HyperAPIClient:
         ``submit_<op>`` methods don't take it because parse is the only op
         that historically accepted bare images via that name.
 
-        ``mode="advanced"`` runs layout-aware structured OCR: each
+        Omit ``mode`` to use the organization default (platform default:
+        ``"fast"``). ``mode="advanced"`` explicitly runs layout-aware structured OCR: each
         ``result["result"]["pages"]`` entry gains a ``structured`` dict with ``html``,
         ``markdown``, and ``regions``. Only meaningful on the default OCR
         engine; noticeably slower than ``"fast"`` but, for documents under the
@@ -1371,9 +1409,11 @@ class HyperAPIClient:
         """
         path = self._resolve_path(file_path, image_path)
         return self._submit_via_path(
-            "/v1/parse", "parse", path,
+            "/v1/parse",
+            "parse",
+            path,
             params={
-                "mode": mode,
+                **({"mode": mode} if mode is not None else {}),
                 "include_boxes": include_boxes,
                 "include_image": include_image,
             },
@@ -1385,7 +1425,7 @@ class HyperAPIClient:
         file_path: str | Path,
         *,
         category: ExtractCategory = "financial",
-        parse_mode: ParseMode = "fast",
+        parse_mode: ParseMode | None = None,
         schema: dict | str | Path | None = None,
         use_presigned: bool = True,
     ) -> Job:
@@ -1396,10 +1436,11 @@ class HyperAPIClient:
         (extract-fast — see ``schema`` below). For auto-detecting Advanced
         extraction, use :py:meth:`submit_extract_advanced`.
 
-        ``parse_mode`` selects the Stage-1 OCR engine, independent of
-        ``category``: ``"fast"`` (default, fast text extraction) or
+        ``parse_mode`` explicitly selects the Stage-1 OCR engine, independent of
+        ``category``: ``"fast"`` (fast text extraction) or
         ``"advanced"`` (advanced layout-aware parsing for dense tables/forms —
-        higher accuracy, slower, costs more; available on paid tiers).
+        higher accuracy, slower, costs more; available on paid tiers). Omit it
+        to use the organization default (platform default: ``"fast"``).
 
         ``schema`` (``category="non_financial"`` only): a blank template —
         the exact shape you want back, with ``None``/``False``/``"unselected"``
@@ -1424,10 +1465,19 @@ class HyperAPIClient:
                 'schema applies to category="non_financial" only '
                 f'(got category="{category}")'
             )
-        data = {"schema": json.dumps(resolved_schema)} if resolved_schema is not None else None
+        data = (
+            {"schema": json.dumps(resolved_schema)}
+            if resolved_schema is not None
+            else None
+        )
         return self._submit_via_path(
-            "/v1/extract", "extract", path,
-            params={"category": category, "parse_mode": parse_mode},
+            "/v1/extract",
+            "extract",
+            path,
+            params={
+                "category": category,
+                **({"parse_mode": parse_mode} if parse_mode is not None else {}),
+            },
             data=data,
             use_presigned=use_presigned,
         )
@@ -1436,7 +1486,7 @@ class HyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        parse_mode: ParseMode = "fast",
+        parse_mode: ParseMode | None = None,
         use_presigned: bool = True,
     ) -> Job:
         """Submit an Advanced extract job asynchronously and return immediately.
@@ -1454,8 +1504,10 @@ class HyperAPIClient:
         # same response envelope) — NOT a typo. There is no "extract-omni" key in
         # _OP_TO_ERROR; do not "fix" this to one (it would KeyError).
         return self._submit_via_path(
-            "/v1/extract-omni", "extract", path,
-            params={"parse_mode": parse_mode},
+            "/v1/extract-omni",
+            "extract",
+            path,
+            params={"parse_mode": parse_mode} if parse_mode is not None else {},
             use_presigned=use_presigned,
         )
 
@@ -1497,7 +1549,9 @@ class HyperAPIClient:
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
         return self._submit_via_path(
-            "/v1/classify", "classify", path,
+            "/v1/classify",
+            "classify",
+            path,
             params={"mode": mode},
             data=data,
             use_presigned=use_presigned,
@@ -1524,7 +1578,9 @@ class HyperAPIClient:
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
         return self._submit_via_path(
-            "/v1/split", "split", path,
+            "/v1/split",
+            "split",
+            path,
             params={"mode": mode},
             data=data,
             use_presigned=use_presigned,
@@ -1549,9 +1605,13 @@ class HyperAPIClient:
         synthetic replacements, so each works in both modes.
         """
         path = self._resolve_path(file_path)
-        data = {"pii_config": json.dumps(pii_config)} if pii_config is not None else None
+        data = (
+            {"pii_config": json.dumps(pii_config)} if pii_config is not None else None
+        )
         return self._submit_via_path(
-            "/v1/redact", "redact", path,
+            "/v1/redact",
+            "redact",
+            path,
             params={"mode": mode, "include_logos": include_logos},
             data=data,
             use_presigned=use_presigned,
@@ -1577,7 +1637,9 @@ class HyperAPIClient:
         """
         path = self._resolve_path(file_path)
         return self._submit_via_path(
-            "/v1/edit/detect", "edit", path,
+            "/v1/edit/detect",
+            "edit",
+            path,
             params={"markdown_assist": markdown_assist},
             use_presigned=use_presigned,
         )
@@ -1647,18 +1709,24 @@ class HyperAPIClient:
                 params=params,
             )
         except httpx.RequestError as e:
-            raise HyperAPIError(f"Batch request failed: {e}", request_id=request_id) from e
+            raise HyperAPIError(
+                f"Batch request failed: {e}", request_id=request_id
+            ) from e
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code == 401:
-            raise AuthenticationError("Invalid API key.", status_code=401, request_id=rid)
+            raise AuthenticationError(
+                "Invalid API key.", status_code=401, request_id=rid
+            )
         if resp.status_code == 404:
             raise HyperAPIError("Batch not found.", status_code=404, request_id=rid)
         if resp.status_code == 429:
             raise _rate_limit_error_from(resp, rid)
         if resp.status_code >= 400:
             raise HyperAPIError(
-                _server_message(resp, f"Batch request failed (HTTP {resp.status_code})"),
+                _server_message(
+                    resp, f"Batch request failed (HTTP {resp.status_code})"
+                ),
                 status_code=resp.status_code,
                 request_id=rid,
             )
@@ -1666,7 +1734,9 @@ class HyperAPIClient:
             return resp.json()
         except (json.JSONDecodeError, ValueError) as e:
             raise HyperAPIError(
-                f"Malformed batch response: {e}", status_code=resp.status_code, request_id=rid
+                f"Malformed batch response: {e}",
+                status_code=resp.status_code,
+                request_id=rid,
             ) from e
 
     def create_batch(
@@ -1719,7 +1789,9 @@ class HyperAPIClient:
         if metadata is not None:
             body["metadata"] = metadata
         extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        return self._batch_request("POST", "/v1/batch", json_body=body, extra_headers=extra)
+        return self._batch_request(
+            "POST", "/v1/batch", json_body=body, extra_headers=extra
+        )
 
     def create_batch_from_files(
         self,
@@ -1730,7 +1802,9 @@ class HyperAPIClient:
     ) -> dict:
         """Upload each file (presigned flow) then :meth:`create_batch`."""
         document_keys = [self.upload_document(p) for p in file_paths]
-        return self.create_batch(endpoint=endpoint, document_keys=document_keys, **kwargs)
+        return self.create_batch(
+            endpoint=endpoint, document_keys=document_keys, **kwargs
+        )
 
     def get_batch(self, batch_id: str, *, limit: int = 200, offset: int = 0) -> dict:
         """Batch status: ``{status, counts, items:[{doc_index, status, ...}]}``."""
@@ -1740,7 +1814,9 @@ class HyperAPIClient:
 
     def list_batches(self, *, limit: int = 50, offset: int = 0) -> dict:
         """List the org's batches, newest first."""
-        return self._batch_request("GET", "/v1/batch", params={"limit": limit, "offset": offset})
+        return self._batch_request(
+            "GET", "/v1/batch", params={"limit": limit, "offset": offset}
+        )
 
     def cancel_batch(self, batch_id: str) -> dict:
         """Cancel a batch — stops queued items; in-flight items finish."""
@@ -1769,7 +1845,11 @@ class HyperAPIClient:
                     raise
                 logger.info(
                     "batch_poll_rate_limited",
-                    extra={"batch_id": batch_id, "retry_after": wait, "degraded": e.degraded},
+                    extra={
+                        "batch_id": batch_id,
+                        "retry_after": wait,
+                        "degraded": e.degraded,
+                    },
                 )
                 time.sleep(wait)
                 continue
@@ -1790,7 +1870,7 @@ class HyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        mode: ParseMode = "fast",
+        mode: ParseMode | None = None,
         include_boxes: bool = False,
         include_image: bool = False,
         use_presigned: bool = True,
@@ -1806,8 +1886,9 @@ class HyperAPIClient:
         Args:
             file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF, GIF).
             image_path: Deprecated alias for file_path.
-            mode: ``"fast"`` (default — plain text + boxes) or ``"advanced"``
-                (layout-aware structured OCR: each ``result["result"]["pages"]``
+            mode: Explicit ``"fast"`` or ``"advanced"``. Omit to use the
+                organization default (platform default: ``"fast"``). Advanced
+                is layout-aware structured OCR: each ``result["result"]["pages"]``
                 entry gains a ``structured`` dict with ``html``, ``markdown``,
                 and ``regions``). Advanced only applies on the default OCR
                 engine and is noticeably slower.
@@ -1850,7 +1931,7 @@ class HyperAPIClient:
         file_path: str | Path,
         *,
         category: ExtractCategory = "financial",
-        parse_mode: ParseMode = "fast",
+        parse_mode: ParseMode | None = None,
         schema: dict | str | Path | None = None,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
@@ -1903,7 +1984,7 @@ class HyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        parse_mode: ParseMode = "fast",
+        parse_mode: ParseMode | None = None,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -2216,11 +2297,15 @@ class HyperAPIClient:
         path = self._resolve_path(file_path, image_path)
         document_key = self.upload_document(path)
         parse_job = self._submit_via_doc_key(
-            "/v1/parse", "parse", document_key,
+            "/v1/parse",
+            "parse",
+            document_key,
             params={},
         )
         extract_job = self._submit_via_doc_key(
-            "/v1/extract", "extract", document_key,
+            "/v1/extract",
+            "extract",
+            document_key,
             params={},
         )
         results = self.wait_for_jobs(

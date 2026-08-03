@@ -156,9 +156,7 @@ class AsyncHyperAPIClient:
             )
 
         self.base_url = (
-            base_url
-            or os.environ.get("HYPERAPI_URL")
-            or "https://apis.hyperbots.com"
+            base_url or os.environ.get("HYPERAPI_URL") or "https://apis.hyperbots.com"
         ).rstrip("/")
         self.timeout = timeout
         self._poll_interval = poll_interval
@@ -167,6 +165,7 @@ class AsyncHyperAPIClient:
         self._poll_transient_retry_delay = poll_transient_retry_delay
 
         from . import __version__  # local import to avoid circular at module load
+
         py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         # Note the "-async" suffix in the User-Agent so backend analytics can
         # distinguish sync vs async client usage without sniffing other signals.
@@ -183,7 +182,9 @@ class AsyncHyperAPIClient:
 
     def __repr__(self) -> str:
         tail = self.api_key[-4:] if self.api_key else ""
-        return f"AsyncHyperAPIClient(api_key='hk_***{tail}', base_url='{self.base_url}')"
+        return (
+            f"AsyncHyperAPIClient(api_key='hk_***{tail}', base_url='{self.base_url}')"
+        )
 
     # ── Headers ──────────────────────────────────────────────────────────
 
@@ -256,7 +257,9 @@ class AsyncHyperAPIClient:
         try:
             parsed = json.loads(raw)
         except ValueError as e:
-            raise ValueError(f"schema must be a dict, a path to a JSON file, or a JSON string: {e}")
+            raise ValueError(
+                f"schema must be a dict, a path to a JSON file, or a JSON string: {e}"
+            )
         if not isinstance(parsed, dict):
             raise ValueError("schema must resolve to a JSON object")
         return parsed
@@ -284,7 +287,9 @@ class AsyncHyperAPIClient:
             raise FileNotFoundError(f"File not found: {path}")
 
         if content_type is None:
-            content_type = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+            content_type = CONTENT_TYPES.get(
+                path.suffix.lower(), "application/octet-stream"
+            )
 
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
@@ -340,7 +345,9 @@ class AsyncHyperAPIClient:
                 },
             )
         except httpx.RequestError as e:
-            raise DocumentUploadError(f"S3 upload failed: {e}", request_id=request_id) from e
+            raise DocumentUploadError(
+                f"S3 upload failed: {e}", request_id=request_id
+            ) from e
 
         if s3_resp.status_code not in (200, 204):
             raise DocumentUploadError(
@@ -460,7 +467,9 @@ class AsyncHyperAPIClient:
             )
 
         try:
-            document_key = await self.upload_document(file_path, content_type=content_type)
+            document_key = await self.upload_document(
+                file_path, content_type=content_type
+            )
             response = await self._client.post(
                 f"{self.base_url}{endpoint}",
                 data={"document_key": document_key, **extra_form},
@@ -600,9 +609,7 @@ class AsyncHyperAPIClient:
                 f"{self.base_url}/v1/jobs/{job_id}", headers=headers
             )
         except httpx.RequestError as e:
-            raise HyperAPIError(
-                f"Job poll failed: {e}", request_id=request_id
-            ) from e
+            raise HyperAPIError(f"Job poll failed: {e}", request_id=request_id) from e
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code == 401:
@@ -675,7 +682,9 @@ class AsyncHyperAPIClient:
             raise _rate_limit_error_from(resp, rid)
         if resp.status_code >= 400:
             raise HyperAPIError(
-                _server_message(resp, f"Recent-jobs request failed (HTTP {resp.status_code})"),
+                _server_message(
+                    resp, f"Recent-jobs request failed (HTTP {resp.status_code})"
+                ),
                 status_code=resp.status_code,
                 request_id=rid,
             )
@@ -714,9 +723,7 @@ class AsyncHyperAPIClient:
                 f"{self.base_url}/v1/jobs/{job_id}", headers=headers
             )
         except httpx.RequestError as e:
-            raise HyperAPIError(
-                f"Job cancel failed: {e}", request_id=request_id
-            ) from e
+            raise HyperAPIError(f"Job cancel failed: {e}", request_id=request_id) from e
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code in (200, 204):
@@ -776,7 +783,9 @@ class AsyncHyperAPIClient:
                 raise
         if last_err:  # pragma: no cover
             raise last_err
-        raise HyperAPIError("Poll exhausted retries with no response")  # pragma: no cover
+        raise HyperAPIError(
+            "Poll exhausted retries with no response"
+        )  # pragma: no cover
 
     async def wait_for_job(
         self,
@@ -817,7 +826,11 @@ class AsyncHyperAPIClient:
                     raise
                 logger.info(
                     "poll_rate_limited",
-                    extra={"job_id": job_id, "retry_after": wait, "degraded": e.degraded},
+                    extra={
+                        "job_id": job_id,
+                        "retry_after": wait,
+                        "degraded": e.degraded,
+                    },
                 )
                 await asyncio.sleep(wait)
                 continue
@@ -938,14 +951,15 @@ class AsyncHyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        mode: ParseMode = "fast",
+        mode: ParseMode | None = None,
         include_boxes: bool = False,
         include_image: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a parse job asynchronously and return immediately.
 
-        ``mode="advanced"`` runs layout-aware structured OCR: each
+        Omit ``mode`` to use the organization default (platform default:
+        ``"fast"``). ``mode="advanced"`` explicitly runs layout-aware structured OCR: each
         ``result["result"]["pages"]`` entry gains a ``structured`` dict with ``html``,
         ``markdown``, and ``regions``. Only meaningful on the default OCR
         engine; noticeably slower than ``"fast"`` but, for documents under the
@@ -987,9 +1001,11 @@ class AsyncHyperAPIClient:
         """
         path = self._resolve_path(file_path, image_path)
         return await self._submit_via_path(
-            "/v1/parse", "parse", path,
+            "/v1/parse",
+            "parse",
+            path,
             params={
-                "mode": mode,
+                **({"mode": mode} if mode is not None else {}),
                 "include_boxes": include_boxes,
                 "include_image": include_image,
             },
@@ -1001,7 +1017,7 @@ class AsyncHyperAPIClient:
         file_path: str | Path,
         *,
         category: ExtractCategory = "financial",
-        parse_mode: ParseMode = "fast",
+        parse_mode: ParseMode | None = None,
         schema: dict | str | Path | None = None,
         use_presigned: bool = True,
     ) -> Job:
@@ -1012,10 +1028,11 @@ class AsyncHyperAPIClient:
         (extract-fast — see ``schema`` below). For auto-detecting Advanced
         extraction, use :py:meth:`submit_extract_advanced`.
 
-        ``parse_mode`` selects the Stage-1 OCR engine, independent of
-        ``category``: ``"fast"`` (default, fast text extraction) or
+        ``parse_mode`` explicitly selects the Stage-1 OCR engine, independent of
+        ``category``: ``"fast"`` (fast text extraction) or
         ``"advanced"`` (advanced layout-aware parsing for dense tables/forms —
-        higher accuracy, slower, costs more; available on paid tiers).
+        higher accuracy, slower, costs more; available on paid tiers). Omit it
+        to use the organization default (platform default: ``"fast"``).
 
         ``schema`` (``category="non_financial"`` only): a blank template —
         the exact shape you want back, with ``None``/``False``/``"unselected"``
@@ -1039,10 +1056,19 @@ class AsyncHyperAPIClient:
                 'schema applies to category="non_financial" only '
                 f'(got category="{category}")'
             )
-        data = {"schema": json.dumps(resolved_schema)} if resolved_schema is not None else None
+        data = (
+            {"schema": json.dumps(resolved_schema)}
+            if resolved_schema is not None
+            else None
+        )
         return await self._submit_via_path(
-            "/v1/extract", "extract", path,
-            params={"category": category, "parse_mode": parse_mode},
+            "/v1/extract",
+            "extract",
+            path,
+            params={
+                "category": category,
+                **({"parse_mode": parse_mode} if parse_mode is not None else {}),
+            },
             data=data,
             use_presigned=use_presigned,
         )
@@ -1051,7 +1077,7 @@ class AsyncHyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        parse_mode: ParseMode = "fast",
+        parse_mode: ParseMode | None = None,
         use_presigned: bool = True,
     ) -> Job:
         """Submit an Advanced extract job asynchronously and return immediately.
@@ -1069,8 +1095,10 @@ class AsyncHyperAPIClient:
         # same response envelope) — NOT a typo. There is no "extract-omni" key in
         # _OP_TO_ERROR; do not "fix" this to one (it would KeyError).
         return await self._submit_via_path(
-            "/v1/extract-omni", "extract", path,
-            params={"parse_mode": parse_mode},
+            "/v1/extract-omni",
+            "extract",
+            path,
+            params={"parse_mode": parse_mode} if parse_mode is not None else {},
             use_presigned=use_presigned,
         )
 
@@ -1112,7 +1140,9 @@ class AsyncHyperAPIClient:
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
         return await self._submit_via_path(
-            "/v1/classify", "classify", path,
+            "/v1/classify",
+            "classify",
+            path,
             params={"mode": mode},
             data=data,
             use_presigned=use_presigned,
@@ -1139,7 +1169,9 @@ class AsyncHyperAPIClient:
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
         return await self._submit_via_path(
-            "/v1/split", "split", path,
+            "/v1/split",
+            "split",
+            path,
             params={"mode": mode},
             data=data,
             use_presigned=use_presigned,
@@ -1164,9 +1196,13 @@ class AsyncHyperAPIClient:
         synthetic replacements, so each works in both modes.
         """
         path = self._resolve_path(file_path)
-        data = {"pii_config": json.dumps(pii_config)} if pii_config is not None else None
+        data = (
+            {"pii_config": json.dumps(pii_config)} if pii_config is not None else None
+        )
         return await self._submit_via_path(
-            "/v1/redact", "redact", path,
+            "/v1/redact",
+            "redact",
+            path,
             params={"mode": mode, "include_logos": include_logos},
             data=data,
             use_presigned=use_presigned,
@@ -1192,7 +1228,9 @@ class AsyncHyperAPIClient:
         """
         path = self._resolve_path(file_path)
         return await self._submit_via_path(
-            "/v1/edit/detect", "edit", path,
+            "/v1/edit/detect",
+            "edit",
+            path,
             params={"markdown_assist": markdown_assist},
             use_presigned=use_presigned,
         )
@@ -1262,18 +1300,24 @@ class AsyncHyperAPIClient:
                 params=params,
             )
         except httpx.RequestError as e:
-            raise HyperAPIError(f"Batch request failed: {e}", request_id=request_id) from e
+            raise HyperAPIError(
+                f"Batch request failed: {e}", request_id=request_id
+            ) from e
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code == 401:
-            raise AuthenticationError("Invalid API key.", status_code=401, request_id=rid)
+            raise AuthenticationError(
+                "Invalid API key.", status_code=401, request_id=rid
+            )
         if resp.status_code == 404:
             raise HyperAPIError("Batch not found.", status_code=404, request_id=rid)
         if resp.status_code == 429:
             raise _rate_limit_error_from(resp, rid)
         if resp.status_code >= 400:
             raise HyperAPIError(
-                _server_message(resp, f"Batch request failed (HTTP {resp.status_code})"),
+                _server_message(
+                    resp, f"Batch request failed (HTTP {resp.status_code})"
+                ),
                 status_code=resp.status_code,
                 request_id=rid,
             )
@@ -1281,7 +1325,9 @@ class AsyncHyperAPIClient:
             return resp.json()
         except (json.JSONDecodeError, ValueError) as e:
             raise HyperAPIError(
-                f"Malformed batch response: {e}", status_code=resp.status_code, request_id=rid
+                f"Malformed batch response: {e}",
+                status_code=resp.status_code,
+                request_id=rid,
             ) from e
 
     async def create_batch(
@@ -1321,7 +1367,9 @@ class AsyncHyperAPIClient:
         if metadata is not None:
             body["metadata"] = metadata
         extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        return await self._batch_request("POST", "/v1/batch", json_body=body, extra_headers=extra)
+        return await self._batch_request(
+            "POST", "/v1/batch", json_body=body, extra_headers=extra
+        )
 
     async def create_batch_from_files(
         self,
@@ -1338,7 +1386,9 @@ class AsyncHyperAPIClient:
             endpoint=endpoint, document_keys=list(document_keys), **kwargs
         )
 
-    async def get_batch(self, batch_id: str, *, limit: int = 200, offset: int = 0) -> dict:
+    async def get_batch(
+        self, batch_id: str, *, limit: int = 200, offset: int = 0
+    ) -> dict:
         """Batch status: ``{status, counts, items:[{doc_index, status, ...}]}``."""
         return await self._batch_request(
             "GET", f"/v1/batch/{batch_id}", params={"limit": limit, "offset": offset}
@@ -1377,7 +1427,11 @@ class AsyncHyperAPIClient:
                     raise
                 logger.info(
                     "batch_poll_rate_limited",
-                    extra={"batch_id": batch_id, "retry_after": wait, "degraded": e.degraded},
+                    extra={
+                        "batch_id": batch_id,
+                        "retry_after": wait,
+                        "degraded": e.degraded,
+                    },
                 )
                 await asyncio.sleep(wait)
                 continue
@@ -1389,7 +1443,9 @@ class AsyncHyperAPIClient:
                     job_id=batch_id,
                     elapsed_s=time.monotonic() - start,
                 )
-            await asyncio.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+            await asyncio.sleep(
+                min(poll_interval, max(0.0, deadline - time.monotonic()))
+            )
 
     # ── Public convenience methods (submit + wait) ───────────────────────
 
@@ -1398,7 +1454,7 @@ class AsyncHyperAPIClient:
         file_path: str | Path | None = None,
         *,
         image_path: str | Path | None = None,
-        mode: ParseMode = "fast",
+        mode: ParseMode | None = None,
         include_boxes: bool = False,
         include_image: bool = False,
         use_presigned: bool = True,
@@ -1407,7 +1463,8 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Parse a document using OCR. Submits asynchronously and polls until done.
 
-        ``mode="advanced"`` runs layout-aware structured OCR: each
+        Omit ``mode`` to use the organization default (platform default:
+        ``"fast"``). ``mode="advanced"`` explicitly runs layout-aware structured OCR: each
         ``result["result"]["pages"]`` entry gains a ``structured`` dict with ``html``,
         ``markdown``, and ``regions``. Only meaningful on the default OCR
         engine; noticeably slower than ``"fast"``.
@@ -1435,14 +1492,16 @@ class AsyncHyperAPIClient:
             include_image=include_image,
             use_presigned=use_presigned,
         )
-        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
     async def extract(
         self,
         file_path: str | Path,
         *,
         category: ExtractCategory = "financial",
-        parse_mode: ParseMode = "fast",
+        parse_mode: ParseMode | None = None,
         schema: dict | str | Path | None = None,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
@@ -1468,13 +1527,15 @@ class AsyncHyperAPIClient:
             schema=schema,
             use_presigned=use_presigned,
         )
-        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
     async def extract_advanced(
         self,
         file_path: str | Path,
         *,
-        parse_mode: ParseMode = "fast",
+        parse_mode: ParseMode | None = None,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1490,7 +1551,9 @@ class AsyncHyperAPIClient:
             parse_mode=parse_mode,
             use_presigned=use_presigned,
         )
-        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
     async def classify(
         self,
@@ -1519,7 +1582,9 @@ class AsyncHyperAPIClient:
             options=options,
             use_presigned=use_presigned,
         )
-        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
     async def split(
         self,
@@ -1544,7 +1609,9 @@ class AsyncHyperAPIClient:
             options=options,
             use_presigned=use_presigned,
         )
-        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
     async def redact(
         self,
@@ -1571,7 +1638,9 @@ class AsyncHyperAPIClient:
             include_logos=include_logos,
             use_presigned=use_presigned,
         )
-        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
     async def edit_detect(
         self,
@@ -1642,7 +1711,9 @@ class AsyncHyperAPIClient:
             content=content,
             natural_language=natural_language,
         )
-        return await self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
     async def edit(
         self,
@@ -1765,11 +1836,15 @@ class AsyncHyperAPIClient:
         # them sequential matches the sync client's behavior and the backend
         # router serializes them anyway through the shared document_key.
         parse_job = await self._submit_via_doc_key(
-            "/v1/parse", "parse", document_key,
+            "/v1/parse",
+            "parse",
+            document_key,
             params={},
         )
         extract_job = await self._submit_via_doc_key(
-            "/v1/extract", "extract", document_key,
+            "/v1/extract",
+            "extract",
+            document_key,
             params={},
         )
         results = await self.wait_for_jobs(
