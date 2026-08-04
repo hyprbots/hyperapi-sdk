@@ -1,428 +1,136 @@
-"""HyperAPI Client.
+"""HyperAPI Async Client.
 
-Architecture
-============
-Every long-running pipeline op (`parse`, `extract`, `classify`, `split`,
-`process`) goes through **submit + poll** under the hood:
+Async-native twin of :class:`hyperapi.client.HyperAPIClient`. The HTTP contract
+is identical (submit + poll, same envelopes, same error mapping); the only
+difference is that every public method is a coroutine and the polling loop
+yields to the event loop via ``asyncio.sleep`` instead of blocking the thread
+with ``time.sleep``.
 
-    1. POST /v1/<op>           with X-Async: true  →  202 {job_id, poll_url}
-    2. GET  /v1/jobs/{job_id}  (every poll_interval) →  {status, result?, error?}
+Use this client when your code already runs inside an event loop:
 
-This keeps every individual HTTP request short (sub-second), so the SDK is
-**timeout-immune** at any edge — works behind CloudFront's 30 s
-`origin_response_timeout`, Cloudflare's 100 s, a raw ALB, or no edge at all.
-The convenience methods (``parse(...)``, ``extract(...)``, ...) hide the
-``job_id`` from callers; advanced users who want fire-and-forget or custom
-progress UIs can call ``submit_<op>(...)`` and ``wait_for_job(...)`` directly.
+* FastAPI / Starlette / aiohttp request handlers
+* LLM agent loops that interleave HyperAPI with other ``await`` calls
+* Discord / Slack / Telegram bots
+* High-concurrency processors that fan out with ``asyncio.gather``
 
-Pipeline (server-side, transparent to callers):
+For batch scripts, Airflow tasks, Celery workers, and Jupyter notebooks the
+sync :class:`hyperapi.client.HyperAPIClient` is the right choice — async adds
+boilerplate without benefit in those contexts.
 
-    Stage 1 — OCR (always runs)
-        Upload → page images → OCR text (full_text + page_texts)
+Quickstart
+==========
 
-    Stage 2 — Task-specific processing (skipped for parse)
-        parse:      OCR text only (no Stage 2)
-        extract:    OCR output → structured extraction
-        classify:   OCR output → classification
-        split:      OCR output → document splitting
+::
+
+    import asyncio
+    from hyperapi import AsyncHyperAPIClient
+
+    async def main():
+        async with AsyncHyperAPIClient(api_key="hk_live_…") as client:
+            result = await client.extract("invoice.pdf")
+            print(result["data"])
+
+    asyncio.run(main())
+
+Inside FastAPI::
+
+    from fastapi import FastAPI, UploadFile
+    from hyperapi import AsyncHyperAPIClient
+
+    app = FastAPI()
+    client = AsyncHyperAPIClient()  # reads HYPERAPI_KEY from env
+
+    @app.post("/extract")
+    async def extract(file: UploadFile):
+        # Save UploadFile to a tmp path, then:
+        return await client.extract(tmp_path)
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        await client.aclose()
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-import random
 import sys
 import time
 import uuid
 import warnings
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from collections.abc import Iterable
 
 import httpx
 
+# Reuse the sync client's pure helpers + constants + Job + op→error registry.
+# Importing rather than duplicating keeps the two clients behaviorally aligned
+# and means bug fixes in error parsing / scrubbing land in both.
+from .client import (
+    CONTENT_TYPES,
+    ExtractCategory,
+    Job,
+    ParseMode,
+    _DEFAULT_POLL_INTERVAL_S,
+    _DEFAULT_POLL_MAX_TRANSIENT_RETRIES,
+    _DEFAULT_POLL_TIMEOUT_S,
+    _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S,
+    _DEFAULT_TIMEOUT,
+    _OP_TO_ERROR,
+    _download_error,
+    _edit_fill_body,
+    _page_targets,
+    _parse_ocr_text,
+    _rate_limit_error_from,
+    _rate_limit_wait,
+    _request_id_of,
+    _server_message,
+)
 from .exceptions import (
     AuthenticationError,
-    ClassifyError,
     DocumentUploadError,
-    EditError,
-    ExtractError,
     HyperAPIError,
     JobTimeoutError,
-    ParseError,
     RateLimitError,
-    RedactError,
-    SplitError,
     _strip_api_key,
 )
-
-
-CONTENT_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".tiff": "image/tiff",
-    ".tif": "image/tiff",
-    ".pdf": "application/pdf",
-}
-
-ParseMode = Literal["fast", "advanced"]
-# Basic extract document family. ``financial`` (default) routes to the two-leg
-# IDP adapter (invoices, receipts); ``non_financial`` routes to the generic
-# single-pass extractor. Advanced extraction (auto-detect) is a separate method.
-ExtractCategory = Literal["financial", "non_financial"]
-
-# Per-HTTP-call defaults — single submit / single poll, NOT total job time.
-_DEFAULT_TIMEOUT = 120.0
-
-# Polling defaults. Long-running document jobs can take up to an hour, so the
-# SDK deadline is deliberately longer than a typical interactive request.
-_DEFAULT_POLL_INTERVAL_S = 3.0
-_DEFAULT_POLL_TIMEOUT_S = 3600.0
-_DEFAULT_POLL_MAX_TRANSIENT_RETRIES = 3
-_DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S = 0.5
 
 
 logger = logging.getLogger("hyperapi")
 
 
-# Ops the SDK can submit asynchronously. Used as the per-op error class registry.
-_OP_TO_ERROR: dict[str, type] = {
-    "parse": ParseError,
-    "extract": ExtractError,
-    "classify": ClassifyError,
-    "split": SplitError,
-    "redact": RedactError,
-    # Both legs of the two-call edit flow (detect + fill) share one op key —
-    # the server meters and fails them under the same /v1/edit endpoint.
-    "edit": EditError,
-}
+class AsyncHyperAPIClient:
+    """Async client for the HyperAPI document intelligence platform.
 
+    Mirrors :class:`hyperapi.client.HyperAPIClient` one-to-one — same
+    constructor signature, same method names, same return shapes, same typed
+    exceptions. Pick this client when your runtime is async (FastAPI, agent
+    loops, asyncio-based services); otherwise use the sync client.
 
-@dataclass
-class Job:
-    """Handle returned by ``client.submit_<op>(...)``.
-
-    Pass to :py:meth:`HyperAPIClient.wait_for_job` to block until the job is
-    done, or to :py:meth:`HyperAPIClient.get_job` for a single-shot status
-    check. The ``op`` field is what tells :py:meth:`wait_for_job` which typed
-    exception to raise on ``status: "failed"``.
-    """
-
-    job_id: str
-    status: str
-    poll_url: str
-    op: str  # "parse" | "extract" | "classify" | "split" | "redact" | "edit"
-    submitted_at: float = field(default_factory=time.monotonic)
-
-
-# ── Helpers (module-private) ────────────────────────────────────────────────
-
-
-def _parse_retry_after(value: str | None, *, default: int = 60) -> int:
-    """Parse a `Retry-After` header into whole seconds-from-now.
-
-    RFC 7231 permits both ``delta-seconds`` and an ``HTTP-date``. Gateways and
-    CDNs may use either form, so handle both and floor the result at zero.
-    """
-    if not value:
-        return default
-    value = value.strip()
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        pass
-    # HTTP-date form, e.g. "Wed, 21 Oct 2026 07:28:00 GMT".
-    try:
-        dt = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return default
-    if dt is None:  # some Python versions return None on unparseable input
-        return default
-    if dt.tzinfo is None:  # RFC dates are UTC; treat naive as UTC
-        dt = dt.replace(tzinfo=timezone.utc)
-    delta = (dt - datetime.now(timezone.utc)).total_seconds()
-    return max(0, int(delta))
-
-
-def _safe_text(response: httpx.Response) -> str:
-    """Return the response body as a string with API keys scrubbed."""
-    try:
-        return _strip_api_key(response.text) or ""
-    except Exception:  # noqa: BLE001  # pragma: no cover
-        # Unreachable in practice: httpx.Response.text never raises for the codepaths we hit.
-        return ""
-
-
-def _server_message(response: httpx.Response, fallback: str) -> str:
-    """Pull a human-readable message out of a server response.
-
-    Prefers the JSON ``message`` field when present, falls back to the body
-    text, and finally to the supplied fallback. Always API-key-scrubbed.
-    """
-    body = _safe_text(response)
-    try:
-        parsed = json.loads(body)
-        if isinstance(parsed, dict):
-            for key in ("message", "detail", "error"):
-                val = parsed.get(key)
-                if not val:
-                    continue
-                # Structured errors nest the human text: FastAPI wraps e.g.
-                # {"detail": {"code": "page_quota_exceeded", "message": "..."}}.
-                # Prefer that inner message over stringifying the whole dict
-                # (which would surface a Python dict repr like "{'code': ...}").
-                if isinstance(val, dict):
-                    val = (
-                        val.get("message")
-                        or val.get("detail")
-                        or val.get("error")
-                        or str(val)
-                    )
-                return str(val)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return body or fallback
-
-
-def _request_id_of(response: httpx.Response, sent: str | None = None) -> str | None:
-    """Best-effort extraction of the request id we should attach to errors."""
-    return (
-        response.headers.get("x-request-id")
-        or response.headers.get("x-correlation-id")
-        or sent
-    )
-
-
-def _parse_ocr_text(parse_result: Any) -> Any:
-    """OCR text from a parse job result. The parse envelope nests its payload
-    under `result` (parse_result["result"]["ocr"]); a flattened shape would put
-    it at the top level. None if absent."""
-    if not isinstance(parse_result, dict):
-        return None
-    inner = parse_result.get("result")
-    if isinstance(inner, dict) and "ocr" in inner:
-        return inner["ocr"]
-    return parse_result.get("ocr")
-
-
-def _edit_fill_body(
-    detect_job_id: str,
-    *,
-    values: dict | list | None,
-    content: str | None,
-    natural_language: bool,
-) -> dict[str, Any]:
-    """Build (and pre-validate) the JSON body for ``POST /v1/edit/fill``.
-
-    The server rejects both mode/field mismatches with a 400; catching them
-    here turns a round-trip into an immediate ``ValueError``. Shared by both
-    clients so the two stay in lockstep.
-    """
-    if natural_language:
-        if not (content or "").strip():
-            raise ValueError("natural_language=True requires non-empty content")
-        return {
-            "detect_job_id": detect_job_id,
-            "natural_language": True,
-            "content": content,
-        }
-    if values is None:
-        raise ValueError(
-            "natural_language=False requires values "
-            '({"0": "Jane"} or [{"index": 0, "value": "Jane"}])'
-        )
-    return {
-        "detect_job_id": detect_job_id,
-        "natural_language": False,
-        "values": values,
-    }
-
-
-def _pages_of(result: Any) -> list[dict]:
-    """Find the page list in any op's result, whichever nesting it arrived in.
-
-    ``edit_detect``/``edit_fill``/``parse`` return the platform envelope, so the pages sit at
-    ``result["result"]["pages"]``; the composite ``edit()`` flattens them to ``result["pages"]``.
-    Accepting both means callers can hand us whatever they just got back.
-    """
-    if not isinstance(result, dict):
-        raise ValueError(
-            "Expected the dict returned by edit_detect/edit_fill/edit/parse"
-        )
-    for candidate in (result.get("result"), result):
-        if isinstance(candidate, dict) and isinstance(candidate.get("pages"), list):
-            return candidate["pages"]
-    raise ValueError(
-        "No 'pages' in this result. Pass the value returned by edit_detect(), edit_fill(), "
-        "edit(), or parse(include_image=True)."
-    )
-
-
-def _page_number(page: dict, fallback: int) -> int:
-    """edit pages are keyed `page`; parse pages are keyed `page_number`."""
-    for key in ("page", "page_number"):
-        value = page.get(key)
-        if isinstance(value, int):
-            return value
-    return fallback
-
-
-def _image_suffix(url: str) -> str:
-    """Extension from the URL path — edit serves .png, parse serves .webp. Never guess:
-    writing webp bytes into a .png name breaks anything that trusts the extension."""
-    stem = url.split("?", 1)[0].rsplit("/", 1)[-1]
-    suffix = Path(stem).suffix.lower()
-    return (
-        suffix
-        if suffix in {".png", ".webp", ".jpg", ".jpeg", ".tif", ".tiff"}
-        else ".png"
-    )
-
-
-def _page_targets(
-    result: Any, dest_dir: str | Path, prefix: str
-) -> list[tuple[str, Path]]:
-    """Pair each page's presigned URL with the local path it should be written to."""
-    pages = _pages_of(result)
-    dest = Path(dest_dir)
-    out: list[tuple[str, Path]] = []
-    for i, page in enumerate(pages):
-        page = page or {}
-        url = page.get("image_url")
-        if not url:
-            raise ValueError(
-                f"Page {_page_number(page, i + 1)} has no 'image_url' to download. "
-                "For parse(), pass include_image=True."
-            )
-        out.append(
-            (url, dest / f"{prefix}-{_page_number(page, i + 1)}{_image_suffix(url)}")
-        )
-    return out
-
-
-def _download_error(page_path: Path, status: int) -> HyperAPIError:
-    hint = ""
-    if status in (403, 401):
-        # SigV4 presigned URLs live ~15 min; the job itself survives 24 h.
-        hint = (
-            " The presigned URL has most likely expired — re-poll the job with "
-            "get_job(job_id) for fresh URLs, then download again."
-        )
-    return HyperAPIError(
-        f"Could not download {page_path.name} (HTTP {status}).{hint}",
-        status_code=status,
-    )
-
-
-def _rate_limit_error_from(resp: httpx.Response, rid: str | None) -> RateLimitError:
-    """Build a RateLimitError from a 429 response envelope.
-
-    The API may rate-limit both submissions and job polls. This helper is
-    shared by both clients so envelope parsing stays consistent.
-    """
-    retry_after = _parse_retry_after(resp.headers.get("retry-after"))
-    tier = None
-    limit = None
-    window_seconds = None
-    degraded = False
-    try:
-        body = resp.json()
-        if isinstance(body, dict):
-            tier = body.get("tier")
-            limit = body.get("limit")
-            # The window length lets callers interpret the numeric limit.
-            window_seconds = body.get("window_seconds")
-            # A degraded response distinguishes transient enforcement trouble
-            # from a customer exceeding their configured quota.
-            degraded = bool(body.get("degraded", False))
-    except (json.JSONDecodeError, ValueError):  # pragma: no cover
-        # Fall back to the response headers when the body is not JSON.
-        pass
-    return RateLimitError(
-        _server_message(resp, "Rate limit exceeded"),
-        retry_after=retry_after,
-        tier=tier,
-        limit=limit,
-        window_seconds=window_seconds,
-        degraded=degraded,
-        status_code=429,
-        request_id=rid,
-    )
-
-
-def _rate_limit_wait(err: RateLimitError, remaining: float) -> float | None:
-    """Decide how to handle a 429 raised *during a poll loop*.
-
-    The gateway rate-limits job-status polls in the same per-org bucket as the
-    submit — so on a low tier (free = 1 req / 60 s) the submit spends the token
-    and the first poll(s) 429. That's transient: the window clears, so the poll
-    loop should sleep ``Retry-After`` and resume rather than fail the whole wait.
-
-    Returns the seconds to sleep before re-polling, or ``None`` when the job's
-    remaining deadline can't outlast the rate window — in which case the caller
-    re-raises the ``RateLimitError`` (it still carries ``retry_after`` so the
-    user can wait and resume via ``submit_<op>`` + ``wait_for_job``). Shared by
-    both clients so the sync/async decision can't drift; each loop supplies its
-    own sleep primitive.
-    """
-    if remaining <= 0:
-        return None
-    # `retry_after` defaults to 60 and is floored at 0 by _parse_retry_after;
-    # floor to 1 here so a server-sent "retry now" (0) can't hot-spin the loop.
-    # `... or 0` guards a None from any future RateLimitError construction path.
-    wait = max(err.retry_after or 0, 1)
-    if wait > remaining:
-        return None
-    # Add a little jitter so a concurrent async fan-out (asyncio.gather over N
-    # jobs) doesn't wake every poller on the same tick and re-poll in a
-    # synchronized burst. Capped so wait+jitter never exceeds the budget.
-    jitter = random.uniform(0.0, min(0.5, remaining - wait))
-    return float(wait) + jitter
-
-
-# ── Client ─────────────────────────────────────────────────────────────────
-
-
-class HyperAPIClient:
-    """Client for the HyperAPI document intelligence platform.
-
-    Quickstart::
-
-        from hyperapi import HyperAPIClient
-
-        client = HyperAPIClient(api_key="hk_live_…")
-        result = client.extract("invoice.pdf")
-        print(result["result"])
-        client.close()
-
-    Or as a context manager::
-
-        with HyperAPIClient(api_key="hk_live_…") as client:
-            print(client.parse("invoice.pdf")["result"]["ocr"])
-
-    Threading
+    Lifecycle
     ---------
-    ``HyperAPIClient`` is **not** thread-safe (httpx.Client isn't either).
-    Construct one client per thread, or use ``threading.local()``.
+    The underlying :class:`httpx.AsyncClient` holds a connection pool that
+    must be released. Use as an async context manager::
 
-    Polling
-    -------
-    Long-running ops (parse/extract/classify/split/process) submit to the
-    server with ``X-Async: true`` and poll ``/v1/jobs/{job_id}`` until done.
-    Each individual HTTP request is sub-second so the SDK is edge-timeout
-    immune. Override the polling cadence per-call:
+        async with AsyncHyperAPIClient() as client:
+            ...
 
-        client.extract("scan.pdf", poll_timeout=600, poll_interval=5)
+    Or close manually::
 
-    Or globally on the constructor (defaults match the platform playground).
+        client = AsyncHyperAPIClient()
+        try:
+            ...
+        finally:
+            await client.aclose()
+
+    Concurrency
+    -----------
+    A single ``AsyncHyperAPIClient`` instance can be shared across many
+    concurrent ``asyncio.gather`` operations — ``httpx.AsyncClient`` is
+    coroutine-safe. Construct one client per application, not per request.
     """
 
     def __init__(
@@ -436,32 +144,10 @@ class HyperAPIClient:
         poll_max_transient_retries: int = _DEFAULT_POLL_MAX_TRANSIENT_RETRIES,
         poll_transient_retry_delay: float = _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S,
     ):
-        """Initialize a HyperAPI client.
+        """Initialize an async HyperAPI client.
 
-        Args:
-            api_key: API key for authentication. Falls back to ``HYPERAPI_KEY``
-                environment variable. Required.
-            base_url: API base URL. Falls back to ``HYPERAPI_URL`` env var,
-                then ``https://apis.hyperbots.com``.
-            timeout: Per-HTTP-call timeout in seconds (NOT the total time
-                allowed for an entire job — see ``poll_timeout`` for that).
-                Default 120 s, which generously covers a single submit or
-                a single status poll on production traffic.
-            poll_interval: Seconds between successive polls of
-                ``/v1/jobs/{id}``. Default 3.0 (matches the platform
-                playground).
-            poll_timeout: Total wall-clock seconds the SDK will wait for a
-                single job to complete. Raises ``JobTimeoutError`` past this.
-                Default 3600.0 (60 min) — covers the maximum server-side
-                async job budget. The dashboard playground deliberately
-                stays at 30 min; see the module-level note.
-            poll_max_transient_retries: How many times to retry a single
-                ``/v1/jobs/{id}`` GET if it returns 5xx or has a connection
-                error. Default 3. Fast-fails on 401/404.
-            poll_transient_retry_delay: Seconds to sleep between transient-retry
-                attempts on a single poll. Default 0.5; bump this if your
-                network is bursty enough that 3 retries in 1.5 s isn't enough
-                breathing room.
+        Args mirror :class:`hyperapi.client.HyperAPIClient` exactly — see
+        that class for full descriptions.
         """
         self.api_key = api_key or os.environ.get("HYPERAPI_KEY")
         if not self.api_key:
@@ -480,16 +166,14 @@ class HyperAPIClient:
 
         from . import __version__  # local import to avoid circular at module load
 
-        # User-Agent includes the httpx + Python versions so backend log analytics
-        # and customer firewalls can identify the underlying HTTP stack + runtime
-        # without sniffing other headers. Format mirrors the de-facto convention
-        # popularized by the OpenAI / Stripe SDKs.
         py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        # Note the "-async" suffix in the User-Agent so backend analytics can
+        # distinguish sync vs async client usage without sniffing other signals.
         self._user_agent = (
-            f"hyperapi-sdk-python/{__version__} "
+            f"hyperapi-sdk-python/{__version__}-async "
             f"(httpx/{httpx.__version__}; Python/{py_ver})"
         )
-        self._client = httpx.Client(
+        self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={"User-Agent": self._user_agent},
         )
@@ -498,13 +182,18 @@ class HyperAPIClient:
 
     def __repr__(self) -> str:
         tail = self.api_key[-4:] if self.api_key else ""
-        return f"HyperAPIClient(api_key='hk_***{tail}', base_url='{self.base_url}')"
+        return (
+            f"AsyncHyperAPIClient(api_key='hk_***{tail}', base_url='{self.base_url}')"
+        )
 
     # ── Headers ──────────────────────────────────────────────────────────
 
     def _get_headers(self, *, async_mode: bool = False) -> dict[str, str]:
-        """Per-request headers. Generates a fresh X-Request-ID per call so
-        every request can be correlated end-to-end across the platform."""
+        """Per-request headers. Generates a fresh X-Request-ID per call.
+
+        ``async_mode`` here refers to the HTTP-contract flag (``X-Async: true``)
+        that tells the server to return a job handle, not Python's async/await.
+        """
         headers = {
             "X-API-Key": self.api_key,
             "X-Request-ID": str(uuid.uuid4()),
@@ -577,23 +266,16 @@ class HyperAPIClient:
 
     # ── Upload ───────────────────────────────────────────────────────────
 
-    def upload_document(
+    async def upload_document(
         self,
         file_path: str | Path,
         content_type: str | None = None,
     ) -> str:
         """Upload a document via the presigned-URL flow and return its document_key.
 
-        Performs the two HTTP hops (presigned-URL fetch + S3 PUT) so the
-        returned ``document_key`` can be reused across subsequent calls
-        without re-uploading the file.
-
-        Args:
-            file_path: Path to the file to upload.
-            content_type: MIME type. Auto-detected from the extension if omitted.
-
-        Returns:
-            The ``document_key`` to pass to inference endpoints.
+        Two awaits under the hood: a presigned-URL fetch and the direct upload
+        PUT. The returned ``document_key`` is reusable across subsequent
+        inference calls without re-uploading.
 
         Raises:
             FileNotFoundError: If the file does not exist.
@@ -623,7 +305,7 @@ class HyperAPIClient:
 
         # Step 1 — request an authenticated presigned upload URL.
         try:
-            resp = self._client.post(
+            resp = await self._client.post(
                 f"{self.base_url}/v1/documents/upload",
                 json=body,
                 headers=headers,
@@ -653,14 +335,15 @@ class HyperAPIClient:
         # Step 2 — upload bytes directly to object storage using the signed URL.
         try:
             with open(path, "rb") as f:
-                s3_resp = self._client.put(
-                    upload_url,
-                    content=f.read(),
-                    headers={
-                        "Content-Type": content_type,
-                        "x-amz-server-side-encryption": "AES256",
-                    },
-                )
+                file_bytes = f.read()
+            s3_resp = await self._client.put(
+                upload_url,
+                content=file_bytes,
+                headers={
+                    "Content-Type": content_type,
+                    "x-amz-server-side-encryption": "AES256",
+                },
+            )
         except httpx.RequestError as e:
             raise DocumentUploadError(
                 f"S3 upload failed: {e}", request_id=request_id
@@ -693,13 +376,15 @@ class HyperAPIClient:
         """Raise the appropriate typed exception for well-known HTTP statuses.
 
         Returns silently for 200/202 (success) and any other status that the
-        caller wants to handle explicitly.
+        caller wants to handle explicitly. Mirrors the sync client's mapping
+        byte-for-byte.
         """
         sc = resp.status_code
         rid = _request_id_of(resp, request_id)
 
         if sc == 401:
-            # Keep the message portable across hosted and self-hosted deployments.
+            # Same env-aware behavior as the sync client: reference self.base_url
+            # so customers on staging / on-prem aren't pointed at the prod dashboard.
             raise AuthenticationError(
                 f"Invalid API key for {self.base_url}. "
                 "Check your HyperAPI dashboard for the correct key.",
@@ -742,7 +427,7 @@ class HyperAPIClient:
 
     # ── Async submission (X-Async: true) ─────────────────────────────────
 
-    def _submit_via_path(
+    async def _submit_via_path(
         self,
         endpoint: str,
         op_name: str,
@@ -782,8 +467,10 @@ class HyperAPIClient:
             )
 
         try:
-            document_key = self.upload_document(file_path, content_type=content_type)
-            response = self._client.post(
+            document_key = await self.upload_document(
+                file_path, content_type=content_type
+            )
+            response = await self._client.post(
                 f"{self.base_url}{endpoint}",
                 data={"document_key": document_key, **extra_form},
                 params=params,
@@ -812,7 +499,7 @@ class HyperAPIClient:
         envelope = response.json()
         return self._job_from_envelope(envelope, op=op_name)
 
-    def _submit_via_doc_key(
+    async def _submit_via_doc_key(
         self,
         endpoint: str,
         op_name: str,
@@ -829,7 +516,7 @@ class HyperAPIClient:
         request_id = headers["X-Request-ID"]
 
         try:
-            response = self._client.post(
+            response = await self._client.post(
                 f"{self.base_url}{endpoint}",
                 data={"document_key": document_key},
                 params=params,
@@ -855,7 +542,7 @@ class HyperAPIClient:
 
         return self._job_from_envelope(response.json(), op=op_name)
 
-    def _submit_json(
+    async def _submit_json(
         self,
         endpoint: str,
         op_name: str,
@@ -875,7 +562,7 @@ class HyperAPIClient:
         request_id = headers["X-Request-ID"]
 
         try:
-            response = self._client.post(
+            response = await self._client.post(
                 f"{self.base_url}{endpoint}",
                 json=body,
                 headers=headers,
@@ -911,14 +598,14 @@ class HyperAPIClient:
 
     # ── Polling ──────────────────────────────────────────────────────────
 
-    def get_job(self, job_id: str) -> dict:
-        """Single-shot poll. No retry, no waiting. Raises on 4xx; returns the
-        raw envelope on 200 (``{status, result?, error?, ...}``)."""
+    async def get_job(self, job_id: str) -> dict:
+        """Single-shot async poll. No retry, no waiting. Raises on 4xx; returns
+        the raw envelope on 200 (``{status, result?, error?, ...}``)."""
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
 
         try:
-            resp = self._client.get(
+            resp = await self._client.get(
                 f"{self.base_url}/v1/jobs/{job_id}", headers=headers
             )
         except httpx.RequestError as e:
@@ -944,9 +631,6 @@ class HyperAPIClient:
                 status_code=resp.status_code,
                 request_id=rid,
             )
-        # Defend against a 200 with malformed JSON — some misconfigured proxies will
-        # return text/html bodies on 200. Without this guard, a JSONDecodeError
-        # escapes to the caller as an un-typed exception.
         try:
             return resp.json()
         except (json.JSONDecodeError, ValueError) as e:
@@ -958,7 +642,7 @@ class HyperAPIClient:
 
     # ── Jobs management ──────────────────────────────────────────────────
 
-    def list_recent_jobs(
+    async def list_recent_jobs(
         self,
         *,
         limit: int = 20,
@@ -966,20 +650,11 @@ class HyperAPIClient:
     ) -> list[dict]:
         """List the org's recent jobs (summary rows, newest first).
 
-        Args:
-            limit: Maximum rows to return. Valid range [1, 100]; out-of-range
-                values are NOT clamped — the server silently falls back to
-                the default 20 (e.g. ``limit=200`` returns 20 rows, not 100).
-            source: Optional filter — ``"api"`` or ``"playground"``. Unknown
-                values are ignored server-side (no error).
-
-        Returns:
-            A list of summary dicts (``job_id``, ``request_id``, ``status``,
-            ``task``, ``endpoint``, ``pages``, ``filename``, ``source``,
-            ``is_test``, ``created_at``, ``completed_at``, ``error``).
-            ``status`` may be ``"cancelled"`` for jobs stopped via
-            :py:meth:`delete_job`. Summaries never include results — fetch
-            the full envelope for one job with :py:meth:`get_job`.
+        Mirrors :meth:`HyperAPIClient.list_recent_jobs` — same params
+        (``limit`` valid range [1, 100], out-of-range falls back to the
+        server default 20; ``source`` filter ``"api"`` | ``"playground"``),
+        same summary-row shape, same exceptions. Fetch a full result
+        envelope for one job with :py:meth:`get_job`.
         """
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
@@ -988,7 +663,7 @@ class HyperAPIClient:
             params["source"] = source
 
         try:
-            resp = self._client.get(
+            resp = await self._client.get(
                 f"{self.base_url}/v1/jobs/recent", params=params, headers=headers
             )
         except httpx.RequestError as e:
@@ -1011,8 +686,6 @@ class HyperAPIClient:
                 status_code=resp.status_code,
                 request_id=rid,
             )
-        # Same malformed-200 defence as get_job, plus envelope-shape guard:
-        # the contract is {"jobs": [...]} — anything else is a broken proxy.
         try:
             jobs = resp.json()["jobs"]
             if not isinstance(jobs, list):
@@ -1025,15 +698,13 @@ class HyperAPIClient:
                 request_id=rid,
             ) from e
 
-    def delete_job(self, job_id: str) -> None:
+    async def delete_job(self, job_id: str) -> None:
         """Cancel a job (``DELETE /v1/jobs/{job_id}``).
 
-        Despite the HTTP verb, the server semantics are *cancel*, not erase:
-        a pending or running job is stopped (its status becomes
-        ``"cancelled"``); a job that already completed or failed is left
-        untouched and keeps its result. Idempotent — missing, expired, and
-        already-terminal job ids all return success, so calling this twice
-        is safe.
+        Mirrors :meth:`HyperAPIClient.delete_job` — the server semantics are
+        *cancel*, not erase: in-flight jobs are stopped (status becomes
+        ``"cancelled"``), terminal jobs keep their result. Idempotent —
+        missing, expired, and already-terminal job ids all return success.
 
         Raises:
             AuthenticationError: 401 (bad key).
@@ -1046,7 +717,7 @@ class HyperAPIClient:
         request_id = headers["X-Request-ID"]
 
         try:
-            resp = self._client.delete(
+            resp = await self._client.delete(
                 f"{self.base_url}/v1/jobs/{job_id}", headers=headers
             )
         except httpx.RequestError as e:
@@ -1076,16 +747,16 @@ class HyperAPIClient:
             request_id=rid,
         )
 
-    def _poll_with_retry(self, job_id: str) -> dict:
+    async def _poll_with_retry(self, job_id: str) -> dict:
         """Poll one time, retrying on transient failures (5xx, connection errors).
 
-        Fast-fails on 401 (bad key) and 404 (job missing / org mismatch). Bounds
-        the retry budget so a single poll attempt can't dominate poll_timeout.
+        Fast-fails on 401 (bad key) and 404 (job missing). Bounds the retry
+        budget so a single poll attempt can't dominate poll_timeout.
         """
         last_err: Exception | None = None
         for attempt in range(self._poll_max_transient_retries + 1):
             try:
-                envelope = self.get_job(job_id)
+                envelope = await self.get_job(job_id)
                 return envelope
             except (AuthenticationError, RateLimitError):
                 # Don't retry — caller's key/credit problem.
@@ -1105,17 +776,16 @@ class HyperAPIClient:
                             "error": str(e)[:200],
                         },
                     )
-                    time.sleep(self._poll_transient_retry_delay)
+                    await asyncio.sleep(self._poll_transient_retry_delay)
                     continue
                 raise
-        # Unreachable in practice: the loop either returns, raises, or re-raises last_err on the final attempt.
         if last_err:  # pragma: no cover
             raise last_err
         raise HyperAPIError(
             "Poll exhausted retries with no response"
         )  # pragma: no cover
 
-    def wait_for_job(
+    async def wait_for_job(
         self,
         job: Job | str,
         *,
@@ -1124,38 +794,19 @@ class HyperAPIClient:
     ) -> dict:
         """Poll a job until it completes, fails, or the timeout elapses.
 
-        Args:
-            job: A :py:class:`Job` returned by ``submit_<op>`` (preferred — the
-                ``op`` field lets us raise the right typed exception on
-                failure), or a raw ``job_id`` string (falls back to generic
-                ``HyperAPIError`` on failure).
-            timeout: Total wall-clock seconds. Defaults to the constructor's
-                ``poll_timeout``.
-            interval: Seconds between polls. Defaults to the constructor's
-                ``poll_interval``.
-
-        Returns:
-            The final ``result`` envelope from the server when ``status=completed``.
-
-        Raises:
-            JobTimeoutError: If ``timeout`` elapses with the job still pending.
-            HyperAPIError (or subclass): If the job ends with ``status=failed``,
-                or the poll itself fails after exhausting transient retries.
+        Mirrors :meth:`HyperAPIClient.wait_for_job` semantics — same return
+        shape, same exceptions — but yields to the event loop between polls
+        via ``await asyncio.sleep`` instead of blocking the thread.
         """
         if isinstance(job, Job):
             job_id = job.job_id
             op = job.op
-            # Use the Job's actual submission time so JobTimeoutError reports
-            # total time-since-submit, not just the wait_for_job loop duration.
-            # Useful when callers persist a Job and call wait_for_job later.
             start = job.submitted_at
         else:
             job_id = job
             op = "unknown"
             start = time.monotonic()
 
-        # Don't compute elapsed from `deadline - (timeout or self._poll_timeout)`
-        # — `or` treats timeout=0 as falsy and silently swaps in the constructor.
         loop_start = time.monotonic()
         budget = timeout if timeout is not None else self._poll_timeout
         deadline = loop_start + budget
@@ -1163,7 +814,7 @@ class HyperAPIClient:
 
         while True:
             try:
-                envelope = self._poll_with_retry(job_id)
+                envelope = await self._poll_with_retry(job_id)
             except RateLimitError as e:
                 # The poll shares the submit's per-org rate bucket; on low tiers
                 # the submit spent the token so the poll 429s. Back off and
@@ -1179,7 +830,7 @@ class HyperAPIClient:
                         "degraded": e.degraded,
                     },
                 )
-                time.sleep(wait)
+                await asyncio.sleep(wait)
                 continue
             status = envelope.get("status")
             if status == "completed":
@@ -1212,110 +863,74 @@ class HyperAPIClient:
                     elapsed_s=time.monotonic() - start,
                 )
 
-            # Sleep, but never past the deadline.
             remaining = deadline - time.monotonic()
-            time.sleep(min(wait_s, max(0.0, remaining)))
+            await asyncio.sleep(min(wait_s, max(0.0, remaining)))
 
-    def wait_for_jobs(
+    async def wait_for_jobs(
         self,
         jobs: Iterable[Job],
         *,
         timeout: float | None = None,
         interval: float | None = None,
     ) -> list[dict]:
-        """Poll multiple jobs concurrently (round-robin).
+        """Poll multiple jobs concurrently and return results in input order.
 
-        Returns the results in the same order as ``jobs``. Single shared
-        deadline. Raises on the first failed job (other in-flight jobs continue
-        running on the server but are abandoned by the SDK). Useful for
-        ``process()`` to collapse parse + extract polling overhead.
+        Uses ``asyncio.gather`` for true concurrent polling — each job runs on
+        its own task in the event loop. This is the natural async fan-out and
+        is strictly more concurrent than the sync client's round-robin loop.
+
+        Behavior matches the sync client otherwise: shared timeout budget per
+        job, first failure raises (others are cancelled), returns ``[]`` for
+        empty input.
+
+        Raises:
+            JobTimeoutError: If any job exceeds ``timeout``.
+            HyperAPIError (or subclass): If any job ends with status=failed.
         """
         jobs_list = list(jobs)
         if not jobs_list:
             return []
 
-        start = time.monotonic()
+        # Each task waits up to `budget`. `gather` propagates the first failure
+        # but does NOT cancel its siblings — so on failure we cancel them
+        # explicitly. This matters more now that a rate-limited poll backs off
+        # (sleeps Retry-After) instead of fast-failing: without the cancel, one
+        # failed/timed-out job would leave the others polling for up to the full
+        # poll_timeout. Cancelling gives the sync round-robin's "first failure
+        # wins; pending jobs abandoned" semantics.
         budget = timeout if timeout is not None else self._poll_timeout
-        deadline = start + budget
-        wait_s = interval if interval is not None else self._poll_interval
-        # Placeholder `{}` (not None) means "completed, but the server's result envelope
-        # was empty" — preserves order in the returned list. The loop only exits when
-        # every index has been written, so we never return more or fewer entries than
-        # the input.
-        results: list[dict] = [{} for _ in jobs_list]
-        pending: list[int] = list(range(len(jobs_list)))
 
-        while pending:
-            still_pending: list[int] = []
-            rate_limited = False
-            for pos, idx in enumerate(pending):
-                try:
-                    envelope = self._poll_with_retry(jobs_list[idx].job_id)
-                except RateLimitError as e:
-                    # Shared per-org rate bucket: one 429 means the window is
-                    # spent for everyone this pass. Sleep Retry-After once, keep
-                    # this and all not-yet-polled jobs pending, and retry.
-                    wait = _rate_limit_wait(e, deadline - time.monotonic())
-                    if wait is None:
-                        raise
-                    logger.info(
-                        "poll_rate_limited",
-                        extra={
-                            "job_id": jobs_list[idx].job_id,
-                            "retry_after": wait,
-                            "degraded": e.degraded,
-                        },
-                    )
-                    time.sleep(wait)
-                    still_pending.extend(pending[pos:])
-                    rate_limited = True
-                    break
-                status = envelope.get("status")
-                if status == "completed":
-                    # Return only the `result` payload (never the raw envelope,
-                    # which carries status/timing/receipt fields); coerce a
-                    # missing/null result to {} to preserve list position.
-                    res = envelope.get("result")
-                    results[idx] = res if isinstance(res, dict) else {}
-                elif status == "failed":
-                    raise self._exception_for_failed_job(
-                        jobs_list[idx].op, envelope, jobs_list[idx].job_id
-                    )
-                else:
-                    still_pending.append(idx)
-            pending = still_pending
+        tasks = [
+            asyncio.ensure_future(
+                self.wait_for_job(j, timeout=budget, interval=interval)
+            )
+            for j in jobs_list
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            # Drain the cancellations so they don't surface as "Task exception
+            # was never retrieved" on the event loop.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
-            if not pending:
-                break
-            if time.monotonic() >= deadline:
-                pending_ids = ",".join(jobs_list[i].job_id for i in pending)
-                raise JobTimeoutError(
-                    f"Jobs [{pending_ids}] did not complete within {budget}s.",
-                    job_id=pending_ids,
-                    elapsed_s=time.monotonic() - start,
-                )
-            if rate_limited:
-                # Already slept Retry-After above; don't double-sleep the poll gap.
-                continue
-            remaining = deadline - time.monotonic()
-            time.sleep(min(wait_s, max(0.0, remaining)))
-
-        # results is already in input-order; never filter — the input length is the
-        # output length, always.
-        return results
+        # `wait_for_job` returns the envelope's `result` payload ({} if missing
+        # or null). Coerce non-dicts to {} so positional ordering is preserved
+        # exactly like the sync version.
+        normalized: list[dict] = []
+        for res in results:
+            normalized.append(res if isinstance(res, dict) else {})
+        return normalized
 
     def _exception_for_failed_job(
         self, op: str, envelope: dict, job_id: str
     ) -> HyperAPIError:
         """Build the right typed exception for a ``status: failed`` envelope.
 
-        The op-to-class registry returns the per-op subclass when known
-        (``ParseError``, ``ExtractError``, …) and falls back to
-        ``HyperAPIError`` for raw-job-id calls where we couldn't determine
-        which op originated the job. The HTTP status (if present in the
-        envelope's ``status_code``) is prefixed onto the message so
-        ``str(e)`` is self-describing in support tickets without needing the
-        caller to also surface ``e.status_code``.
+        Same registry as the sync client — per-op subclass when known
+        (ParseError, ExtractError, …), HyperAPIError otherwise.
         """
         raw = _strip_api_key(envelope.get("error")) or "Job failed"
         status_code = envelope.get("status_code")
@@ -1329,7 +944,7 @@ class HyperAPIClient:
 
     # ── Public submit_<op> methods ───────────────────────────────────────
 
-    def submit_parse(
+    async def submit_parse(
         self,
         file_path: str | Path | None = None,
         *,
@@ -1340,11 +955,6 @@ class HyperAPIClient:
         use_presigned: bool = True,
     ) -> Job:
         """Submit a parse job asynchronously and return immediately.
-
-        ``image_path`` is a deprecated alias for ``file_path`` retained for
-        v0.1.x backward compatibility — pass exactly one. The other
-        ``submit_<op>`` methods don't take it because parse is the only op
-        that historically accepted bare images via that name.
 
         Omit ``mode`` to use the organization default (platform default:
         ``"fast"``). ``mode="advanced"`` explicitly runs layout-aware structured OCR: each
@@ -1358,8 +968,7 @@ class HyperAPIClient:
         returns an empty list).
 
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
-        to each ``result["result"]["pages"]`` entry, pointing to the deskew-corrected
-        page image.
+        to each ``result["result"]["pages"]`` entry for the deskew-corrected page image.
 
         Large documents
         ---------------
@@ -1389,7 +998,7 @@ class HyperAPIClient:
         :py:meth:`get_job` (jobs live 24 h) or pass a larger ``poll_timeout``.
         """
         path = self._resolve_path(file_path, image_path)
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/parse",
             "parse",
             path,
@@ -1401,7 +1010,7 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
 
-    def submit_extract(
+    async def submit_extract(
         self,
         file_path: str | Path,
         *,
@@ -1428,12 +1037,11 @@ class HyperAPIClient:
         as placeholders, e.g. ``{"patient_name": None, "insurance":
         {"Medicare": "unselected", "Self-Pay": "unselected"}}``. Pass it as an
         already-loaded dict, a path to a JSON file, or a raw pasted JSON
-        string — whichever's convenient. The response fills in that SAME
-        structure from the document. Ephemeral — used for this call only,
-        nothing is stored server-side; pass a different ``schema`` next call
-        for a different shape, no merge/versioning to reason about. Omit
-        entirely to use this org's stored default template instead (set up
-        separately, offline).
+        string. The response fills in that SAME structure from the document.
+        Ephemeral — used for this call only, nothing is stored server-side;
+        pass a different ``schema`` next call for a different shape, no
+        merge/versioning to reason about. Omit to use this org's stored
+        default template instead (set up separately, offline).
         """
         path = self._resolve_path(file_path)
         resolved_schema = self._resolve_schema(schema)
@@ -1451,7 +1059,7 @@ class HyperAPIClient:
             if resolved_schema is not None
             else None
         )
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/extract",
             "extract",
             path,
@@ -1463,7 +1071,7 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
 
-    def submit_extract_advanced(
+    async def submit_extract_advanced(
         self,
         file_path: str | Path,
         *,
@@ -1484,7 +1092,7 @@ class HyperAPIClient:
         # op_name="extract" is deliberate error-taxonomy reuse (same ExtractError,
         # same response envelope) — NOT a typo. There is no "extract-omni" key in
         # _OP_TO_ERROR; do not "fix" this to one (it would KeyError).
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/extract-omni",
             "extract",
             path,
@@ -1492,7 +1100,7 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
 
-    def submit_classify(
+    async def submit_classify(
         self,
         file_path: str | Path,
         *,
@@ -1529,7 +1137,7 @@ class HyperAPIClient:
         """
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/classify",
             "classify",
             path,
@@ -1538,7 +1146,7 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
 
-    def submit_split(
+    async def submit_split(
         self,
         file_path: str | Path,
         *,
@@ -1558,7 +1166,7 @@ class HyperAPIClient:
         """
         path = self._resolve_path(file_path)
         data = {"options": json.dumps(options)} if options is not None else None
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/split",
             "split",
             path,
@@ -1567,7 +1175,7 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
 
-    def submit_redact(
+    async def submit_redact(
         self,
         file_path: str | Path,
         *,
@@ -1589,7 +1197,7 @@ class HyperAPIClient:
         data = (
             {"pii_config": json.dumps(pii_config)} if pii_config is not None else None
         )
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/redact",
             "redact",
             path,
@@ -1598,7 +1206,7 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
 
-    def submit_edit_detect(
+    async def submit_edit_detect(
         self,
         file_path: str | Path,
         *,
@@ -1617,7 +1225,7 @@ class HyperAPIClient:
         Edit is metered **once, here**; the fill leg is included.
         """
         path = self._resolve_path(file_path)
-        return self._submit_via_path(
+        return await self._submit_via_path(
             "/v1/edit/detect",
             "edit",
             path,
@@ -1625,7 +1233,7 @@ class HyperAPIClient:
             use_presigned=use_presigned,
         )
 
-    def submit_edit_fill(
+    async def submit_edit_fill(
         self,
         detect_job_id: str,
         *,
@@ -1659,7 +1267,7 @@ class HyperAPIClient:
             content=content,
             natural_language=natural_language,
         )
-        return self._submit_json("/v1/edit/fill", "edit", body)
+        return await self._submit_json("/v1/edit/fill", "edit", body)
 
     # ── Batch API (async, deferred) ──────────────────────────────────────
 
@@ -1667,7 +1275,7 @@ class HyperAPIClient:
         {"completed", "completed_with_errors", "failed", "canceled"}
     )
 
-    def _batch_request(
+    async def _batch_request(
         self,
         method: str,
         path: str,
@@ -1682,7 +1290,7 @@ class HyperAPIClient:
         if extra_headers:
             headers.update(extra_headers)
         try:
-            resp = self._client.request(
+            resp = await self._client.request(
                 method,
                 f"{self.base_url}{path}",
                 headers=headers,
@@ -1720,7 +1328,7 @@ class HyperAPIClient:
                 request_id=rid,
             ) from e
 
-    def create_batch(
+    async def create_batch(
         self,
         *,
         endpoint: str,
@@ -1734,28 +1342,15 @@ class HyperAPIClient:
     ) -> dict:
         """Submit a batch of already-uploaded documents for async processing.
 
-        Returns immediately with ``{batch_id, status, total_items}``; the work
-        runs on spare capacity. Poll :meth:`get_batch` (or :meth:`wait_for_batch`)
-        for per-document results (each result lands in S3, keyed by ``doc_index``).
-
-        Args:
-            endpoint: One of ``/v1/parse``, ``/v1/extract``, ``/v1/classify``,
-                ``/v1/split``, ``/v1/redact``.
-            document_keys: Keys from :meth:`upload_document`, one per document.
-            options: Task-specific options, forwarded to each document's run.
-            parse_mode: ``fast`` (default) or ``advanced``, for ``/v1/parse`` only.
-                ``advanced`` runs layout-aware parsing and requires a paid
-                plan (Pro/Enterprise) — the API returns 403 otherwise. Batch
-                advanced parse runs on the lowest-priority lane, yielding to
-                interactive traffic, so it may take longer under load (24h SLA).
-                Ignored by non-``/v1/parse`` endpoints.
-            webhook_url: Optional completion webhook (delivered when available).
-            metadata: Optional caller-supplied key/value tags stored with the
-                batch and echoed back on :meth:`get_batch` / :meth:`list_batches`
-                and in the completion webhook payload.
-            estimated_pages_per_doc: Hint for the up-front quota check.
-            idempotency_key: Resubmitting with the same key returns the existing
-                batch instead of creating a duplicate.
+        Returns ``{batch_id, status, total_items}``; poll :meth:`get_batch` (or
+        :meth:`wait_for_batch`) for per-document results. Endpoint is one of
+        ``/v1/parse``, ``/v1/extract``, ``/v1/classify``, ``/v1/split``, ``/v1/redact``.
+        A repeated ``idempotency_key`` returns the existing batch. ``webhook_url``
+        registers a completion callback; ``metadata`` attaches caller-supplied
+        key/value tags echoed back on reads and in the webhook payload.
+        ``parse_mode`` (``/v1/parse`` only) selects ``fast`` (default) or
+        ``advanced`` (advanced layout-aware, paid plans only — 403 otherwise);
+        advanced batch runs on the lowest-priority lane (24h SLA).
         """
         body: dict = {
             "endpoint": endpoint,
@@ -1770,40 +1365,44 @@ class HyperAPIClient:
         if metadata is not None:
             body["metadata"] = metadata
         extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        return self._batch_request(
+        return await self._batch_request(
             "POST", "/v1/batch", json_body=body, extra_headers=extra
         )
 
-    def create_batch_from_files(
+    async def create_batch_from_files(
         self,
         *,
         endpoint: str,
         file_paths: list[str | Path],
         **kwargs,
     ) -> dict:
-        """Upload each file (presigned flow) then :meth:`create_batch`."""
-        document_keys = [self.upload_document(p) for p in file_paths]
-        return self.create_batch(
-            endpoint=endpoint, document_keys=document_keys, **kwargs
+        """Upload each file concurrently (presigned flow) then :meth:`create_batch`."""
+        document_keys = await asyncio.gather(
+            *(self.upload_document(p) for p in file_paths)
+        )
+        return await self.create_batch(
+            endpoint=endpoint, document_keys=list(document_keys), **kwargs
         )
 
-    def get_batch(self, batch_id: str, *, limit: int = 200, offset: int = 0) -> dict:
+    async def get_batch(
+        self, batch_id: str, *, limit: int = 200, offset: int = 0
+    ) -> dict:
         """Batch status: ``{status, counts, items:[{doc_index, status, ...}]}``."""
-        return self._batch_request(
+        return await self._batch_request(
             "GET", f"/v1/batch/{batch_id}", params={"limit": limit, "offset": offset}
         )
 
-    def list_batches(self, *, limit: int = 50, offset: int = 0) -> dict:
+    async def list_batches(self, *, limit: int = 50, offset: int = 0) -> dict:
         """List the org's batches, newest first."""
-        return self._batch_request(
+        return await self._batch_request(
             "GET", "/v1/batch", params={"limit": limit, "offset": offset}
         )
 
-    def cancel_batch(self, batch_id: str) -> dict:
+    async def cancel_batch(self, batch_id: str) -> dict:
         """Cancel a batch — stops queued items; in-flight items finish."""
-        return self._batch_request("DELETE", f"/v1/batch/{batch_id}")
+        return await self._batch_request("DELETE", f"/v1/batch/{batch_id}")
 
-    def wait_for_batch(
+    async def wait_for_batch(
         self,
         batch_id: str,
         *,
@@ -1813,13 +1412,13 @@ class HyperAPIClient:
         """Poll :meth:`get_batch` until the batch reaches a terminal state.
 
         Raises :class:`JobTimeoutError` if ``timeout`` elapses (the batch keeps
-        running server-side — resume with a larger timeout or :meth:`get_batch`).
+        running server-side).
         """
         start = time.monotonic()
         deadline = start + timeout
         while True:
             try:
-                status = self.get_batch(batch_id)
+                status = await self.get_batch(batch_id)
             except RateLimitError as e:
                 wait = _rate_limit_wait(e, deadline - time.monotonic())
                 if wait is None:
@@ -1832,7 +1431,7 @@ class HyperAPIClient:
                         "degraded": e.degraded,
                     },
                 )
-                time.sleep(wait)
+                await asyncio.sleep(wait)
                 continue
             if status.get("status") in self._BATCH_TERMINAL:
                 return status
@@ -1842,11 +1441,13 @@ class HyperAPIClient:
                     job_id=batch_id,
                     elapsed_s=time.monotonic() - start,
                 )
-            time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+            await asyncio.sleep(
+                min(poll_interval, max(0.0, deadline - time.monotonic()))
+            )
 
     # ── Public convenience methods (submit + wait) ───────────────────────
 
-    def parse(
+    async def parse(
         self,
         file_path: str | Path | None = None,
         *,
@@ -1860,44 +1461,28 @@ class HyperAPIClient:
     ) -> dict:
         """Parse a document using OCR. Submits asynchronously and polls until done.
 
-        The returned dict is the response envelope; the parse payload is nested
-        one level under ``result`` — OCR text at ``result["result"]["ocr"]`` and
-        the page list at ``result["result"]["pages"]``.
+        Omit ``mode`` to use the organization default (platform default:
+        ``"fast"``). ``mode="advanced"`` explicitly runs layout-aware structured OCR: each
+        ``result["result"]["pages"]`` entry gains a ``structured`` dict with ``html``,
+        ``markdown``, and ``regions``. Only meaningful on the default OCR
+        engine; noticeably slower than ``"fast"``.
 
-        Args:
-            file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF, GIF).
-            image_path: Deprecated alias for file_path.
-            mode: Explicit ``"fast"`` or ``"advanced"``. Omit to use the
-                organization default (platform default: ``"fast"``). Advanced
-                is layout-aware structured OCR: each ``result["result"]["pages"]``
-                entry gains a ``structured`` dict with ``html``, ``markdown``,
-                and ``regions``). Advanced only applies on the default OCR
-                engine and is noticeably slower.
-            include_boxes: When True, each ``result["result"]["pages"]`` entry
-                includes a ``boxes`` list of ``{"text", "bbox": [left, top, right,
-                bottom], "confidence"}`` segments. Standard OCR engine only; the
-                layout-aware engine returns [].
-            include_image: When True, each ``result["result"]["pages"]`` entry
-                includes an ``image_url`` (presigned GET for the deskew-corrected
-                page) and ``dimensions`` (``{"width", "height"}`` in that image's
-                pixel space, which matches the box coordinate space).
-            use_presigned: Use the presigned-S3 upload flow (default True).
-            poll_timeout: Override the constructor's poll_timeout for this call.
-            poll_interval: Override the constructor's poll_interval for this call.
+        ``include_boxes=True`` adds per-segment bounding boxes to each entry of
+        ``result["result"]["pages"]`` (standard OCR engine only; the layout-aware engine
+        returns an empty list).
 
-        Returns:
-            Response envelope; OCR text at ``result["result"]["ocr"]`` and pages
-            at ``result["result"]["pages"]``.
+        ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
+        to each ``result["result"]["pages"]`` entry for the deskew-corrected page image.
 
-            EXCEPT for a large advanced document (over the 60-page cap, admitted
-            on deployments that allow it — see :py:meth:`submit_parse`): those
-            carry no inline ``pages``/``ocr``. The payload is behind a presigned
-            ``result["result_url"]`` and failed page ranges are listed in
-            ``result["metadata"]["gaps"]``. Branch on ``result_url`` being
-            present rather than assuming the inline shape, and raise
-            ``poll_timeout`` — such a job can outlast the 3600 s default.
+        A large advanced document (over the 60-page cap, admitted on deployments
+        that allow it — see :py:meth:`submit_parse`) returns a different shape:
+        no inline ``pages``/``ocr``, the payload behind a presigned
+        ``result["result_url"]``, and failed page ranges in
+        ``result["metadata"]["gaps"]``. Branch on ``result_url`` being present
+        rather than assuming the inline shape, and raise ``poll_timeout`` — such
+        a job can outlast the 3600 s default.
         """
-        job = self.submit_parse(
+        job = await self.submit_parse(
             file_path=file_path,
             image_path=image_path,
             mode=mode,
@@ -1905,9 +1490,11 @@ class HyperAPIClient:
             include_image=include_image,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
-    def extract(
+    async def extract(
         self,
         file_path: str | Path,
         *,
@@ -1920,48 +1507,29 @@ class HyperAPIClient:
     ) -> dict:
         """Extract structured data from a document.
 
-        Submits asynchronously and polls until done. Bypasses any edge-timeout
-        ceiling because each individual HTTP request stays sub-second.
-
-        This is the Basic extractor. ``category="financial"`` (default) runs the
-        two-leg IDP adapter (invoices/receipts). ``category="non_financial"``
-        is extract-fast: no document-type detection at all (one org is
-        assumed to send one kind of document) — pass ``schema``, a blank
-        template with ``None``/``False``/``"unselected"`` as placeholders
-        (e.g. ``{"patient_name": None, "insurance": {"Medicare":
-        "unselected", "Self-Pay": "unselected"}}``, as a dict, a path to a
-        JSON file, or a raw JSON string), and the response fills in that SAME
-        structure from the document — nothing is stored server-side, pass a
-        different ``schema`` next call for a different shape, no
-        merge/versioning to reason about. Omit ``schema`` to use this org's
-        stored default template instead (set up separately, offline — not
-        through this SDK); with no schema and no stored default, this
-        currently falls back to a generic extraction (a known gap, not yet
-        unified with this flow). For auto-detecting Advanced extraction (no
-        ``category`` needed), use :py:meth:`extract_advanced`.
-
-        Returns:
-            Response envelope. For ``category="financial"``: the structured
-            payload is one level under ``result``:
-            ``result["result"]["entities"]`` (header/party fields),
-            ``result["result"]["line_items"]`` (per-line rows), and
-            ``result["result"]["summary"]`` (document-level totals/tax/currency —
-            e.g. the grand total lives here, ``summary["total_amount"]``, NOT in
-            entities). For ``category="non_financial"`` (extract-fast): the
-            filled-in template is at ``result["result"]["data"]`` (same shape
-            as ``schema``, or the org's stored default). Raw OCR is at the
-            envelope top level, ``result["ocr_text"]``, in both cases.
+        This is the Basic extractor. ``category="financial"`` (default) runs
+        the two-leg IDP adapter (invoices/receipts). ``category="non_financial"``
+        is extract-fast: no document-type detection at all — pass ``schema``,
+        a blank template (dict, path to a JSON file, or raw JSON string) with
+        ``None``/``False``/``"unselected"`` placeholders, and the response
+        fills in that SAME structure from the document at
+        ``result["result"]["data"]``. Omit ``schema`` to use this org's
+        stored default template instead (set up separately, offline). For
+        auto-detecting Advanced extraction (no ``category`` needed), use
+        :py:meth:`extract_advanced`.
         """
-        job = self.submit_extract(
+        job = await self.submit_extract(
             file_path,
             category=category,
             parse_mode=parse_mode,
             schema=schema,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
-    def extract_advanced(
+    async def extract_advanced(
         self,
         file_path: str | Path,
         *,
@@ -1976,14 +1544,16 @@ class HyperAPIClient:
         else to schema-less grounded extraction. Submits asynchronously and
         polls until done. Returns the same envelope shape as :py:meth:`extract`.
         """
-        job = self.submit_extract_advanced(
+        job = await self.submit_extract_advanced(
             file_path,
             parse_mode=parse_mode,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
-    def classify(
+    async def classify(
         self,
         file_path: str | Path,
         *,
@@ -2003,23 +1573,18 @@ class HyperAPIClient:
         ``non_domain_label``, ``non_domain_exit_label``, ``confusion_neighbors``,
         and the token/page budgets (``start_token_budget``, ``end_token_budget``,
         ``max_start_pages``, ``max_end_pages``).
-
-        Returns:
-            Response envelope. The prediction is one level under ``result``:
-            ``result["result"]["document_type"]`` (e.g. ``"invoice"``), with
-            ``confidence`` (a categorical label such as ``"very_high"``, not a
-            float), ``domain``, and ``needs_review`` alongside it. Raw OCR is at
-            the envelope top level in ``result["ocr_text"]``.
         """
-        job = self.submit_classify(
+        job = await self.submit_classify(
             file_path,
             mode=mode,
             options=options,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
-    def split(
+    async def split(
         self,
         file_path: str | Path,
         *,
@@ -2035,23 +1600,18 @@ class HyperAPIClient:
         ``use_thinking``, ``segment_classes``, ``extend_segment_classes``,
         and ``custom_domain_guidelines`` (its ``domain_name`` sub-field is
         required when the object is supplied).
-
-        Returns:
-            Response envelope. The detected parts are at
-            ``result["result"]["segmentation"]["splits"]`` — a list where each
-            item has ``split_label``, ``start_page``, ``end_page``,
-            ``confidence``, and ``sub_documents``. (Note the ``segmentation``
-            wrapper: this is one level deeper than the other operations' payloads.)
         """
-        job = self.submit_split(
+        job = await self.submit_split(
             file_path,
             mode=mode,
             options=options,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
-    def redact(
+    async def redact(
         self,
         file_path: str | Path,
         *,
@@ -2065,23 +1625,22 @@ class HyperAPIClient:
         """Redact or deidentify PII in a document. Submits async + polls until done.
 
         ``mode="redact"`` masks PII with black boxes; ``mode="deidentify"``
-        overlays synthetic replacements. ``include_logos=True`` also detects and
-        masks logos. ``pii_config`` customizes the detected PII type set.
-
-        Returns:
-            Response envelope with ``result`` containing ``images`` (redacted
-            pages), ``updated_text_block``, and a ``summary`` of masked counts.
+        overlays synthetic replacements. ``include_logos=True`` also masks logos.
+        ``pii_config`` customizes the detected PII type set. Returns the response
+        envelope with ``result`` (``images``, ``updated_text_block``, ``summary``).
         """
-        job = self.submit_redact(
+        job = await self.submit_redact(
             file_path,
             mode=mode,
             pii_config=pii_config,
             include_logos=include_logos,
             use_presigned=use_presigned,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
-    def edit_detect(
+    async def edit_detect(
         self,
         file_path: str | Path,
         *,
@@ -2108,12 +1667,14 @@ class HyperAPIClient:
             URLs are short-lived — download them promptly, or re-poll the job
             with :py:meth:`get_job` to have the server mint fresh ones.
         """
-        job = self.submit_edit_detect(
+        job = await self.submit_edit_detect(
             file_path,
             markdown_assist=markdown_assist,
             use_presigned=use_presigned,
         )
-        envelope = self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        envelope = await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
         # The server's envelope has no field pointing back at the job, but the
         # fill leg needs exactly that — surface it so callers don't have to
         # hold onto the Job separately.
@@ -2121,7 +1682,7 @@ class HyperAPIClient:
             envelope.setdefault("detect_job_id", job.job_id)
         return envelope
 
-    def edit_fill(
+    async def edit_fill(
         self,
         detect_job_id: str,
         *,
@@ -2142,15 +1703,17 @@ class HyperAPIClient:
             when ``natural_language=True``) and ``result["result"]["pages"]``
             (the rendered pages, as presigned ``image_url`` s).
         """
-        job = self.submit_edit_fill(
+        job = await self.submit_edit_fill(
             detect_job_id,
             values=values,
             content=content,
             natural_language=natural_language,
         )
-        return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
+        return await self.wait_for_job(
+            job, timeout=poll_timeout, interval=poll_interval
+        )
 
-    def edit(
+    async def edit(
         self,
         file_path: str | Path,
         *,
@@ -2187,14 +1750,14 @@ class HyperAPIClient:
         if not (content or "").strip():
             raise ValueError("edit() requires non-empty content=")
 
-        detected = self.edit_detect(
+        detected = await self.edit_detect(
             file_path,
             markdown_assist=markdown_assist,
             poll_timeout=poll_timeout,
             poll_interval=poll_interval,
         )
         detect_job_id = detected["detect_job_id"]
-        filled = self.edit_fill(
+        filled = await self.edit_fill(
             detect_job_id,
             content=content,
             natural_language=True,
@@ -2210,31 +1773,23 @@ class HyperAPIClient:
             "pages": fill_payload.get("pages") or [],
         }
 
-    def download_pages(
+    async def download_pages(
         self,
         result: dict,
         dest_dir: str | Path,
         *,
         prefix: str = "page",
     ) -> list[Path]:
-        """Download a result's page images to a folder.
+        """Download a result's page images to a folder. Async mirror of the sync client's
+        :py:meth:`~hyperapi.client.HyperAPIClient.download_pages`.
 
-        Works with whatever you just got back — :py:meth:`edit_detect` (the blank detected
-        pages), :py:meth:`edit_fill` / :py:meth:`edit` (the filled ones), or
-        :py:meth:`parse` with ``include_image=True``. Files are written as
-        ``<dest_dir>/<prefix>-<page number>.png``; the directory is created if needed.
+        Works with :py:meth:`edit_detect` (blank detected pages), :py:meth:`edit_fill` /
+        :py:meth:`edit` (filled pages), or :py:meth:`parse` with ``include_image=True``.
+        Files land at ``<dest_dir>/<prefix>-<page number>.png``. Pages are downloaded
+        concurrently.
 
-        Page images are served as **short-lived presigned URLs** (~15 min), so download
-        promptly. If they have expired, re-poll with :py:meth:`get_job` — the server mints
-        fresh URLs for the full 24 h the job lives — and call this again.
-
-        Args:
-            result: The dict returned by an op that produced page images.
-            dest_dir: Folder to write into. Created if it does not exist.
-            prefix: Filename stem; defaults to ``page`` → ``page-1.png``.
-
-        Returns:
-            The written paths, in page order.
+        Presigned URLs live ~15 min. If they have expired, re-poll with :py:meth:`get_job`
+        for fresh ones (the job itself survives 24 h) and call this again.
 
         Raises:
             ValueError: If the result carries no pages, or a page has no ``image_url``.
@@ -2243,19 +1798,19 @@ class HyperAPIClient:
         targets = _page_targets(result, dest_dir, prefix)
         Path(dest_dir).mkdir(parents=True, exist_ok=True)
 
-        written: list[Path] = []
-        for url, path in targets:
+        async def _one(url: str, path: Path) -> Path:
             # Presigned URLs carry their own SigV4 signature — send no API-key headers.
             # follow_redirects: S3 answers a cross-region GET with a 307 to the regional
             # endpoint, which would otherwise surface as a baffling "HTTP 307".
-            resp = self._client.get(url, follow_redirects=True)
+            resp = await self._client.get(url, follow_redirects=True)
             if resp.status_code >= 400:
                 raise _download_error(path, resp.status_code)
             path.write_bytes(resp.content)
-            written.append(path)
-        return written
+            return path
 
-    def process(
+        return list(await asyncio.gather(*(_one(u, p) for u, p in targets)))
+
+    async def process(
         self,
         file_path: str | Path | None = None,
         *,
@@ -2266,30 +1821,31 @@ class HyperAPIClient:
         """Parse and extract in one call.
 
         Uploads the document once, then submits the parse and extract legs
-        back-to-back (two sequential POSTs from the SDK). The platform runs
-        the two legs concurrently on the backend, reusing the shared
-        ``document_key`` so OCR is computed once, so total wall-clock time
-        ≈ max(parse, extract) + a small polling overhead, not their sum.
-        Polls both jobs round-robin via ``wait_for_jobs``.
+        back-to-back. The platform runs the two legs concurrently on the
+        backend; the SDK polls both jobs concurrently via ``asyncio.gather``.
+        Total wall-clock ≈ max(parse, extract) + small polling overhead.
 
         Returns:
             ``{"ocr": <parse text>, "data": <extract structured fields>}``
         """
         path = self._resolve_path(file_path, image_path)
-        document_key = self.upload_document(path)
-        parse_job = self._submit_via_doc_key(
+        document_key = await self.upload_document(path)
+        # The two submissions could in principle be gathered too, but keeping
+        # them sequential matches the sync client's behavior and the backend
+        # router serializes them anyway through the shared document_key.
+        parse_job = await self._submit_via_doc_key(
             "/v1/parse",
             "parse",
             document_key,
             params={},
         )
-        extract_job = self._submit_via_doc_key(
+        extract_job = await self._submit_via_doc_key(
             "/v1/extract",
             "extract",
             document_key,
             params={},
         )
-        results = self.wait_for_jobs(
+        results = await self.wait_for_jobs(
             [parse_job, extract_job],
             timeout=poll_timeout,
             interval=poll_interval,
@@ -2302,12 +1858,12 @@ class HyperAPIClient:
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
         """Close the underlying HTTP client and release its connection pool."""
-        self._client.close()
+        await self._client.aclose()
 
-    def __enter__(self) -> HyperAPIClient:
+    async def __aenter__(self) -> AsyncHyperAPIClient:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.aclose()

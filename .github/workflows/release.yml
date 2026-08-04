@@ -1,0 +1,82 @@
+name: Release
+
+# Builds and publishes the SDK to PyPI when a tag matching `v*` is pushed.
+#
+# This workflow uses **PyPI Trusted Publishers (OIDC)** — no API token in repo
+# secrets, no long-lived credentials anywhere. The maintainer must register the
+# binding once at https://pypi.org/manage/account/publishing/ for this repo +
+# the `release` environment configured below.
+#
+# Tag protection on `v*` is recommended (Settings → Tags → Protected tags) so
+# only repo admins can cut releases.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write   # required for PyPI Trusted Publishers (OIDC)
+
+jobs:
+  test:
+    name: Test on Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check hyperapi/
+      - name: Test
+        run: pytest tests/ -v --tb=short
+
+  build-and-publish:
+    name: Build wheel + sdist, publish via OIDC
+    runs-on: ubuntu-latest
+    needs: test
+    environment:
+      name: release
+      url: https://pypi.org/project/hyperapi/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: pip install build twine
+
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION="v$(python -c 'import hyperapi; print(hyperapi.__version__)')"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag $TAG does not match package version $VERSION"
+            exit 1
+          fi
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Validate metadata + README rendering
+        run: twine check dist/*
+
+      - name: Publish to PyPI (OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No `password:` — Trusted Publishers handle the auth via OIDC.
+
+      - name: Upload built artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 90

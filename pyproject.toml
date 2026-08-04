@@ -3,19 +3,18 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hyperapi-sdk"
-version = "0.1.0"
-description = "HyperAPI Python SDK - Financial document processing APIs"
+name = "hyperapi"
+version = "0.6.0"
+description = "HyperAPI Python SDK - Document intelligence APIs (parse, extract, classify, split, redact)"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [
     {name = "HyperAPI", email = "research@hyperbots.com"}
 ]
-license = {text = "MIT"}
+license = "MIT"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -23,22 +22,48 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 keywords = ["ocr", "document-processing", "invoice", "financial", "api"]
 dependencies = [
-    "httpx>=0.25.0",
+    "httpx>=0.25.0,<1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.23.0",
+    "respx>=0.20.0",
+    "ruff==0.8.6",
+    "pre-commit>=4.0.0",
 ]
+socks = [
+    "httpx[socks]>=0.25.0,<1.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+# asyncio_mode = "auto" lets async test functions run without per-test
+# @pytest.mark.asyncio decorators — every `async def test_*` is collected.
+asyncio_mode = "auto"
 
 [project.urls]
 Homepage = "https://apis.hyperbots.com"
-Repository = "https://github.com/hyperapi/hyperapi-sdk"
-Issues = "https://github.com/hyperapi/hyperapi-sdk/issues"
+Documentation = "https://apis.hyperbots.com/docs"
+Repository = "https://github.com/hyprbots/hyperapi-sdk"
+Issues = "https://github.com/hyprbots/hyperapi-sdk/issues"
+Changelog = "https://github.com/hyprbots/hyperapi-sdk/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["hyperapi*"]
+
+[tool.setuptools.package-data]
+hyperapi = ["py.typed"]
