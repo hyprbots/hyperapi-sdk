@@ -23,7 +23,7 @@ from .exceptions import (
     SplitError,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.0.0"
 
 # Library-style logger: silent unless the application configures handlers.
 # Customers opt in with: `logging.getLogger("hyperapi").setLevel(logging.INFO)`.

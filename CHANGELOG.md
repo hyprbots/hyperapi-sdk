@@ -5,10 +5,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- Prepare the SDK for its first packaged release.
-
-## [0.6.0] - 2026-08-04
-
 ### Added
 
 - Synchronous and asynchronous clients for parse, extract, classify, split,
