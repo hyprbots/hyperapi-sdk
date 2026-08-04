@@ -218,9 +218,21 @@ Basic `extract()` runs the tier you select with `category`; **Advanced**
 `extract_advanced()` auto-detects the document type for you (no `category`).
 
 ```python
-# Basic — you declare the document family
+# Basic Financial: HyperAPI uses the invoice and receipt fields
 fields = client.extract("invoice.pdf")                        # category="financial" (default)
-fields = client.extract("policy.pdf", category="non_financial")
+
+# Basic Other: define the exact output shape for this request
+schema = {
+    "policy_number": None,
+    "active": False,
+    "coverage": {"medical": "unselected"},
+}
+fields = client.extract(
+    "policy.pdf",
+    category="non_financial",
+    schema=schema,
+)
+print(fields["result"]["data"])
 
 # Advanced — auto-detects the type, no category to pick
 fields = client.extract_advanced("mixed_document.pdf")
@@ -651,7 +663,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 |--------|----------|-------------|
 | `upload_document(file)` | presigned upload | Upload file, returns `document_key` (valid 24 h). |
 | `parse(file)` | OCR only | Parse document into structured text. Submit + poll under the hood. |
-| `extract(file, *, category="financial")` | OCR → structured extraction | Basic extractor. `category="financial"` (default) or `"non_financial"`. Submit + poll. |
+| `extract(file, *, category="financial", schema=None)` | OCR → structured extraction | Basic extractor. Financial uses the built-in fields. Other (`non_financial`) accepts a JSON output schema. Submit + poll. |
 | `extract_advanced(file)` | OCR → structured extraction | Advanced extractor — auto-detects the document type (no `category`). Submit + poll. |
 | `classify(file)` | OCR → classification | Classify document type. Submit + poll. |
 | `split(file)` | OCR → document splitting | Split multi-document binders. Submit + poll. |
@@ -676,6 +688,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 |-----------|------|---------|-------------|
 | `mode` (parse) | `"fast"` \| `"advanced"` | `"fast"` | parse — `"advanced"` adds per-page `structured` layout |
 | `category` (extract) | `"financial"` \| `"non_financial"` | `"financial"` | extract — Basic extractor profile; `extract_advanced()` auto-detects instead (no `category`) |
+| `schema` (extract) | `dict \| str \| Path \| None` | `None` | Basic + Other only (`category="non_financial"`): blank JSON template that defines the output shape for this request |
 | `mode` (classify / split) | `str` | `"default"` | classify / split — task selector |
 | `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |
 | `options` | `dict \| None` | `None` | classify / split — service knobs, sent as a JSON form field |
