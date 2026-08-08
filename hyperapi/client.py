@@ -750,10 +750,21 @@ class HyperAPIClient:
         *,
         params: dict[str, Any],
         use_presigned: bool,
+        force_refresh: bool = False,
         data: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> Job:
         """Submit a pipeline op asynchronously. Returns a Job handle.
+
+        ``force_refresh=True`` adds ``?force_refresh=true``, which makes the
+        router skip its Stage-2 result cache and genuinely reprocess. Without it
+        an identical (document + task + params) returns the STORED result — the
+        production TTL is 24h — so a retry can look like a no-op. Only send it
+        when the caller explicitly asked to re-run: a bypass re-runs OCR and the
+        LLM and is billed at full price, where a cache hit costs nothing.
+
+        Omitted entirely when False so an ordinary request is byte-identical to
+        before this parameter existed.
 
         ``data`` carries extra form fields beyond ``document_key`` (e.g. redact's
         ``pii_config``), sent in the form body alongside ``document_key``.
@@ -786,7 +797,7 @@ class HyperAPIClient:
             response = self._client.post(
                 f"{self.base_url}{endpoint}",
                 data={"document_key": document_key, **extra_form},
-                params=params,
+                params={**params, "force_refresh": "true"} if force_refresh else params,
                 headers=headers,
                 timeout=request_timeout,
             )
@@ -1408,6 +1419,7 @@ class HyperAPIClient:
         category: ExtractCategory = "financial",
         parse_mode: ParseMode | None = None,
         schema: dict | str | Path | None = None,
+        force_refresh: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a Basic extract job asynchronously and return immediately.
@@ -1460,6 +1472,7 @@ class HyperAPIClient:
                 **({"parse_mode": parse_mode} if parse_mode is not None else {}),
             },
             data=data,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
 
@@ -1498,6 +1511,7 @@ class HyperAPIClient:
         *,
         mode: str = "default",
         options: dict | None = None,
+        force_refresh: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a classify job asynchronously and return immediately.
@@ -1535,6 +1549,7 @@ class HyperAPIClient:
             path,
             params={"mode": mode},
             data=data,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
 
@@ -1544,6 +1559,7 @@ class HyperAPIClient:
         *,
         mode: str = "default",
         options: dict | None = None,
+        force_refresh: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a split job asynchronously and return immediately.
@@ -1564,6 +1580,7 @@ class HyperAPIClient:
             path,
             params={"mode": mode},
             data=data,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
 
@@ -1574,6 +1591,7 @@ class HyperAPIClient:
         mode: str = "redact",
         pii_config: dict | None = None,
         include_logos: bool = False,
+        force_refresh: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a redact/deidentify job asynchronously and return immediately.
@@ -1595,6 +1613,7 @@ class HyperAPIClient:
             path,
             params={"mode": mode, "include_logos": include_logos},
             data=data,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
 
@@ -1914,6 +1933,7 @@ class HyperAPIClient:
         category: ExtractCategory = "financial",
         parse_mode: ParseMode | None = None,
         schema: dict | str | Path | None = None,
+        force_refresh: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1957,6 +1977,7 @@ class HyperAPIClient:
             category=category,
             parse_mode=parse_mode,
             schema=schema,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -1989,6 +2010,7 @@ class HyperAPIClient:
         *,
         mode: str = "default",
         options: dict | None = None,
+        force_refresh: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -2015,6 +2037,7 @@ class HyperAPIClient:
             file_path,
             mode=mode,
             options=options,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -2025,6 +2048,7 @@ class HyperAPIClient:
         *,
         mode: str = "default",
         options: dict | None = None,
+        force_refresh: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -2047,6 +2071,7 @@ class HyperAPIClient:
             file_path,
             mode=mode,
             options=options,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
@@ -2058,6 +2083,7 @@ class HyperAPIClient:
         mode: str = "redact",
         pii_config: dict | None = None,
         include_logos: bool = False,
+        force_refresh: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -2077,6 +2103,7 @@ class HyperAPIClient:
             mode=mode,
             pii_config=pii_config,
             include_logos=include_logos,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
