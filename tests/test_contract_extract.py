@@ -59,7 +59,10 @@ def test_extract_default_path_uses_async(mock_backend, client, tiny_pdf):
     # Basic extract carries only `category`; `mode` was removed (it silently ran
     # Basic and never reached Advanced — Advanced is extract_advanced()).
     assert "mode" not in submit_req.url.params
-    assert submit_req.url.params["category"] == "financial"
+    # Omitted so the router's request > org > platform precedence can reach
+    # the org tier. Sending it unconditionally is what made an org's
+    # defaults.extract_category unreachable from the SDK.
+    assert "category" not in submit_req.url.params
     assert poll_route.called
 
 

@@ -52,7 +52,7 @@ def _seed_completed(mock_backend, *, job_id, path):
     return submit, poll
 
 
-def test_basic_extract_defaults_to_financial(mock_backend, client, tiny_pdf):
+def test_basic_extract_omits_category_by_default(mock_backend, client, tiny_pdf):
     _seed_presigned(mock_backend)
     submit, _ = _seed_completed(mock_backend, job_id="j_fin", path="/v1/extract")
 
@@ -60,7 +60,7 @@ def test_basic_extract_defaults_to_financial(mock_backend, client, tiny_pdf):
 
     req = submit.calls[0].request
     assert req.url.path == "/v1/extract"
-    assert req.url.params["category"] == "financial"
+    assert "category" not in req.url.params
 
 
 def test_basic_extract_non_financial_sets_category(mock_backend, client, tiny_pdf):
@@ -103,7 +103,7 @@ def test_submit_extract_advanced_returns_job_no_polling(mock_backend, client, ti
 
 
 # ── async mirrors (the async client is a hand-maintained parallel impl) ────────
-async def test_async_basic_extract_defaults_to_financial(
+async def test_async_basic_extract_omits_category_by_default(
     mock_backend, async_client, tiny_pdf
 ):
     _seed_presigned(mock_backend)
@@ -113,7 +113,7 @@ async def test_async_basic_extract_defaults_to_financial(
 
     req = submit.calls[0].request
     assert req.url.path == "/v1/extract"
-    assert req.url.params["category"] == "financial"
+    assert "category" not in req.url.params
 
 
 async def test_async_basic_extract_non_financial_sets_category(
@@ -181,7 +181,7 @@ def test_basic_extract_advanced_parse_mode_sets_param(mock_backend, client, tiny
 
     req = submit.calls[0].request
     assert req.url.params["parse_mode"] == "advanced"
-    assert req.url.params["category"] == "financial"  # orthogonal to category
+    assert "category" not in req.url.params  # orthogonal to category
 
 
 def test_basic_extract_explicit_fast_sets_param(mock_backend, client, tiny_pdf):

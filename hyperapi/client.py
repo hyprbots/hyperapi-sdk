@@ -1416,7 +1416,7 @@ class HyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        category: ExtractCategory = "financial",
+        category: ExtractCategory | None = None,
         parse_mode: ParseMode | None = None,
         schema: dict | str | Path | None = None,
         force_refresh: bool = False,
@@ -1424,7 +1424,8 @@ class HyperAPIClient:
     ) -> Job:
         """Submit a Basic extract job asynchronously and return immediately.
 
-        ``category`` selects the Basic extractor: ``"financial"`` (default —
+        ``category`` selects the Basic extractor. Omit it to use the organization
+        default (platform default: ``"financial"``). ``"financial"`` (
         the two-leg IDP adapter for invoices/receipts) or ``"non_financial"``
         (extract-fast — see ``schema`` below). For auto-detecting Advanced
         extraction, use :py:meth:`submit_extract_advanced`.
@@ -1453,11 +1454,21 @@ class HyperAPIClient:
         # ignored server-side. Silently dropping it would return plausible
         # output shaped by a different extractor, with nothing to tell the
         # caller their template never applied — so this fails loudly instead.
-        if resolved_schema is not None and category != "non_financial":
+        if resolved_schema is not None and category == "financial":
             raise ValueError(
                 'schema applies to category="non_financial" only '
                 f'(got category="{category}")'
             )
+        # A schema with no declared category: send non_financial explicitly rather
+        # than deferring. The SDK cannot read the org's default (that endpoint is
+        # JWT-only, unreachable with an API key), so deferring would risk resolving
+        # to financial — where the server ignores `schema` silently and the caller
+        # gets invoice-shaped output with no indication their template was dropped.
+        # Passing a schema is only meaningful on non_financial, so inferring it is
+        # faithful to the caller's intent and closes the one undetectable failure.
+        effective_category = (
+            "non_financial" if category is None and resolved_schema is not None else category
+        )
         data = (
             {"schema": json.dumps(resolved_schema)}
             if resolved_schema is not None
@@ -1468,7 +1479,11 @@ class HyperAPIClient:
             "extract",
             path,
             params={
-                "category": category,
+                # Omitted when None so the router's request > org > platform
+                # precedence can reach the org tier — same mechanism `parse_mode`
+                # below already uses. Sending a value unconditionally is what made
+                # an org's `defaults.extract_category` unreachable from the SDK.
+                **({"category": effective_category} if effective_category is not None else {}),
                 **({"parse_mode": parse_mode} if parse_mode is not None else {}),
             },
             data=data,
@@ -1930,7 +1945,7 @@ class HyperAPIClient:
         self,
         file_path: str | Path,
         *,
-        category: ExtractCategory = "financial",
+        category: ExtractCategory | None = None,
         parse_mode: ParseMode | None = None,
         schema: dict | str | Path | None = None,
         force_refresh: bool = False,
