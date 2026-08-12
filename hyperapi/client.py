@@ -1348,6 +1348,7 @@ class HyperAPIClient:
         mode: ParseMode | None = None,
         include_boxes: bool = False,
         include_image: bool = False,
+        force_refresh: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a parse job asynchronously and return immediately.
@@ -1371,6 +1372,15 @@ class HyperAPIClient:
         ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
         to each ``result["result"]["pages"]`` entry, pointing to the deskew-corrected
         page image.
+
+        ``force_refresh=True`` re-runs OCR instead of returning the stored
+        result. Parse has no LLM stage, so what it caches — and what this
+        bypasses — is the OCR output itself, for 24h in production. Without it
+        a retry after a bad parse returns the same bad parse for the rest of
+        the day. Covers both ``mode="fast"`` and ``mode="advanced"``, which sit
+        in separate cache namespaces. A forced run is billed at full price
+        where a cached one costs nothing, so send it only when the caller
+        explicitly asked to re-run.
 
         Large documents
         ---------------
@@ -1409,6 +1419,7 @@ class HyperAPIClient:
                 "include_boxes": include_boxes,
                 "include_image": include_image,
             },
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
 
@@ -1888,6 +1899,7 @@ class HyperAPIClient:
         mode: ParseMode | None = None,
         include_boxes: bool = False,
         include_image: bool = False,
+        force_refresh: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
@@ -1915,6 +1927,8 @@ class HyperAPIClient:
                 includes an ``image_url`` (presigned GET for the deskew-corrected
                 page) and ``dimensions`` (``{"width", "height"}`` in that image's
                 pixel space, which matches the box coordinate space).
+            force_refresh: Re-run OCR instead of returning the cached result
+                (24h TTL in production). See :py:meth:`submit_parse`.
             use_presigned: Use the presigned-S3 upload flow (default True).
             poll_timeout: Override the constructor's poll_timeout for this call.
             poll_interval: Override the constructor's poll_interval for this call.
@@ -1937,6 +1951,7 @@ class HyperAPIClient:
             mode=mode,
             include_boxes=include_boxes,
             include_image=include_image,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
         return self.wait_for_job(job, timeout=poll_timeout, interval=poll_interval)
