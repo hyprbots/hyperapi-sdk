@@ -119,6 +119,17 @@ print(page["structured"]["markdown"])   # layout-aware markdown
 print(page["structured"]["regions"])    # typed regions with bounding boxes
 ```
 
+Re-parsing the same document returns the **cached** OCR output — 24h in
+production — so a retry after a bad parse hands back the same bad parse. Pass
+`force_refresh=True` to re-run OCR and overwrite the stored result:
+
+```python
+result = client.parse("annual_report.pdf", mode="advanced", force_refresh=True)
+```
+
+A forced run is billed at full price where a cached one costs nothing, so use
+it when a result actually looks wrong — not as a default.
+
 ### Large documents (beyond the advanced page cap)
 
 Advanced parse normally caps at **60 pages / 50 MB** — past either limit the

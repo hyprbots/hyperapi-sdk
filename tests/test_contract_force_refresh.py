@@ -49,6 +49,7 @@ OPS = [
     ("classify", "/v1/classify"),
     ("split", "/v1/split"),
     ("extract", "/v1/extract"),
+    ("parse", "/v1/parse"),
 ]
 
 
@@ -88,4 +89,22 @@ def test_submit_variants_accept_it_too(client, mock_backend, tmp_path):
 
     client.submit_redact(doc, force_refresh=True)
 
+    assert "force_refresh=true" in str(submit.calls.last.request.url)
+
+
+def test_submit_parse_forwards_force_refresh(client, mock_backend, tmp_path):
+    """`parse()` polls to completion, but callers who submit and poll manually
+    go through `submit_parse` — the bypass has to be reachable from both.
+
+    Parse is the odd one out: it has no Stage-2 result cache, so what it
+    bypasses is the Stage-1 OCR cache. Same flag, same 24h production TTL.
+    """
+    _seed_presigned(mock_backend)
+    submit = _seed_job(mock_backend, "/v1/parse", job_id="job_submit_parse")
+    doc = tmp_path / "a.pdf"
+    doc.write_bytes(b"%PDF-1.4 x")
+
+    client.submit_parse(doc, force_refresh=True)
+
+    assert submit.called
     assert "force_refresh=true" in str(submit.calls.last.request.url)
