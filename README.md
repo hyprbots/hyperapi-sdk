@@ -457,13 +457,46 @@ with `get_job(job_id)` for fresh ones (the job lives 24 h) and call it again.
 
 ```python
 # List the org's recent jobs (summary rows, newest first)
-for row in client.list_recent_jobs(limit=10, source="api"):
+for row in client.list_recent_jobs(limit=100, source="api"):
     print(row["job_id"], row["task"], row["status"])
 
 # Cancel an in-flight job (idempotent; completed jobs keep their result)
 job = client.submit_extract("big_binder.pdf")
 client.delete_job(job.job_id)
 ```
+
+### Recovering which job belongs to which document
+
+Each summary row carries a `document_key` — the server-side handle for that
+job's document — alongside `filename`. If you are reconciling a batch, match on
+`document_key` and not on `filename`: `filename` is whatever was sent at upload
+and is not required to be unique, so fifty documents named `invoice.pdf`
+produce fifty rows you cannot tell apart.
+
+```python
+for row in client.list_recent_jobs(limit=100):
+    print(row["job_id"], row["document_key"], row["filename"], row["status"])
+```
+
+The robust pattern with this SDK is to keep the `job_id` at submit time —
+`submit_*` returns a `Job` immediately, so the mapping costs nothing:
+
+```python
+submitted = {}
+for path in paths:
+    job = client.submit_parse(path)
+    submitted[job.job_id] = path        # your own record
+
+for job_id, path in submitted.items():
+    print(path, client.get_job(job_id).status)
+```
+
+> **Note.** `submit_*` performs the upload internally and does not surface the
+> `document_key` it used, and no public method accepts a pre-uploaded
+> `document_key`. So while `document_key` identifies rows uniquely, you cannot
+> currently pre-compute it to build your own key→file map through the SDK —
+> retain the `job_id` instead. `document_key` is also `None` on jobs created
+> before 2026-08-17, and the listing only covers the last 24 hours.
 
 ## Batch API (async, deferred)
 
