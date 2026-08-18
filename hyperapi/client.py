@@ -986,11 +986,22 @@ class HyperAPIClient:
 
         Returns:
             A list of summary dicts (``job_id``, ``request_id``, ``status``,
-            ``task``, ``endpoint``, ``pages``, ``filename``, ``source``,
-            ``is_test``, ``created_at``, ``completed_at``, ``error``).
+            ``task``, ``endpoint``, ``pages``, ``filename``, ``document_key``,
+            ``source``, ``is_test``, ``created_at``, ``completed_at``,
+            ``error``).
             ``status`` may be ``"cancelled"`` for jobs stopped via
             :py:meth:`delete_job`. Summaries never include results — fetch
             the full envelope for one job with :py:meth:`get_job`.
+
+            ``document_key`` is the server-side handle for that job's
+            document, and is what to match on when reconciling a batch —
+            ``filename`` is whatever was sent at upload and carries no
+            uniqueness guarantee, so fifty documents named ``invoice.pdf``
+            yield fifty rows you cannot tell apart. Note that ``submit_*``
+            uploads internally and does not surface the ``document_key`` it
+            used, and no public method accepts a pre-uploaded one, so retain
+            the ``job_id`` if you need your own file→job map. ``None`` on jobs
+            created before 2026-08-17.
         """
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
