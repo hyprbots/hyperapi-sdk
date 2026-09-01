@@ -1633,6 +1633,12 @@ class HyperAPIClient:
     ) -> Job:
         """Submit a redact/deidentify job asynchronously and return immediately.
 
+
+        Documents are capped at **36 pages** for redact: an over-cap document
+        returns ``413`` up front, before any OCR is billed. Read the live cap
+        from ``GET /v1/limits`` (or the ``limits`` object on the upload
+        response) rather than hardcoding it — see README "Limits by operation".
+
         ``mode="redact"`` applies black boxes; ``mode="deidentify"`` overlays
         synthetic values. ``pii_config`` (``{"mode": "extend"|"replace",
         "types": [...]}``) customizes the detected PII types. Built-in types
@@ -2130,6 +2136,12 @@ class HyperAPIClient:
         poll_interval: float | None = None,
     ) -> dict:
         """Redact or deidentify PII in a document. Submits async + polls until done.
+
+
+        Documents are capped at **36 pages** for redact: an over-cap document
+        returns ``413`` up front, before any OCR is billed. Read the live cap
+        from ``GET /v1/limits`` (or the ``limits`` object on the upload
+        response) rather than hardcoding it — see README "Limits by operation".
 
         ``mode="redact"`` masks PII with black boxes; ``mode="deidentify"``
         overlays synthetic replacements. ``include_logos=True`` also detects and
