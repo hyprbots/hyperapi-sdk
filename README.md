@@ -212,6 +212,28 @@ while (envelope := client.get_job(job.job_id))["status"] == "pending":
 > window). Pass a deadline that matches the document, e.g.
 > `client.parse(..., poll_timeout=7200)`.
 
+## Limits by operation
+
+Upload accepts any supported file up to your byte ceiling, but each operation
+enforces its own page ceiling when the document is submitted — **before** any
+billable processing runs. "—" means no page rejection for that operation.
+
+| Operation | Max upload | Max pages | Notes |
+|---|---|---|---|
+| Parse (fast) | 50 MB | — | Never page-capped |
+| Parse (advanced) | 50 MB | 60 | Raised to 500 pages / 512 MiB for the narrow bulk case above |
+| Extract (fast) | 50 MB | — | Never page-capped |
+| Extract (advanced) | 50 MB | 60 | Same cap as advanced parse |
+| Classify | 50 MB | — | Reads the first pages it needs |
+| Split | 50 MB | — | |
+| Redact / Deidentify | 50 MB | 36 | Over-cap documents return `413` up front, before any OCR is billed |
+
+Don't hardcode these numbers: `GET /v1/limits` returns your organization's
+effective ceilings, and the same `limits` object rides on every
+`/v1/documents/upload` response. Asynchronous submissions return `200` when
+the job is *accepted* — the final verdict, including a limit rejection, lands
+on the job record you poll.
+
 ## Extract: Basic vs Advanced
 
 Basic `extract()` runs the tier you select with `category`; **Advanced**
@@ -281,6 +303,10 @@ the top-level `mode=` keyword (task selector) — they travel in different parts
 of the request.
 
 ## Redact / Deidentify
+
+> Documents are capped at **36 pages** for redact — over-cap files return `413`
+> before any processing is billed. See [Limits by operation](#limits-by-operation).
+
 
 `redact()` masks PII with black boxes; `mode="deidentify"` overlays synthetic
 replacements instead. Built-in PII types: PERSON_NAME, COMPANY_NAME, EMAIL,
