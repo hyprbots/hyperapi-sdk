@@ -137,3 +137,33 @@ async def test_async_expired_url_reports_as_expired(mock_backend, async_client, 
 
     with pytest.raises(HyperAPIError, match="expired"):
         await async_client.download_pages(_edit_result(), tmp_path)
+
+
+def _redact_urls_result():
+    """redact(output="urls") — the streaming mode's page-dict shape. Same
+    {page_number, image_url} contract as parse, .png extension, nested under
+    result.result like every envelope."""
+    return {
+        "status": "success",
+        "result": {
+            "output": "urls",
+            "summary": {"PERSON_NAME": 2},
+            "pages": [
+                {"page_number": 1, "image_url": "https://s3.local/snap/redacted/0.png?sig=r0"},
+                {"page_number": 2, "image_url": "https://s3.local/snap/redacted/1.png?sig=r1"},
+            ],
+        },
+    }
+
+
+def test_downloads_streaming_redact_pages(mock_backend, client, tmp_path):
+    """The README promises download_pages() accepts redact output="urls" as-is."""
+    mock_backend.get("https://s3.local/snap/redacted/0.png?sig=r0").mock(
+        return_value=httpx.Response(200, content=PNG))
+    mock_backend.get("https://s3.local/snap/redacted/1.png?sig=r1").mock(
+        return_value=httpx.Response(200, content=PNG))
+
+    paths = client.download_pages(_redact_urls_result(), tmp_path)
+
+    assert [p.name for p in paths] == ["page-1.png", "page-2.png"]
+    assert paths[0].read_bytes() == PNG
