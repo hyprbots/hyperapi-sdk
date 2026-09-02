@@ -1249,6 +1249,11 @@ class AsyncHyperAPIClient:
         and CREDENTIALS (passwords, API keys, tokens, secrets) — all with
         synthetic replacements, so each works in both modes.
         """
+        if output not in ("inline", "urls"):
+            # Fail loudly client-side: only the non-default literal goes on the
+            # wire, so a typo ("url", "URLS") would otherwise silently run
+            # inline at the 36-page cap with no server-side rejection possible.
+            raise ValueError(f'output must be "inline" or "urls", got {output!r}')
         path = self._resolve_path(file_path)
         data = (
             {"pii_config": json.dumps(pii_config)} if pii_config is not None else None

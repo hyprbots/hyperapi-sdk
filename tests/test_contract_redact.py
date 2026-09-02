@@ -139,3 +139,13 @@ def test_redact_use_presigned_false_falls_back_to_presigned_with_pii_config(mock
     body = req.content.decode("utf-8", errors="ignore")
     assert "document_key=doc_rd" in body           # presigned document_key present
     assert "pii_config" in body and "SSN" in body  # extra form field still present
+
+
+def test_submit_redact_rejects_unknown_output_values(client):
+    """Only the non-default literal goes on the wire, so a typo would silently
+    run inline at the lower cap — fail loudly client-side instead."""
+    import pytest
+
+    for bad in ("url", "URLS", "presigned"):
+        with pytest.raises(ValueError, match="output must be"):
+            client.submit_redact("whatever.pdf", output=bad)
