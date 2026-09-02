@@ -226,7 +226,8 @@ billable processing runs. "—" means no page rejection for that operation.
 | Extract (advanced) | 50 MB | 60 | Same cap as advanced parse |
 | Classify | 50 MB | — | Reads the first pages it needs |
 | Split | 50 MB | — | |
-| Redact / Deidentify | 50 MB | 36 | Over-cap documents return `413` up front, before any OCR is billed |
+| Redact / Deidentify (inline, default) | 50 MB | 36 | Over-cap documents return `413` up front, before any OCR is billed |
+| Redact / Deidentify (`output="urls"`) | 50 MB | 60 | Masked pages come back as presigned links; offered only where `GET /v1/limits` advertises `redact.urls_max_pages` |
 
 Don't hardcode these numbers: `GET /v1/limits` returns your organization's
 effective ceilings, and the same `limits` object rides on every
@@ -316,8 +317,15 @@ secrets).
 ```python
 result = client.redact("contract.pdf", mode="deidentify", include_logos=True)
 for page_png_b64 in result["result"]["images"]:
-    ...                                  # masked page images
+    ...                                  # masked page images (inline base64)
 print(result["result"]["summary"])       # {"PERSON_NAME": 2, "EMAIL": 1, ...}
+
+# Streaming output — masked pages as short-lived presigned links instead of
+# inline base64, and a 60-page cap instead of 36. Feature-detect first:
+# GET /v1/limits advertises redact.urls_max_pages only where the mode is
+# offered. Not combinable with include_logos.
+result = client.redact("long-contract.pdf", output="urls")
+client.download_pages(result, "masked/")   # pages[*].image_url — works as-is
 
 # Customize the detected PII type set
 client.redact(
@@ -476,8 +484,10 @@ On the async client it's the same call with `await`, and pages download concurre
 If the URLs have already expired you get a clear error rather than a bare 403 — re-poll
 with `get_job(job_id)` for fresh ones (the job lives 24 h) and call it again.
 
-> `redact()` is the exception: it returns `images` as **inline base64 strings**, not URLs,
-> so there is nothing to download — decode them yourself with `base64.b64decode()`.
+> Default (inline) `redact()` is the exception: it returns `images` as **inline base64
+> strings**, not URLs, so there is nothing to download — decode them yourself with
+> `base64.b64decode()`. With `output="urls"` the result carries `pages[*].image_url`
+> instead, and `download_pages()` accepts it like any other paged result.
 
 ## Jobs Management
 

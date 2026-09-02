@@ -1225,16 +1225,22 @@ class AsyncHyperAPIClient:
         mode: str = "redact",
         pii_config: dict | None = None,
         include_logos: bool = False,
+        output: str = "inline",
         force_refresh: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a redact/deidentify job asynchronously and return immediately.
 
 
-        Documents are capped at **36 pages** for redact: an over-cap document
-        returns ``413`` up front, before any OCR is billed. Read the live cap
-        from ``GET /v1/limits`` (or the ``limits`` object on the upload
-        response) rather than hardcoding it — see README "Limits by operation".
+        Inline output is capped at **36 pages**; ``output="urls"`` raises the
+        cap to **60** where the deployment offers it (feature-detect on
+        ``redact.urls_max_pages`` in ``GET /v1/limits`` — absent means not
+        offered) and returns masked pages as short-lived presigned links in
+        ``result["pages"]`` (``{page_number, image_url}``) instead of inline
+        base64 ``result["images"]`` — ``download_pages()`` accepts that shape
+        directly. An over-cap document returns ``413`` up front, before any
+        OCR is billed; ``output="urls"`` cannot be combined with
+        ``include_logos`` (``400``). See README "Limits by operation".
 
         ``mode="redact"`` applies black boxes; ``mode="deidentify"`` overlays
         synthetic values. ``pii_config`` (``{"mode": "extend"|"replace",
@@ -1251,7 +1257,7 @@ class AsyncHyperAPIClient:
             "/v1/redact",
             "redact",
             path,
-            params={"mode": mode, "include_logos": include_logos},
+            params={"mode": mode, "include_logos": include_logos, **({"output": "urls"} if output == "urls" else {})},
             data=data,
             force_refresh=force_refresh,
             use_presigned=use_presigned,
@@ -1677,6 +1683,7 @@ class AsyncHyperAPIClient:
         mode: str = "redact",
         pii_config: dict | None = None,
         include_logos: bool = False,
+        output: str = "inline",
         force_refresh: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
@@ -1685,10 +1692,15 @@ class AsyncHyperAPIClient:
         """Redact or deidentify PII in a document. Submits async + polls until done.
 
 
-        Documents are capped at **36 pages** for redact: an over-cap document
-        returns ``413`` up front, before any OCR is billed. Read the live cap
-        from ``GET /v1/limits`` (or the ``limits`` object on the upload
-        response) rather than hardcoding it — see README "Limits by operation".
+        Inline output is capped at **36 pages**; ``output="urls"`` raises the
+        cap to **60** where the deployment offers it (feature-detect on
+        ``redact.urls_max_pages`` in ``GET /v1/limits`` — absent means not
+        offered) and returns masked pages as short-lived presigned links in
+        ``result["pages"]`` (``{page_number, image_url}``) instead of inline
+        base64 ``result["images"]`` — ``download_pages()`` accepts that shape
+        directly. An over-cap document returns ``413`` up front, before any
+        OCR is billed; ``output="urls"`` cannot be combined with
+        ``include_logos`` (``400``). See README "Limits by operation".
 
         ``mode="redact"`` masks PII with black boxes; ``mode="deidentify"``
         overlays synthetic replacements. ``include_logos=True`` also masks logos.
@@ -1700,6 +1712,7 @@ class AsyncHyperAPIClient:
             mode=mode,
             pii_config=pii_config,
             include_logos=include_logos,
+            output=output,
             force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
