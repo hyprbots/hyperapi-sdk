@@ -1376,13 +1376,27 @@ class HyperAPIClient:
         engine; noticeably slower than ``"fast"`` but, for documents under the
         page cap, well within the default ``poll_timeout``.
 
-        ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["result"]["pages"]`` (standard OCR engine only; the layout-aware engine
-        returns an empty list).
+        ``include_boxes=True`` adds to each entry of ``result["result"]["pages"]``
+        a ``boxes`` list of line boxes (``{"text", "bbox": [left, top, right,
+        bottom], "confidence"}``) and, for PDF, XPS and image inputs, a
+        ``word_boxes`` list with one entry per word carrying typography:
+        ``font``, ``size`` (in ``page_size["unit"]``), ``color``, ``bold``,
+        ``italic``, ``background`` (only where it differs from the page) and
+        ``font_source`` (``"document"`` when declared by the file's text layer,
+        ``"model"`` when estimated from the pixels, which can be wrong). Keys are
+        omitted when not stated; ``word_boxes`` is ``[]`` when none were
+        produced. Box coordinates are pixels in the page's ``dimensions``
+        space. Office documents (docx, pptx) return ``boxes`` only with
+        ``include_image=True``; ``mode="advanced"`` returns no boxes.
 
-        ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
-        to each ``result["result"]["pages"]`` entry, pointing to the deskew-corrected
-        page image.
+        PDF, XPS and image pages from ``mode="fast"`` always carry
+        ``dimensions`` (``{"width", "height"}`` in pixels), ``page_size``
+        (``{"width", "height", "unit"}``, ``"pt"`` for PDF/XPS, ``"px"`` for
+        images) and ``background`` (the page's background colour, hex).
+
+        ``include_image=True`` adds a presigned ``image_url`` to each
+        ``result["result"]["pages"]`` entry, pointing to the deskew-corrected
+        page image (plus ``dimensions`` where the page does not already carry it).
 
         ``force_refresh=True`` re-runs OCR instead of returning the stored
         result. Parse has no LLM stage, so what it caches — and what this
@@ -1948,13 +1962,20 @@ class HyperAPIClient:
                 and ``regions``). Advanced only applies on the default OCR
                 engine and is noticeably slower.
             include_boxes: When True, each ``result["result"]["pages"]`` entry
-                includes a ``boxes`` list of ``{"text", "bbox": [left, top, right,
-                bottom], "confidence"}`` segments. Standard OCR engine only; the
-                layout-aware engine returns [].
+                includes a ``boxes`` list of line boxes (``{"text", "bbox":
+                [left, top, right, bottom], "confidence"}``) and, for PDF, XPS
+                and image inputs, a ``word_boxes`` list of per-word boxes with
+                ``font``, ``size``, ``color``, ``bold``, ``italic``,
+                ``background`` and ``font_source`` (``"document"`` or
+                ``"model"``). Coordinates are pixels in the page's
+                ``dimensions`` space. ``mode="advanced"`` returns no boxes. See
+                :py:meth:`submit_parse`.
             include_image: When True, each ``result["result"]["pages"]`` entry
                 includes an ``image_url`` (presigned GET for the deskew-corrected
-                page) and ``dimensions`` (``{"width", "height"}`` in that image's
-                pixel space, which matches the box coordinate space).
+                page). ``dimensions`` (``{"width", "height"}`` in that image's
+                pixel space, which matches the box coordinate space) is present
+                on PDF, XPS and image pages in fast mode regardless, alongside
+                ``page_size`` and ``background``.
             force_refresh: Re-run OCR instead of returning the cached result
                 (24h TTL in production). See :py:meth:`submit_parse`.
             use_presigned: Use the presigned-S3 upload flow (default True).

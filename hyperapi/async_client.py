@@ -975,12 +975,27 @@ class AsyncHyperAPIClient:
         engine; noticeably slower than ``"fast"`` but, for documents under the
         page cap, well within the default ``poll_timeout``.
 
-        ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["result"]["pages"]`` (standard OCR engine only; the layout-aware engine
-        returns an empty list).
+        ``include_boxes=True`` adds to each entry of ``result["result"]["pages"]``
+        a ``boxes`` list of line boxes (``{"text", "bbox": [left, top, right,
+        bottom], "confidence"}``) and, for PDF, XPS and image inputs, a
+        ``word_boxes`` list with one entry per word carrying typography:
+        ``font``, ``size`` (in ``page_size["unit"]``), ``color``, ``bold``,
+        ``italic``, ``background`` (only where it differs from the page) and
+        ``font_source`` (``"document"`` when declared by the file's text layer,
+        ``"model"`` when estimated from the pixels, which can be wrong). Keys are
+        omitted when not stated; ``word_boxes`` is ``[]`` when none were
+        produced. Box coordinates are pixels in the page's ``dimensions``
+        space. Office documents (docx, pptx) return ``boxes`` only with
+        ``include_image=True``; ``mode="advanced"`` returns no boxes.
 
-        ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
-        to each ``result["result"]["pages"]`` entry for the deskew-corrected page image.
+        PDF, XPS and image pages from ``mode="fast"`` always carry
+        ``dimensions`` (``{"width", "height"}`` in pixels), ``page_size``
+        (``{"width", "height", "unit"}``, ``"pt"`` for PDF/XPS, ``"px"`` for
+        images) and ``background`` (the page's background colour, hex).
+
+        ``include_image=True`` adds a presigned ``image_url`` to each
+        ``result["result"]["pages"]`` entry for the deskew-corrected page image
+        (plus ``dimensions`` where the page does not already carry it).
 
         ``force_refresh=True`` re-runs OCR instead of returning the stored
         result. Parse has no LLM stage, so what it caches — and what this
@@ -1530,12 +1545,27 @@ class AsyncHyperAPIClient:
         ``markdown``, and ``regions``. Only meaningful on the default OCR
         engine; noticeably slower than ``"fast"``.
 
-        ``include_boxes=True`` adds per-segment bounding boxes to each entry of
-        ``result["result"]["pages"]`` (standard OCR engine only; the layout-aware engine
-        returns an empty list).
+        ``include_boxes=True`` adds to each entry of ``result["result"]["pages"]``
+        a ``boxes`` list of line boxes (``{"text", "bbox": [left, top, right,
+        bottom], "confidence"}``) and, for PDF, XPS and image inputs, a
+        ``word_boxes`` list with one entry per word carrying typography:
+        ``font``, ``size`` (in ``page_size["unit"]``), ``color``, ``bold``,
+        ``italic``, ``background`` (only where it differs from the page) and
+        ``font_source`` (``"document"`` when declared by the file's text layer,
+        ``"model"`` when estimated from the pixels, which can be wrong). Keys are
+        omitted when not stated; ``word_boxes`` is ``[]`` when none were
+        produced. Box coordinates are pixels in the page's ``dimensions``
+        space. Office documents (docx, pptx) return ``boxes`` only with
+        ``include_image=True``; ``mode="advanced"`` returns no boxes.
 
-        ``include_image=True`` adds a presigned ``image_url`` + ``dimensions``
-        to each ``result["result"]["pages"]`` entry for the deskew-corrected page image.
+        PDF, XPS and image pages from ``mode="fast"`` always carry
+        ``dimensions`` (``{"width", "height"}`` in pixels), ``page_size``
+        (``{"width", "height", "unit"}``, ``"pt"`` for PDF/XPS, ``"px"`` for
+        images) and ``background`` (the page's background colour, hex).
+
+        ``include_image=True`` adds a presigned ``image_url`` to each
+        ``result["result"]["pages"]`` entry for the deskew-corrected page image
+        (plus ``dimensions`` where the page does not already carry it).
 
         A large advanced document (over the 60-page cap, admitted on deployments
         that allow it — see :py:meth:`submit_parse`) returns a different shape:

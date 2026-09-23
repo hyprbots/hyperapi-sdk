@@ -22,6 +22,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Long-running polling uses a one-hour default deadline and honors both forms of
   the HTTP `Retry-After` header.
 
+### Documentation
+
+- Parse docstrings and the tutorial describe the current response shape: fast
+  PDF, XPS and image pages always carry `dimensions`, `page_size` and
+  `background`; `include_boxes=True` returns line-level `boxes` plus per-word
+  `word_boxes` with typography (`font`, `size`, `color`, `bold`, `italic`,
+  `background`, `font_source`). No SDK code change — the fields pass through
+  in the raw result dict.
+
 ### Fixed
 
 - Polling recovers from rate-limit responses when the retry window fits within
