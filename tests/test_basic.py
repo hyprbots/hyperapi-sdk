@@ -344,6 +344,38 @@ def test_content_types_include_common_formats():
     assert CONTENT_TYPES[".webp"] == "image/webp"
 
 
+# The router's upload allow-list (hyperapi-router app/api/documents.py:
+# _ALLOWED_UPLOAD_CONTENT_TYPES), copied here because the SDK cannot import it.
+# A type outside it is rejected with 415 before any upload happens (bug #309).
+_ROUTER_UPLOAD_ALLOW_LIST = {
+    "application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp",
+    "image/tiff", "image/heic", "image/heif",
+    "application/csv", "application/json", "application/msword", "application/rtf",
+    "application/vnd.ms-excel", "application/vnd.ms-outlook",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/x-msg", "application/xml", "message/rfc822", "text/csv",
+    "text/json", "text/markdown", "text/plain", "text/rtf", "text/xml",
+    "application/oxps", "application/vnd.ms-package.xps-fixeddocumentsequence+xml",
+    "application/vnd.ms-xpsdocument",
+}
+
+
+def test_every_mapped_content_type_is_accepted_by_the_router():
+    rejected = {ext: ct for ext, ct in CONTENT_TYPES.items() if ct not in _ROUTER_UPLOAD_ALLOW_LIST}
+    assert not rejected
+
+
+def test_office_text_and_email_files_get_a_real_content_type():
+    # Bug #309: these fell back to application/octet-stream and the upload 415'd.
+    for ext in (".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".csv", ".txt",
+                ".md", ".rtf", ".json", ".xml", ".xps", ".oxps", ".eml", ".msg"):
+        assert CONTENT_TYPES[ext] != "application/octet-stream", ext
+        assert CONTENT_TYPES[ext] in _ROUTER_UPLOAD_ALLOW_LIST, ext
+
+
 # ── Path resolution ─────────────────────────────────────────────────────
 
 

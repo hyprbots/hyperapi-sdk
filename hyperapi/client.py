@@ -62,7 +62,14 @@ from .exceptions import (
 )
 
 
+# File extension -> upload content_type. Every value must be in the router's
+# upload allow-list (hyperapi-router app/api/documents.py), which answers any
+# other type with 415; an unknown extension falls back to
+# application/octet-stream and is rejected. Mirrors the dashboard playground's
+# map (hyperapi src/lib/playground/file-validation.ts).
 CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    # Images
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -70,7 +77,28 @@ CONTENT_TYPES = {
     ".webp": "image/webp",
     ".tiff": "image/tiff",
     ".tif": "image/tiff",
-    ".pdf": "application/pdf",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    # Office documents
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    # Text and data
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".rtf": "application/rtf",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    # Fixed-layout pages
+    ".xps": "application/vnd.ms-xpsdocument",
+    ".oxps": "application/oxps",
+    # Email
+    ".eml": "message/rfc822",
+    ".msg": "application/vnd.ms-outlook",
 }
 
 ParseMode = Literal["fast", "advanced"]
