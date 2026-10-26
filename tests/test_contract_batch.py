@@ -1,6 +1,6 @@
 """Contract tests for the Batch API SDK methods (sync).
 
-Hermetic — respx (`mock_backend`) intercepts every /v1/batch call; no network.
+Hermetic — respx (`mock_api`) intercepts every /v1/batch call; no network.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import pytest
 from hyperapi import HyperAPIError
 
 
-def test_create_batch_posts_body_and_returns(client, mock_backend):
-    route = mock_backend.post("/v1/batch").mock(
+def test_create_batch_posts_body_and_returns(client, mock_api):
+    route = mock_api.post("/v1/batch").mock(
         return_value=httpx.Response(
             202, json={"batch_id": "b1", "status": "queued", "total_items": 2}
         )
@@ -28,8 +28,8 @@ def test_create_batch_posts_body_and_returns(client, mock_backend):
     assert payload["options"] == {}
 
 
-def test_create_batch_sends_webhook_url_and_metadata_when_set(client, mock_backend):
-    route = mock_backend.post("/v1/batch").mock(
+def test_create_batch_sends_webhook_url_and_metadata_when_set(client, mock_api):
+    route = mock_api.post("/v1/batch").mock(
         return_value=httpx.Response(
             202, json={"batch_id": "b1", "status": "queued", "total_items": 1}
         )
@@ -45,8 +45,8 @@ def test_create_batch_sends_webhook_url_and_metadata_when_set(client, mock_backe
     assert payload["metadata"] == {"run": "nightly", "team": "ap"}
 
 
-def test_create_batch_omits_webhook_url_and_metadata_when_unset(client, mock_backend):
-    route = mock_backend.post("/v1/batch").mock(
+def test_create_batch_omits_webhook_url_and_metadata_when_unset(client, mock_api):
+    route = mock_api.post("/v1/batch").mock(
         return_value=httpx.Response(
             202, json={"batch_id": "b1", "status": "queued", "total_items": 1}
         )
@@ -57,8 +57,8 @@ def test_create_batch_omits_webhook_url_and_metadata_when_unset(client, mock_bac
     assert "metadata" not in payload
 
 
-def test_create_batch_forwards_idempotency_key_header(client, mock_backend):
-    route = mock_backend.post("/v1/batch").mock(
+def test_create_batch_forwards_idempotency_key_header(client, mock_api):
+    route = mock_api.post("/v1/batch").mock(
         return_value=httpx.Response(
             202, json={"batch_id": "b1", "status": "queued", "total_items": 1}
         )
@@ -67,8 +67,8 @@ def test_create_batch_forwards_idempotency_key_header(client, mock_backend):
     assert route.calls.last.request.headers.get("Idempotency-Key") == "idem-1"
 
 
-def test_get_batch(client, mock_backend):
-    mock_backend.get("/v1/batch/b1").mock(
+def test_get_batch(client, mock_api):
+    mock_api.get("/v1/batch/b1").mock(
         return_value=httpx.Response(
             200,
             json={"batch_id": "b1", "status": "processing", "counts": {"total": 2}, "items": []},
@@ -77,15 +77,15 @@ def test_get_batch(client, mock_backend):
     assert client.get_batch("b1")["status"] == "processing"
 
 
-def test_list_batches(client, mock_backend):
-    mock_backend.get("/v1/batch").mock(
+def test_list_batches(client, mock_api):
+    mock_api.get("/v1/batch").mock(
         return_value=httpx.Response(200, json={"batches": [], "limit": 50, "offset": 0})
     )
     assert "batches" in client.list_batches()
 
 
-def test_cancel_batch(client, mock_backend):
-    mock_backend.delete("/v1/batch/b1").mock(
+def test_cancel_batch(client, mock_api):
+    mock_api.delete("/v1/batch/b1").mock(
         return_value=httpx.Response(
             200,
             json={"batch_id": "b1", "status": "canceled", "counts": {"total": 1}, "items": []},
@@ -94,16 +94,16 @@ def test_cancel_batch(client, mock_backend):
     assert client.cancel_batch("b1")["status"] == "canceled"
 
 
-def test_get_batch_404_raises(client, mock_backend):
-    mock_backend.get("/v1/batch/missing").mock(
+def test_get_batch_404_raises(client, mock_api):
+    mock_api.get("/v1/batch/missing").mock(
         return_value=httpx.Response(404, json={"detail": "Batch not found"})
     )
     with pytest.raises(HyperAPIError):
         client.get_batch("missing")
 
 
-def test_wait_for_batch_polls_until_terminal(client, mock_backend):
-    mock_backend.get("/v1/batch/b1").mock(
+def test_wait_for_batch_polls_until_terminal(client, mock_api):
+    mock_api.get("/v1/batch/b1").mock(
         side_effect=[
             httpx.Response(
                 200,
@@ -124,13 +124,13 @@ def test_wait_for_batch_polls_until_terminal(client, mock_backend):
     assert out["status"] == "completed"
 
 
-def test_wait_for_batch_backs_off_on_429_then_completes(client, mock_backend, monkeypatch):
+def test_wait_for_batch_backs_off_on_429_then_completes(client, mock_api, monkeypatch):
     """wait_for_batch shares the poll-loop 429-backoff contract: a 429 mid-wait
     sleeps Retry-After and resumes instead of aborting the (potentially hours-long)
     batch wait."""
     slept: list[float] = []
     monkeypatch.setattr("hyperapi.client.time.sleep", lambda s: slept.append(s))
-    mock_backend.get("/v1/batch/b2").mock(side_effect=[
+    mock_api.get("/v1/batch/b2").mock(side_effect=[
         httpx.Response(429, headers={"Retry-After": "2"},
                        json={"message": "Rate limit exceeded", "tier": "free", "limit": 1}),
         httpx.Response(200, json={"batch_id": "b2", "status": "completed",

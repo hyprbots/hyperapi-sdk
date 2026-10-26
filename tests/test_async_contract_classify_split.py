@@ -6,21 +6,21 @@ import pytest
 from hyperapi import ClassifyError, Job
 
 
-def _seed(mock_backend, key, op_endpoint, *, job_id, result):
-    mock_backend.post("/v1/documents/upload").mock(
+def _seed(mock_api, key, op_endpoint, *, job_id, result):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": key,
             "upload_url": f"https://s3.local/{key}?sig=x",
             "expires_in": 600,
         }),
     )
-    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
-    submit = mock_backend.post(op_endpoint).mock(
+    mock_api.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
+    submit = mock_api.post(op_endpoint).mock(
         return_value=httpx.Response(202, json={
             "job_id": job_id, "status": "pending", "poll_url": f"/v1/jobs/{job_id}",
         }),
     )
-    mock_backend.get(f"/v1/jobs/{job_id}").mock(
+    mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(200, json={
             "status": "completed", "result": result, "request_id": "req-x",
         }),
@@ -31,9 +31,9 @@ def _seed(mock_backend, key, op_endpoint, *, job_id, result):
 # ── classify ─────────────────────────────────────────────────────────────
 
 
-async def test_async_classify_submits_with_x_async(mock_backend, async_client, tiny_pdf):
+async def test_async_classify_submits_with_x_async(mock_api, async_client, tiny_pdf):
     submit = _seed(
-        mock_backend, "doc_cl", "/v1/classify",
+        mock_api, "doc_cl", "/v1/classify",
         job_id="job_cl_1",
         result={"document_type": "invoice", "confidence": 0.97},
     )
@@ -47,17 +47,17 @@ async def test_async_classify_submits_with_x_async(mock_backend, async_client, t
     assert b"document_key=doc_cl" in req.read()
 
 
-async def test_async_classify_failed_job_raises_classify_error(mock_backend, async_client, tiny_pdf):
-    mock_backend.post("/v1/documents/upload").mock(
+async def test_async_classify_failed_job_raises_classify_error(mock_api, async_client, tiny_pdf):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": "k", "upload_url": "https://s3.local/k?sig=x", "expires_in": 600,
         }),
     )
-    mock_backend.put("https://s3.local/k?sig=x").mock(return_value=httpx.Response(200))
-    mock_backend.post("/v1/classify").mock(return_value=httpx.Response(202, json={
+    mock_api.put("https://s3.local/k?sig=x").mock(return_value=httpx.Response(200))
+    mock_api.post("/v1/classify").mock(return_value=httpx.Response(202, json={
         "job_id": "j", "status": "pending", "poll_url": "/v1/jobs/j",
     }))
-    mock_backend.get("/v1/jobs/j").mock(return_value=httpx.Response(200, json={
+    mock_api.get("/v1/jobs/j").mock(return_value=httpx.Response(200, json={
         "status": "failed", "error": "model unavailable", "status_code": 503,
     }))
 
@@ -66,9 +66,9 @@ async def test_async_classify_failed_job_raises_classify_error(mock_backend, asy
     assert "model unavailable" in str(ei.value)
 
 
-async def test_async_submit_classify_returns_job(mock_backend, async_client, tiny_pdf):
+async def test_async_submit_classify_returns_job(mock_api, async_client, tiny_pdf):
     _seed(
-        mock_backend, "doc_cl2", "/v1/classify",
+        mock_api, "doc_cl2", "/v1/classify",
         job_id="cj_1",
         result={"document_type": "receipt"},
     )
@@ -82,9 +82,9 @@ async def test_async_submit_classify_returns_job(mock_backend, async_client, tin
 # ── split ────────────────────────────────────────────────────────────────
 
 
-async def test_async_split_submits_with_x_async(mock_backend, async_client, tiny_pdf):
+async def test_async_split_submits_with_x_async(mock_api, async_client, tiny_pdf):
     submit = _seed(
-        mock_backend, "doc_sp", "/v1/split",
+        mock_api, "doc_sp", "/v1/split",
         job_id="job_sp_1",
         result={"segments": [{"start": 1, "end": 3}, {"start": 4, "end": 5}]},
     )
@@ -95,14 +95,14 @@ async def test_async_split_submits_with_x_async(mock_backend, async_client, tiny
     assert submit.calls[0].request.url.params["mode"] == "default"
 
 
-async def test_async_split_429_raises_rate_limit_error(mock_backend, async_client, tiny_pdf):
-    mock_backend.post("/v1/documents/upload").mock(
+async def test_async_split_429_raises_rate_limit_error(mock_api, async_client, tiny_pdf):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": "k", "upload_url": "https://s3.local/k?sig=x", "expires_in": 600,
         }),
     )
-    mock_backend.put("https://s3.local/k?sig=x").mock(return_value=httpx.Response(200))
-    mock_backend.post("/v1/split").mock(return_value=httpx.Response(
+    mock_api.put("https://s3.local/k?sig=x").mock(return_value=httpx.Response(200))
+    mock_api.post("/v1/split").mock(return_value=httpx.Response(
         429,
         headers={"Retry-After": "60"},
         json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
@@ -116,9 +116,9 @@ async def test_async_split_429_raises_rate_limit_error(mock_backend, async_clien
     assert ei.value.limit == 1
 
 
-async def test_async_submit_split_returns_job(mock_backend, async_client, tiny_pdf):
+async def test_async_submit_split_returns_job(mock_api, async_client, tiny_pdf):
     _seed(
-        mock_backend, "doc_sp2", "/v1/split",
+        mock_api, "doc_sp2", "/v1/split",
         job_id="sj_1",
         result={"segments": []},
     )
@@ -132,9 +132,9 @@ async def test_async_submit_split_returns_job(mock_backend, async_client, tiny_p
 # ── options (classify + split) ───────────────────────────────────────────
 
 
-async def test_async_classify_default_omits_options_from_body(mock_backend, async_client, tiny_pdf):
+async def test_async_classify_default_omits_options_from_body(mock_api, async_client, tiny_pdf):
     submit = _seed(
-        mock_backend, "doc_cl3", "/v1/classify",
+        mock_api, "doc_cl3", "/v1/classify",
         job_id="cj_2",
         result={"document_type": "invoice"},
     )
@@ -145,9 +145,9 @@ async def test_async_classify_default_omits_options_from_body(mock_backend, asyn
     assert "options" not in body
 
 
-async def test_async_classify_options_ride_in_form_body(mock_backend, async_client, tiny_pdf):
+async def test_async_classify_options_ride_in_form_body(mock_api, async_client, tiny_pdf):
     submit = _seed(
-        mock_backend, "doc_cl4", "/v1/classify",
+        mock_api, "doc_cl4", "/v1/classify",
         job_id="cj_3",
         result={"document_type": "invoice"},
     )
@@ -166,9 +166,9 @@ async def test_async_classify_options_ride_in_form_body(mock_backend, async_clie
     assert "purchase_order" in body
 
 
-async def test_async_split_options_ride_in_form_body(mock_backend, async_client, tiny_pdf):
+async def test_async_split_options_ride_in_form_body(mock_api, async_client, tiny_pdf):
     submit = _seed(
-        mock_backend, "doc_sp3", "/v1/split",
+        mock_api, "doc_sp3", "/v1/split",
         job_id="sj_2",
         result={"segments": []},
     )
@@ -181,13 +181,13 @@ async def test_async_split_options_ride_in_form_body(mock_backend, async_client,
 
 
 async def test_async_split_use_presigned_false_falls_back_to_presigned_with_options(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
     """use_presigned=False is unsupported by the API; the SDK warns and falls
     back to the presigned flow, still carrying the extra options form field
     alongside the presigned document_key."""
     submit = _seed(
-        mock_backend, "doc_sp4", "/v1/split",
+        mock_api, "doc_sp4", "/v1/split",
         job_id="sj_3",
         result={"segments": []},
     )
@@ -204,15 +204,15 @@ async def test_async_split_use_presigned_false_falls_back_to_presigned_with_opti
 
 
 async def test_async_classify_invalid_options_400_raises_classify_error(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    mock_backend.post("/v1/documents/upload").mock(
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": "k", "upload_url": "https://s3.local/k?sig=x", "expires_in": 600,
         }),
     )
-    mock_backend.put("https://s3.local/k?sig=x").mock(return_value=httpx.Response(200))
-    mock_backend.post("/v1/classify").mock(return_value=httpx.Response(
+    mock_api.put("https://s3.local/k?sig=x").mock(return_value=httpx.Response(200))
+    mock_api.post("/v1/classify").mock(return_value=httpx.Response(
         400, json={"detail": "Invalid options JSON: not an object"},
     ))
 

@@ -1,6 +1,6 @@
 """Async twin of test_contract_extract.py.
 
-Extract is the original motivation for submit+poll — production extracts run
+Extract is the original motivation for submit+poll — real-world extracts run
 60-180s, so async support matters most here. Same coverage as the sync suite.
 """
 
@@ -10,27 +10,27 @@ import pytest
 from hyperapi import ExtractError, Job, JobTimeoutError
 
 
-def _seed_presigned(mock_backend, *, key="doc_ex"):
-    mock_backend.post("/v1/documents/upload").mock(
+def _seed_presigned(mock_api, *, key="doc_ex"):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": key,
             "upload_url": f"https://s3.local/{key}?sig=x",
             "expires_in": 600,
         }),
     )
-    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
+    mock_api.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
 
 
-def _seed_submit(mock_backend, *, job_id="job_ex_1"):
-    return mock_backend.post("/v1/extract").mock(
+def _seed_submit(mock_api, *, job_id="job_ex_1"):
+    return mock_api.post("/v1/extract").mock(
         return_value=httpx.Response(202, json={
             "job_id": job_id, "status": "pending", "poll_url": f"/v1/jobs/{job_id}",
         }),
     )
 
 
-def _seed_completed(mock_backend, *, job_id="job_ex_1", entities=None):
-    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+def _seed_completed(mock_api, *, job_id="job_ex_1", entities=None):
+    return mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(200, json={
             "status": "completed",
             "result": {
@@ -44,10 +44,10 @@ def _seed_completed(mock_backend, *, job_id="job_ex_1", entities=None):
     )
 
 
-async def test_async_extract_default_path_uses_async(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    poll_route = _seed_completed(mock_backend)
+async def test_async_extract_default_path_uses_async(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    poll_route = _seed_completed(mock_api)
 
     result = await async_client.extract(tiny_pdf)
 
@@ -57,9 +57,9 @@ async def test_async_extract_default_path_uses_async(mock_backend, async_client,
     assert "ocr_engine" not in submit_req.url.params
     # Basic extract carries only `category`; `mode` was removed (parity with sync).
     assert "mode" not in submit_req.url.params
-    # Omitted so the router's request > org > platform precedence can reach
-    # the org tier. Sending it unconditionally is what made an org's
-    # defaults.extract_category unreachable from the SDK.
+    # Omitted so the server-side default applies. Sending it unconditionally
+    # is what made an organization's configured default category unreachable
+    # from the SDK.
     assert "category" not in submit_req.url.params
     assert poll_route.called
 
@@ -71,10 +71,10 @@ async def test_async_extract_rejects_mode_kwarg(async_client, tiny_pdf):
         await async_client.extract(tiny_pdf, mode="advanced")
 
 
-async def test_async_extract_pending_then_completed_polls_loop(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_submit(mock_backend)
-    mock_backend.get("/v1/jobs/job_ex_1").mock(side_effect=[
+async def test_async_extract_pending_then_completed_polls_loop(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_submit(mock_api)
+    mock_api.get("/v1/jobs/job_ex_1").mock(side_effect=[
         httpx.Response(200, json={"status": "pending"}),
         httpx.Response(200, json={"status": "pending"}),
         httpx.Response(200, json={
@@ -88,10 +88,10 @@ async def test_async_extract_pending_then_completed_polls_loop(mock_backend, asy
     assert result["entities"] == {"foo": "bar"}
 
 
-async def test_async_extract_failed_job_raises_extract_error(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_submit(mock_backend)
-    mock_backend.get("/v1/jobs/job_ex_1").mock(return_value=httpx.Response(
+async def test_async_extract_failed_job_raises_extract_error(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_submit(mock_api)
+    mock_api.get("/v1/jobs/job_ex_1").mock(return_value=httpx.Response(
         200, json={
             "status": "failed",
             "error": "extract pipeline crashed",
@@ -104,28 +104,28 @@ async def test_async_extract_failed_job_raises_extract_error(mock_backend, async
     assert "extract pipeline crashed" in str(ei.value)
 
 
-async def test_async_extract_submit_5xx_raises_extract_error(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    mock_backend.post("/v1/extract").mock(return_value=httpx.Response(500))
+async def test_async_extract_submit_5xx_raises_extract_error(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/extract").mock(return_value=httpx.Response(500))
 
     with pytest.raises(ExtractError) as ei:
         await async_client.extract(tiny_pdf)
     assert ei.value.status_code == 500
 
 
-async def test_async_extract_submit_timeout_raises_504(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    mock_backend.post("/v1/extract").mock(side_effect=httpx.TimeoutException("timeout"))
+async def test_async_extract_submit_timeout_raises_504(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/extract").mock(side_effect=httpx.TimeoutException("timeout"))
 
     with pytest.raises(ExtractError) as ei:
         await async_client.extract(tiny_pdf)
     assert ei.value.status_code == 504
 
 
-async def test_async_submit_extract_returns_job_no_polling(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend, job_id="custom_id")
-    poll_route = mock_backend.get("/v1/jobs/custom_id")
+async def test_async_submit_extract_returns_job_no_polling(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api, job_id="custom_id")
+    poll_route = mock_api.get("/v1/jobs/custom_id")
 
     job = await async_client.submit_extract(tiny_pdf)
 
@@ -137,10 +137,10 @@ async def test_async_submit_extract_returns_job_no_polling(mock_backend, async_c
 
 
 async def test_async_extract_submit_402_insufficient_credits_raises(
-    mock_backend, async_client, tiny_pdf,
+    mock_api, async_client, tiny_pdf,
 ):
-    _seed_presigned(mock_backend)
-    mock_backend.post("/v1/extract").mock(
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/extract").mock(
         return_value=httpx.Response(402, json={"message": "Insufficient credits"}),
     )
 
@@ -151,10 +151,10 @@ async def test_async_extract_submit_402_insufficient_credits_raises(
 
 
 async def test_async_extract_submit_408_service_deadline_raises(
-    mock_backend, async_client, tiny_pdf,
+    mock_api, async_client, tiny_pdf,
 ):
-    _seed_presigned(mock_backend)
-    mock_backend.post("/v1/extract").mock(
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/extract").mock(
         return_value=httpx.Response(408, json={"message": "Service deadline exceeded"}),
     )
 
@@ -164,12 +164,12 @@ async def test_async_extract_submit_408_service_deadline_raises(
 
 
 async def test_async_extract_submit_403_forbidden_raises_generic_hyperapi_error(
-    mock_backend, async_client, tiny_pdf,
+    mock_api, async_client, tiny_pdf,
 ):
     from hyperapi import HyperAPIError
 
-    _seed_presigned(mock_backend)
-    mock_backend.post("/v1/extract").mock(
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/extract").mock(
         return_value=httpx.Response(403, json={"message": "Forbidden by org policy"}),
     )
 
@@ -179,10 +179,10 @@ async def test_async_extract_submit_403_forbidden_raises_generic_hyperapi_error(
 
 
 async def test_async_extract_submit_request_error_raises_extract_error(
-    mock_backend, async_client, tiny_pdf,
+    mock_api, async_client, tiny_pdf,
 ):
-    _seed_presigned(mock_backend)
-    mock_backend.post("/v1/extract").mock(
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/extract").mock(
         side_effect=httpx.RequestError("dns failed"),
     )
 
@@ -193,11 +193,11 @@ async def test_async_extract_submit_request_error_raises_extract_error(
 
 
 async def test_async_extract_per_call_timeout_raises_job_timeout(
-    mock_backend, async_client, tiny_pdf,
+    mock_api, async_client, tiny_pdf,
 ):
-    _seed_presigned(mock_backend)
-    _seed_submit(mock_backend)
-    mock_backend.get("/v1/jobs/job_ex_1").mock(
+    _seed_presigned(mock_api)
+    _seed_submit(mock_api)
+    mock_api.get("/v1/jobs/job_ex_1").mock(
         return_value=httpx.Response(200, json={"status": "pending"}),
     )
 

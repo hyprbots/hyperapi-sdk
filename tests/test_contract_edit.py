@@ -14,27 +14,27 @@ import pytest
 from hyperapi import EditError, Job
 
 
-def _seed_presigned(mock_backend, *, key="doc_ed"):
-    mock_backend.post("/v1/documents/upload").mock(
+def _seed_presigned(mock_api, *, key="doc_ed"):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": key,
             "upload_url": f"https://s3.local/{key}?sig=x",
             "expires_in": 600,
         }),
     )
-    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
+    mock_api.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
 
 
-def _seed_detect_submit(mock_backend, *, job_id="job_ed_detect"):
-    return mock_backend.post("/v1/edit/detect").mock(
+def _seed_detect_submit(mock_api, *, job_id="job_ed_detect"):
+    return mock_api.post("/v1/edit/detect").mock(
         return_value=httpx.Response(202, json={
             "job_id": job_id, "status": "pending", "poll_url": f"/v1/jobs/{job_id}",
         }),
     )
 
 
-def _seed_detect_completed(mock_backend, *, job_id="job_ed_detect"):
-    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+def _seed_detect_completed(mock_api, *, job_id="job_ed_detect"):
+    return mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(200, json={
             "status": "completed",
             "result": {
@@ -65,16 +65,16 @@ def _seed_detect_completed(mock_backend, *, job_id="job_ed_detect"):
     )
 
 
-def _seed_fill_submit(mock_backend, *, job_id="job_ed_fill"):
-    return mock_backend.post("/v1/edit/fill").mock(
+def _seed_fill_submit(mock_api, *, job_id="job_ed_fill"):
+    return mock_api.post("/v1/edit/fill").mock(
         return_value=httpx.Response(202, json={
             "job_id": job_id, "status": "pending", "poll_url": f"/v1/jobs/{job_id}",
         }),
     )
 
 
-def _seed_fill_completed(mock_backend, *, job_id="job_ed_fill"):
-    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+def _seed_fill_completed(mock_api, *, job_id="job_ed_fill"):
+    return mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(200, json={
             "status": "completed",
             "result": {
@@ -99,10 +99,10 @@ def _seed_fill_completed(mock_backend, *, job_id="job_ed_fill"):
 # ── detect ──────────────────────────────────────────────────────────────────
 
 
-def test_detect_uses_async_and_markdown_assist_query_param(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_detect_submit(mock_backend)
-    poll_route = _seed_detect_completed(mock_backend)
+def test_detect_uses_async_and_markdown_assist_query_param(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_detect_submit(mock_api)
+    poll_route = _seed_detect_completed(mock_api)
 
     result = client.edit_detect(tiny_pdf)
 
@@ -116,29 +116,29 @@ def test_detect_uses_async_and_markdown_assist_query_param(mock_backend, client,
     assert poll_route.called
 
 
-def test_detect_markdown_assist_true(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_detect_submit(mock_backend)
-    _seed_detect_completed(mock_backend)
+def test_detect_markdown_assist_true(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_detect_submit(mock_api)
+    _seed_detect_completed(mock_api)
 
     client.edit_detect(tiny_pdf, markdown_assist=True)
 
     assert submit_route.calls[0].request.url.params["markdown_assist"] == "true"
 
 
-def test_detect_stamps_detect_job_id_onto_envelope(mock_backend, client, tiny_pdf):
+def test_detect_stamps_detect_job_id_onto_envelope(mock_api, client, tiny_pdf):
     """The fill leg needs the detect job's id, but the server envelope doesn't
     carry it — the SDK adds it so callers needn't hold the Job separately."""
-    _seed_presigned(mock_backend)
-    _seed_detect_submit(mock_backend)
-    _seed_detect_completed(mock_backend)
+    _seed_presigned(mock_api)
+    _seed_detect_submit(mock_api)
+    _seed_detect_completed(mock_api)
 
     assert client.edit_detect(tiny_pdf)["detect_job_id"] == "job_ed_detect"
 
 
-def test_submit_detect_returns_job_with_edit_op(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_detect_submit(mock_backend)
+def test_submit_detect_returns_job_with_edit_op(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_detect_submit(mock_api)
 
     job = client.submit_edit_detect(tiny_pdf)
 
@@ -149,9 +149,9 @@ def test_submit_detect_returns_job_with_edit_op(mock_backend, client, tiny_pdf):
 # ── fill ────────────────────────────────────────────────────────────────────
 
 
-def test_fill_posts_json_with_detect_job_id_and_values(mock_backend, client):
-    submit_route = _seed_fill_submit(mock_backend)
-    _seed_fill_completed(mock_backend)
+def test_fill_posts_json_with_detect_job_id_and_values(mock_api, client):
+    submit_route = _seed_fill_submit(mock_api)
+    _seed_fill_completed(mock_api)
 
     result = client.edit_fill("job_ed_detect", values={"0": "Jane Doe"})
 
@@ -167,9 +167,9 @@ def test_fill_posts_json_with_detect_job_id_and_values(mock_backend, client):
     }
 
 
-def test_fill_accepts_indexed_list_values(mock_backend, client):
-    submit_route = _seed_fill_submit(mock_backend)
-    _seed_fill_completed(mock_backend)
+def test_fill_accepts_indexed_list_values(mock_api, client):
+    submit_route = _seed_fill_submit(mock_api)
+    _seed_fill_completed(mock_api)
 
     client.edit_fill("job_ed_detect", values=[{"index": 0, "value": "Jane"}])
 
@@ -178,9 +178,9 @@ def test_fill_accepts_indexed_list_values(mock_backend, client):
     ]
 
 
-def test_fill_natural_language_sends_content(mock_backend, client):
-    submit_route = _seed_fill_submit(mock_backend)
-    _seed_fill_completed(mock_backend)
+def test_fill_natural_language_sends_content(mock_api, client):
+    submit_route = _seed_fill_submit(mock_api)
+    _seed_fill_completed(mock_api)
 
     client.edit_fill(
         "job_ed_detect", content="Patient is Jane Doe", natural_language=True
@@ -201,9 +201,9 @@ def test_fill_natural_language_sends_content(mock_backend, client):
         ({}, "requires values"),
     ],
 )
-def test_fill_mode_mismatches_fail_client_side(mock_backend, client, kwargs, match):
+def test_fill_mode_mismatches_fail_client_side(mock_api, client, kwargs, match):
     """The server 400s on these; catching them locally saves a round-trip."""
-    route = _seed_fill_submit(mock_backend)
+    route = _seed_fill_submit(mock_api)
 
     with pytest.raises(ValueError, match=match):
         client.edit_fill("job_ed_detect", **kwargs)
@@ -214,12 +214,12 @@ def test_fill_mode_mismatches_fail_client_side(mock_backend, client, kwargs, mat
 # ── one-call convenience ────────────────────────────────────────────────────
 
 
-def test_edit_chains_detect_then_natural_language_fill(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    detect_route = _seed_detect_submit(mock_backend)
-    _seed_detect_completed(mock_backend)
-    fill_route = _seed_fill_submit(mock_backend)
-    _seed_fill_completed(mock_backend)
+def test_edit_chains_detect_then_natural_language_fill(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    detect_route = _seed_detect_submit(mock_api)
+    _seed_detect_completed(mock_api)
+    fill_route = _seed_fill_submit(mock_api)
+    _seed_fill_completed(mock_api)
 
     result = client.edit(tiny_pdf, content="Patient is Jane Doe")
 
@@ -235,11 +235,11 @@ def test_edit_chains_detect_then_natural_language_fill(mock_backend, client, tin
     assert body["natural_language"] is True
 
 
-def test_edit_one_shot_takes_no_values(mock_backend, client, tiny_pdf):
+def test_edit_one_shot_takes_no_values(mock_api, client, tiny_pdf):
     """One-shot detects the schema for the first time, so the caller cannot know the
     indices `values` are keyed by. Filling by index requires the two-leg flow."""
-    _seed_presigned(mock_backend)
-    route = _seed_detect_submit(mock_backend)
+    _seed_presigned(mock_api)
+    route = _seed_detect_submit(mock_api)
 
     with pytest.raises(TypeError, match="values"):
         client.edit(tiny_pdf, values={"0": "Jane Doe"})
@@ -248,9 +248,9 @@ def test_edit_one_shot_takes_no_values(mock_backend, client, tiny_pdf):
 
 
 @pytest.mark.parametrize("content", ["", "   "], ids=["empty", "whitespace"])
-def test_edit_requires_non_empty_content(mock_backend, client, tiny_pdf, content):
-    _seed_presigned(mock_backend)
-    route = _seed_detect_submit(mock_backend)
+def test_edit_requires_non_empty_content(mock_api, client, tiny_pdf, content):
+    _seed_presigned(mock_api)
+    route = _seed_detect_submit(mock_api)
 
     with pytest.raises(ValueError, match="content"):
         client.edit(tiny_pdf, content=content)
@@ -259,9 +259,9 @@ def test_edit_requires_non_empty_content(mock_backend, client, tiny_pdf, content
     assert not route.called
 
 
-def test_edit_omitting_content_is_an_error(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    route = _seed_detect_submit(mock_backend)
+def test_edit_omitting_content_is_an_error(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    route = _seed_detect_submit(mock_api)
 
     with pytest.raises(TypeError, match="content"):
         client.edit(tiny_pdf)
@@ -272,10 +272,10 @@ def test_edit_omitting_content_is_an_error(mock_backend, client, tiny_pdf):
 # ── failures ────────────────────────────────────────────────────────────────
 
 
-def test_failed_detect_job_raises_edit_error(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_detect_submit(mock_backend)
-    mock_backend.get("/v1/jobs/job_ed_detect").mock(
+def test_failed_detect_job_raises_edit_error(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_detect_submit(mock_api)
+    mock_api.get("/v1/jobs/job_ed_detect").mock(
         return_value=httpx.Response(200, json={
             "status": "failed",
             "error": "edit-service /detect failed (502)",
@@ -290,8 +290,8 @@ def test_failed_detect_job_raises_edit_error(mock_backend, client, tiny_pdf):
     assert "502" in str(exc.value)
 
 
-def test_fill_404_on_unknown_detect_job(mock_backend, client):
-    mock_backend.post("/v1/edit/fill").mock(
+def test_fill_404_on_unknown_detect_job(mock_api, client):
+    mock_api.post("/v1/edit/fill").mock(
         return_value=httpx.Response(404, json={"detail": "detect_job_id not found"}),
     )
 
@@ -300,3 +300,53 @@ def test_fill_404_on_unknown_detect_job(mock_backend, client):
 
     assert exc.value.status_code == 404
     assert "not found" in str(exc.value)
+
+
+# ── availability ─────────────────────────────────────────────────────────────
+#
+# The edit API is not offered on every account; where it is not, /v1/edit/*
+# answers 404. That must read as "not available", not as a generic not-found —
+# while the fill leg's own 404 (unknown detect_job_id) keeps its message.
+
+
+def test_detect_404_means_edit_api_not_available(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/edit/detect").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Not Found"}}),
+    )
+
+    with pytest.raises(EditError) as exc:
+        client.submit_edit_detect(tiny_pdf)
+
+    assert exc.value.status_code == 404
+    assert str(exc.value) == "The edit API is not available for this account."
+    assert exc.value.code == "NOT_FOUND"
+
+
+def test_detect_404_non_json_body_also_means_not_available(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/edit/detect").mock(
+        return_value=httpx.Response(404, text="no route matched"),
+    )
+    with pytest.raises(EditError, match="not available for this account"):
+        client.edit_detect(tiny_pdf)
+
+
+def test_fill_404_without_detect_job_hint_means_not_available(mock_api, client):
+    mock_api.post("/v1/edit/fill").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Not Found"}}),
+    )
+    with pytest.raises(EditError, match="not available for this account"):
+        client.submit_edit_fill("job_x", values={"0": "x"})
+
+
+def test_non_edit_404_is_not_remapped(mock_api, client, tiny_pdf):
+    """The mapping is scoped to /v1/edit/*; other endpoints keep the server's message."""
+    from hyperapi import ParseError
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/parse").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Not Found"}}),
+    )
+    with pytest.raises(ParseError) as exc:
+        client.submit_parse(tiny_pdf)
+    assert "not available for this account" not in str(exc.value)

@@ -1,8 +1,7 @@
 """Contract: `force_refresh` reaches the wire as `?force_refresh=true`.
 
-The router caches Stage-2 results for an identical (document + task + params) —
-24h TTL in production — so re-running an unchanged document returns the STORED
-result. `force_refresh=True` is the escape hatch; without it a caller retrying
+The API stores results for an identical (document + task + params) for
+24 hours, so re-running an unchanged document returns the STORED result. `force_refresh=True` is the escape hatch; without it a caller retrying
 after a bad result gets the same bad result back for a day.
 
 Two properties matter and both are pinned here:
@@ -17,24 +16,24 @@ import httpx
 import pytest
 
 
-def _seed_presigned(mock_backend, *, key="doc_fr"):
-    mock_backend.post("/v1/documents/upload").mock(
+def _seed_presigned(mock_api, *, key="doc_fr"):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": key,
             "upload_url": f"https://s3.local/{key}?sig=x",
             "expires_in": 600,
         }),
     )
-    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
+    mock_api.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
 
 
-def _seed_job(mock_backend, endpoint, *, job_id):
-    submit = mock_backend.post(endpoint).mock(
+def _seed_job(mock_api, endpoint, *, job_id):
+    submit = mock_api.post(endpoint).mock(
         return_value=httpx.Response(202, json={
             "job_id": job_id, "status": "pending", "poll_url": f"/v1/jobs/{job_id}",
         }),
     )
-    mock_backend.get(f"/v1/jobs/{job_id}").mock(
+    mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(200, json={
             "status": "completed",
             "result": {"ok": True},
@@ -54,9 +53,9 @@ OPS = [
 
 
 @pytest.mark.parametrize("method_name,endpoint", OPS)
-def test_force_refresh_true_is_sent(client, mock_backend, tmp_path, method_name, endpoint):
-    _seed_presigned(mock_backend)
-    submit = _seed_job(mock_backend, endpoint, job_id=f"job_{method_name}")
+def test_force_refresh_true_is_sent(client, mock_api, tmp_path, method_name, endpoint):
+    _seed_presigned(mock_api)
+    submit = _seed_job(mock_api, endpoint, job_id=f"job_{method_name}")
     doc = tmp_path / "a.pdf"
     doc.write_bytes(b"%PDF-1.4 x")
 
@@ -67,10 +66,10 @@ def test_force_refresh_true_is_sent(client, mock_backend, tmp_path, method_name,
 
 
 @pytest.mark.parametrize("method_name,endpoint", OPS)
-def test_default_omits_it_entirely(client, mock_backend, tmp_path, method_name, endpoint):
+def test_default_omits_it_entirely(client, mock_api, tmp_path, method_name, endpoint):
     """Absent, not `force_refresh=false` — an opt-out must not change the request."""
-    _seed_presigned(mock_backend)
-    submit = _seed_job(mock_backend, endpoint, job_id=f"job_{method_name}_d")
+    _seed_presigned(mock_api)
+    submit = _seed_job(mock_api, endpoint, job_id=f"job_{method_name}_d")
     doc = tmp_path / "a.pdf"
     doc.write_bytes(b"%PDF-1.4 x")
 
@@ -80,10 +79,10 @@ def test_default_omits_it_entirely(client, mock_backend, tmp_path, method_name, 
     assert "force_refresh" not in str(submit.calls.last.request.url)
 
 
-def test_submit_variants_accept_it_too(client, mock_backend, tmp_path):
+def test_submit_variants_accept_it_too(client, mock_api, tmp_path):
     """The fire-and-forget submit_* path needs the same lever as the blocking one."""
-    _seed_presigned(mock_backend)
-    submit = _seed_job(mock_backend, "/v1/redact", job_id="job_sub")
+    _seed_presigned(mock_api)
+    submit = _seed_job(mock_api, "/v1/redact", job_id="job_sub")
     doc = tmp_path / "a.pdf"
     doc.write_bytes(b"%PDF-1.4 x")
 
@@ -92,19 +91,47 @@ def test_submit_variants_accept_it_too(client, mock_backend, tmp_path):
     assert "force_refresh=true" in str(submit.calls.last.request.url)
 
 
-def test_submit_parse_forwards_force_refresh(client, mock_backend, tmp_path):
+def test_submit_parse_forwards_force_refresh(client, mock_api, tmp_path):
     """`parse()` polls to completion, but callers who submit and poll manually
     go through `submit_parse` — the bypass has to be reachable from both.
 
-    Parse is the odd one out: it has no Stage-2 result cache, so what it
-    bypasses is the Stage-1 OCR cache. Same flag, same 24h production TTL.
+    Parse is the odd one out: its results are cached as OCR output, so what it
+    bypasses is the stored OCR output. Same flag, same 24-hour retention.
     """
-    _seed_presigned(mock_backend)
-    submit = _seed_job(mock_backend, "/v1/parse", job_id="job_submit_parse")
+    _seed_presigned(mock_api)
+    submit = _seed_job(mock_api, "/v1/parse", job_id="job_submit_parse")
     doc = tmp_path / "a.pdf"
     doc.write_bytes(b"%PDF-1.4 x")
 
     client.submit_parse(doc, force_refresh=True)
 
     assert submit.called
+    assert "force_refresh=true" in str(submit.calls.last.request.url)
+
+
+def test_extract_advanced_forwards_force_refresh(client, mock_api, tmp_path):
+    """`/v1/extract-omni` accepts the same bypass; both the blocking and the
+    submit_ variant must be able to send it, and omit it by default."""
+    _seed_presigned(mock_api)
+    submit = _seed_job(mock_api, "/v1/extract-omni", job_id="job_omni")
+    doc = tmp_path / "a.pdf"
+    doc.write_bytes(b"%PDF-1.4 x")
+
+    client.extract_advanced(doc)
+    assert "force_refresh" not in str(submit.calls.last.request.url)
+
+    client.extract_advanced(doc, force_refresh=True)
+    assert "force_refresh=true" in str(submit.calls.last.request.url)
+
+    client.submit_extract_advanced(doc, force_refresh=True)
+    assert "force_refresh=true" in str(submit.calls.last.request.url)
+
+
+async def test_async_extract_advanced_forwards_force_refresh(async_client, mock_api, tmp_path):
+    _seed_presigned(mock_api)
+    submit = _seed_job(mock_api, "/v1/extract-omni", job_id="job_omni_a")
+    doc = tmp_path / "a.pdf"
+    doc.write_bytes(b"%PDF-1.4 x")
+
+    await async_client.submit_extract_advanced(doc, force_refresh=True)
     assert "force_refresh=true" in str(submit.calls.last.request.url)

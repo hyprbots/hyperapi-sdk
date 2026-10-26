@@ -80,10 +80,14 @@ from .client import (
     _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S,
     _DEFAULT_TIMEOUT,
     _OP_TO_ERROR,
+    _cancelled_job_error,
     _download_error,
     _edit_fill_body,
+    _edit_unavailable_error,
+    _error_fields,
     _page_targets,
     _parse_ocr_text,
+    _parse_params,
     _rate_limit_error_from,
     _rate_limit_wait,
     _request_id_of,
@@ -167,7 +171,7 @@ class AsyncHyperAPIClient:
         from . import __version__  # local import to avoid circular at module load
 
         py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-        # Note the "-async" suffix in the User-Agent so backend analytics can
+        # Note the "-async" suffix in the User-Agent so server-side analytics can
         # distinguish sync vs async client usage without sniffing other signals.
         self._user_agent = (
             f"hyperapi-sdk-python/{__version__}-async "
@@ -363,6 +367,78 @@ class AsyncHyperAPIClient:
         )
         return document_key
 
+    # ── Limits ───────────────────────────────────────────────────────────
+
+    async def get_limits(self) -> dict:
+        """This key's per-task ceilings (``GET /v1/limits``) — a pure read.
+
+        Limits vary by plan, so pre-flight against this rather than hard-coding
+        a number. The response is::
+
+            {
+              "max_upload_bytes": int,            # what upload itself admits
+              "parse_fast":      {"max_bytes": int, "max_pages": int | None},
+              "parse_advanced":  {"max_bytes": int, "max_pages": int | None},
+              "bulk_parse":      {...},            # only when offered to you
+              "extract_fast":    {...},
+              "extract_advanced":{...},            # only when offered to you
+              "classify":        {...},
+              "split":           {...},
+              "redact":          {"max_bytes": int, "max_pages": int | None,
+                                  "urls_max_pages": int | None}
+            }
+
+        ``max_pages`` is ``None`` where the task does not reject on page
+        count. The optional blocks (``bulk_parse``, ``extract_advanced``) are
+        absent when that mode is not available to this key — absent means
+        "not offered", never "unlimited". Likewise ``redact.urls_max_pages``
+        is present only while ``output="urls"`` is accepted; its presence is
+        the feature detection for that mode (see :py:meth:`submit_redact`).
+
+        Returns:
+            The decoded JSON body as a dict.
+
+        Raises:
+            AuthenticationError: 401 (bad key).
+            RateLimitError: 429.
+            HyperAPIError: Any other ≥400, or a malformed body.
+        """
+        headers = self._get_headers()
+        request_id = headers["X-Request-ID"]
+
+        try:
+            resp = await self._client.get(
+                f"{self.base_url}/v1/limits", headers=headers
+            )
+        except httpx.RequestError as e:
+            raise HyperAPIError(f"Limits request failed: {e}", request_id=request_id) from e
+
+        rid = _request_id_of(resp, request_id)
+        if resp.status_code == 401:
+            raise AuthenticationError(
+                "Invalid API key.", status_code=401, request_id=rid
+            )
+        if resp.status_code == 429:
+            raise _rate_limit_error_from(resp, rid)
+        if resp.status_code >= 400:
+            raise HyperAPIError(
+                _server_message(resp, f"Limits request failed (HTTP {resp.status_code})"),
+                status_code=resp.status_code,
+                request_id=rid,
+                **_error_fields(resp),
+            )
+        try:
+            body = resp.json()
+            if not isinstance(body, dict):
+                raise TypeError(f"body is {type(body).__name__}, expected object")
+            return body
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            raise HyperAPIError(
+                f"Malformed limits response: {e}",
+                status_code=200,
+                request_id=rid,
+            ) from e
+
     # ── HTTP error classification ────────────────────────────────────────
 
     def _raise_for_known_status(
@@ -397,6 +473,7 @@ class AsyncHyperAPIClient:
                 "Add credits via your HyperAPI dashboard.",
                 status_code=402,
                 request_id=rid,
+                **_error_fields(resp),
             )
         if sc == 429:
             raise _rate_limit_error_from(resp, rid)
@@ -405,24 +482,28 @@ class AsyncHyperAPIClient:
                 _server_message(resp, "File exceeds upload size limit"),
                 status_code=413,
                 request_id=rid,
+                **_error_fields(resp),
             )
         if sc == 415:
             raise DocumentUploadError(
                 _server_message(resp, "Unsupported file type"),
                 status_code=415,
                 request_id=rid,
+                **_error_fields(resp),
             )
         if sc == 408:
             raise error_cls(
                 _server_message(resp, "Service deadline exceeded"),
                 status_code=408,
                 request_id=rid,
+                **_error_fields(resp),
             )
         if sc == 403:
             raise HyperAPIError(
                 _server_message(resp, "Forbidden"),
                 status_code=403,
                 request_id=rid,
+                **_error_fields(resp),
             )
 
     # ── Async submission (X-Async: true) ─────────────────────────────────
@@ -442,11 +523,11 @@ class AsyncHyperAPIClient:
         """Submit a pipeline op asynchronously. Returns a Job handle.
 
         ``force_refresh=True`` adds ``?force_refresh=true``, which makes the
-        router skip its Stage-2 result cache and genuinely reprocess. Without it
-        an identical (document + task + params) returns the STORED result — the
-        production TTL is 24h — so a retry can look like a no-op. Only send it
-        when the caller explicitly asked to re-run: a bypass re-runs OCR and the
-        LLM and is billed at full price, where a cache hit costs nothing.
+        API reprocess the document instead of returning the stored result
+        (results are kept for 24 hours). Without it an identical (document +
+        task + params) returns the STORED result, so a retry can look like a
+        no-op. Only send it when the caller explicitly asked to re-run: a
+        reprocess is billed at full price, where a stored result costs nothing.
 
         Omitted entirely when False so an ordinary request is byte-identical to
         before this parameter existed.
@@ -501,10 +582,16 @@ class AsyncHyperAPIClient:
             response, request_id=request_id, error_cls=error_cls, op_name=op_name
         )
         if response.status_code not in (200, 202):
+            unavailable = _edit_unavailable_error(
+                response, endpoint, _request_id_of(response, request_id)
+            )
+            if unavailable is not None:
+                raise unavailable
             raise error_cls(
                 _server_message(response, f"{op_name} submission failed"),
                 status_code=response.status_code,
                 request_id=_request_id_of(response, request_id),
+                **_error_fields(response),
             )
 
         envelope = response.json()
@@ -545,10 +632,16 @@ class AsyncHyperAPIClient:
             response, request_id=request_id, error_cls=error_cls, op_name=op_name
         )
         if response.status_code not in (200, 202):
+            unavailable = _edit_unavailable_error(
+                response, endpoint, _request_id_of(response, request_id)
+            )
+            if unavailable is not None:
+                raise unavailable
             raise error_cls(
                 _server_message(response, f"{op_name} submission failed"),
                 status_code=response.status_code,
                 request_id=_request_id_of(response, request_id),
+                **_error_fields(response),
             )
 
         return self._job_from_envelope(response.json(), op=op_name)
@@ -590,10 +683,16 @@ class AsyncHyperAPIClient:
             response, request_id=request_id, error_cls=error_cls, op_name=op_name
         )
         if response.status_code not in (200, 202):
+            unavailable = _edit_unavailable_error(
+                response, endpoint, _request_id_of(response, request_id)
+            )
+            if unavailable is not None:
+                raise unavailable
             raise error_cls(
                 _server_message(response, f"{op_name} submission failed"),
                 status_code=response.status_code,
                 request_id=_request_id_of(response, request_id),
+                **_error_fields(response),
             )
 
         return self._job_from_envelope(response.json(), op=op_name)
@@ -641,6 +740,7 @@ class AsyncHyperAPIClient:
                 _server_message(resp, f"Poll failed (HTTP {resp.status_code})"),
                 status_code=resp.status_code,
                 request_id=rid,
+                **_error_fields(resp),
             )
         try:
             return resp.json()
@@ -661,11 +761,31 @@ class AsyncHyperAPIClient:
     ) -> list[dict]:
         """List the org's recent jobs (summary rows, newest first).
 
-        Mirrors :meth:`HyperAPIClient.list_recent_jobs` — same params
-        (``limit`` valid range [1, 100], out-of-range falls back to the
-        server default 20; ``source`` filter ``"api"`` | ``"playground"``),
-        same summary-row shape, same exceptions. Fetch a full result
-        envelope for one job with :py:meth:`get_job`.
+        Args:
+            limit: Maximum rows to return. Valid range [1, 100]; out-of-range
+                values are NOT clamped — the server silently falls back to
+                the default 20 (e.g. ``limit=200`` returns 20 rows, not 100).
+            source: Optional filter — ``"api"`` or ``"playground"``. Unknown
+                values are ignored server-side (no error).
+
+        Returns:
+            A list of summary dicts (``job_id``, ``request_id``, ``status``,
+            ``task``, ``endpoint``, ``pages``, ``filename``, ``document_key``,
+            ``source``, ``is_test``, ``created_at``, ``completed_at``,
+            ``error``).
+            ``status`` may be ``"cancelled"`` for jobs stopped via
+            :py:meth:`delete_job`. Summaries never include results — fetch
+            the full envelope for one job with :py:meth:`get_job`.
+
+            ``document_key`` is the server-side handle for that job's
+            document, and is what to match on when reconciling a batch —
+            ``filename`` is whatever was sent at upload and carries no
+            uniqueness guarantee, so fifty documents named ``invoice.pdf``
+            yield fifty rows you cannot tell apart. Note that ``submit_*``
+            uploads internally and does not surface the ``document_key`` it
+            used, and no public method accepts a pre-uploaded one, so retain
+            the ``job_id`` if you need your own file→job map. ``None`` on older
+            jobs.
         """
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
@@ -712,10 +832,20 @@ class AsyncHyperAPIClient:
     async def delete_job(self, job_id: str) -> None:
         """Cancel a job (``DELETE /v1/jobs/{job_id}``).
 
-        Mirrors :meth:`HyperAPIClient.delete_job` — the server semantics are
-        *cancel*, not erase: in-flight jobs are stopped (status becomes
-        ``"cancelled"``), terminal jobs keep their result. Idempotent —
-        missing, expired, and already-terminal job ids all return success.
+        Despite the HTTP verb, the server semantics are *cancel*, not erase:
+        a pending or running job is stopped; a job that already completed or
+        failed is left untouched and keeps its result. Idempotent — missing,
+        expired, and already-terminal job ids all return success, so calling
+        this twice is safe.
+
+        How a cancelled job reports afterwards: ``GET /v1/jobs/{job_id}``
+        (:py:meth:`get_job`) returns ``status="failed"`` with an ``error``
+        beginning ``"cancelled:"`` — there is no separate ``"cancelled"``
+        status on the job itself. :py:meth:`wait_for_job` and
+        :py:meth:`wait_for_jobs` decode that and raise
+        :class:`~hyperapi.JobCancelledError` rather than the per-op failure
+        class. The summaries from :py:meth:`list_recent_jobs` do show such
+        jobs as ``status="cancelled"``.
 
         Raises:
             AuthenticationError: 401 (bad key).
@@ -805,9 +935,35 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Poll a job until it completes, fails, or the timeout elapses.
 
-        Mirrors :meth:`HyperAPIClient.wait_for_job` semantics — same return
-        shape, same exceptions — but yields to the event loop between polls
-        via ``await asyncio.sleep`` instead of blocking the thread.
+        Yields to the event loop between polls (``await asyncio.sleep``)
+        instead of blocking the thread; otherwise identical to the sync client.
+
+        Args:
+            job: A :py:class:`Job` returned by ``submit_<op>`` (preferred — the
+                ``op`` field lets us raise the right typed exception on
+                failure), or a raw ``job_id`` string (falls back to generic
+                ``HyperAPIError`` on failure).
+            timeout: Total wall-clock seconds. Defaults to the constructor's
+                ``poll_timeout``.
+            interval: Seconds between polls. Defaults to the constructor's
+                ``poll_interval``.
+
+        Returns:
+            The final ``result`` envelope from the server when ``status=completed``.
+
+        Raises:
+            JobTimeoutError: If ``timeout`` elapses with the job still pending.
+            JobCancelledError: If the job was cancelled via
+                :py:meth:`delete_job` while this call was waiting (the job
+                reports ``status=failed`` with an ``error`` beginning
+                ``"cancelled:"``; this is decoded for you).
+            RateLimitError: If a poll is answered with a 429 that this call
+                cannot wait out — either ``retry_after`` exceeds the remaining
+                budget, or the 429 is an exhausted monthly page quota
+                (``e.is_quota_exhausted``), which waiting would not clear.
+                Ordinary rate-window 429s are absorbed by backing off.
+            HyperAPIError (or subclass): If the job ends with ``status=failed``,
+                or the poll itself fails after exhausting transient retries.
         """
         if isinstance(job, Job):
             job_id = job.job_id
@@ -827,8 +983,8 @@ class AsyncHyperAPIClient:
             try:
                 envelope = await self._poll_with_retry(job_id)
             except RateLimitError as e:
-                # The poll shares the submit's per-org rate bucket; on low tiers
-                # the submit spent the token so the poll 429s. Back off and
+                # The API rate-limits polls and submits together; on the free
+                # tier the submit spent the allowance so the poll 429s. Back off and
                 # resume within the deadline instead of failing the wait.
                 wait = _rate_limit_wait(e, deadline - time.monotonic())
                 if wait is None:
@@ -943,6 +1099,9 @@ class AsyncHyperAPIClient:
         Same registry as the sync client — per-op subclass when known
         (ParseError, ExtractError, …), HyperAPIError otherwise.
         """
+        cancelled = _cancelled_job_error(envelope, job_id)
+        if cancelled is not None:
+            return cancelled
         raw = _strip_api_key(envelope.get("error")) or "Job failed"
         status_code = envelope.get("status_code")
         message = f"(HTTP {status_code}) {raw}" if status_code else raw
@@ -951,6 +1110,9 @@ class AsyncHyperAPIClient:
             message,
             status_code=status_code,
             request_id=envelope.get("request_id"),
+            code=envelope.get("error_code")
+            if isinstance(envelope.get("error_code"), str)
+            else None,
         )
 
     # ── Public submit_<op> methods ───────────────────────────────────────
@@ -961,12 +1123,18 @@ class AsyncHyperAPIClient:
         *,
         image_path: str | Path | None = None,
         mode: ParseMode | None = None,
-        include_boxes: bool = False,
-        include_image: bool = False,
+        include_boxes: bool | None = None,
+        include_image: bool | None = None,
+        include_layout: bool | None = None,
+        parse_figures: str | None = None,
+        groups_profile: str | None = None,
         force_refresh: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit a parse job asynchronously and return immediately.
+
+        ``image_path`` is a deprecated alias for ``file_path`` retained for
+        v0.1.x backward compatibility — pass exactly one.
 
         Omit ``mode`` to use the organization default (platform default:
         ``"fast"``). ``mode="advanced"`` explicitly runs layout-aware structured OCR: each
@@ -975,7 +1143,16 @@ class AsyncHyperAPIClient:
         engine; noticeably slower than ``"fast"`` but, for documents under the
         page cap, well within the default ``poll_timeout``.
 
-        ``include_boxes=True`` adds to each entry of ``result["result"]["pages"]``
+        Output flags
+        ------------
+        ``include_boxes``, ``include_image`` and ``include_layout`` are
+        tri-state. **Leave one at ``None`` (the default) and the SDK does not
+        send it, so the API's own default applies — which, in ``"fast"`` mode,
+        is ON for all three.** Pass ``False`` to opt out of that piece of
+        output explicitly; pass ``True`` to ask for it regardless of the
+        server default. Only a flag you set reaches the wire.
+
+        ``include_boxes`` controls, on each entry of ``result["result"]["pages"]``,
         a ``boxes`` list of line boxes (``{"text", "bbox": [left, top, right,
         bottom], "confidence"}``) and, for PDF, XPS and image inputs, a
         ``word_boxes`` list with one entry per word carrying typography:
@@ -985,36 +1162,69 @@ class AsyncHyperAPIClient:
         ``"model"`` when estimated from the pixels, which can be wrong). Keys are
         omitted when not stated; ``word_boxes`` is ``[]`` when none were
         produced. Box coordinates are pixels in the page's ``dimensions``
-        space. Office documents (docx, pptx) return ``boxes`` only with
-        ``include_image=True``; ``mode="advanced"`` returns no boxes.
+        space. Office documents (docx, pptx) return ``boxes`` only with page
+        images on; ``mode="advanced"`` returns no boxes.
 
         PDF, XPS and image pages from ``mode="fast"`` always carry
         ``dimensions`` (``{"width", "height"}`` in pixels), ``page_size``
         (``{"width", "height", "unit"}``, ``"pt"`` for PDF/XPS, ``"px"`` for
         images) and ``background`` (the page's background colour, hex).
 
-        ``include_image=True`` adds a presigned ``image_url`` to each
-        ``result["result"]["pages"]`` entry for the deskew-corrected page image
-        (plus ``dimensions`` where the page does not already carry it).
+        ``include_image`` controls a presigned ``image_url`` on each
+        ``result["result"]["pages"]`` entry, pointing to the deskew-corrected
+        page image (plus ``dimensions`` where the page does not already carry
+        it). The URL is valid for about 15 minutes; a page whose image cannot
+        be presigned is returned without ``image_url`` rather than failing.
+
+        ``include_layout`` (``"fast"`` mode only) controls, per page, ``layout``
+        (the detected regions in reading order, ``bbox`` in the same pixel
+        space as ``boxes``) and ``layout_text``, plus ``result["result"]
+        ["layout_text"]``, the text rebuilt around the regions. ``False`` also
+        turns figure parsing off. ``mode="advanced"`` has its own
+        ``structured`` layout; sending ``include_layout=True`` with it is a
+        ``400``.
+
+        ``parse_figures`` (``"fast"`` mode, needs the layout on) is a
+        comma-separated list of region kinds to parse further — any of
+        ``"image"``, ``"chart"``, ``"table"`` (e.g. ``"table"`` or
+        ``"image,chart,table"``). Each matching region gains ``content`` (a
+        chart's data as a markdown table, an image's caption or text, a table
+        as HTML) and a ``parse_status``; ``result["result"]["figure_parse"]``
+        summarises the run. Best-effort: OCR and layout are returned even when
+        a region cannot be parsed. Omitted, the API parses all three kinds
+        when the layout is on. Pass ``"none"`` to opt out. An explicit list
+        with ``include_layout=False`` is a ``400``.
+
+        ``groups_profile`` (``"fast"`` mode, layout on) selects how the
+        document outline in ``result["result"]["groups"]`` is built: ``"A"``
+        (the API default — every block in exactly one group, the tree in
+        reading order, a ``preamble`` group before the first heading, one
+        ``page_header`` / ``page_footer`` group per page) or ``"B"`` (headings
+        ranked by measured type size, running titles marked ``furniture:
+        true``, captions bound to their figure or table, tables joined across
+        pages, no ``list`` groups; not in reading order — use
+        ``blocks[].order``). Case-insensitive; unknown values are treated as
+        ``"A"``. ``result["result"]["metadata"]["groups_profile"]`` reports the
+        profile applied.
 
         ``force_refresh=True`` re-runs OCR instead of returning the stored
-        result. Parse has no LLM stage, so what it caches — and what this
-        bypasses — is the OCR output itself, for 24h in production. Without it
-        a retry after a bad parse returns the same bad parse for the rest of
-        the day. Covers both ``mode="fast"`` and ``mode="advanced"``, which sit
-        in separate cache namespaces. A forced run is billed at full price
-        where a cached one costs nothing, so send it only when the caller
-        explicitly asked to re-run.
+        result. Parse results are cached as OCR output, so what this
+        bypasses is the OCR output itself, for 24 hours. Without it a retry
+        after a bad parse returns the same bad parse for the rest of the day.
+        Covers both ``mode="fast"`` and ``mode="advanced"``, which sit in
+        separate cache namespaces. A forced run is billed at full price where
+        a cached one costs nothing, so send it only when the caller explicitly
+        asked to re-run.
 
         Large documents
         ---------------
-        Advanced parse caps at 60 pages / 50 MB (``413`` past either). Selected
-        deployments raise that to 500 pages / 512 MiB, but only when *every*
-        condition holds: ``mode="advanced"``, submitted asynchronously (this
-        method always is), the org is on the ``custom`` tier, and the caller is
-        an API key rather than the dashboard. Anything else keeps the ordinary
-        ``413``, and the server does not report which condition was missed.
-        Availability is per-deployment — check with support before relying on it.
+        ``"fast"`` mode has no page limit. ``"advanced"`` mode accepts up to 60
+        pages per the public reference (500 for eligible plans when submitted
+        asynchronously, as this method always does) and answers ``413`` above
+        that; the byte cap and the exact page figures for *your* key are
+        returned by :py:meth:`get_limits` (``parse_advanced`` and, when
+        offered, ``bulk_parse``). The server does not report which condition
+        kept a document out of the larger allowance.
 
         Such a document runs as page-range segments but stays ONE job. Its
         completed result differs in shape, so branch on it:
@@ -1038,11 +1248,14 @@ class AsyncHyperAPIClient:
             "/v1/parse",
             "parse",
             path,
-            params={
-                **({"mode": mode} if mode is not None else {}),
-                "include_boxes": include_boxes,
-                "include_image": include_image,
-            },
+            params=_parse_params(
+                mode=mode,
+                include_boxes=include_boxes,
+                include_image=include_image,
+                include_layout=include_layout,
+                parse_figures=parse_figures,
+                groups_profile=groups_profile,
+            ),
             force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
@@ -1061,11 +1274,11 @@ class AsyncHyperAPIClient:
 
         ``category`` selects the Basic extractor. Omit it to use the organization
         default (platform default: ``"financial"``). ``"financial"`` (
-        the two-leg IDP adapter for invoices/receipts) or ``"non_financial"``
+        the built-in invoice and receipt fields) or ``"non_financial"``
         (extract-fast — see ``schema`` below). For auto-detecting Advanced
         extraction, use :py:meth:`submit_extract_advanced`.
 
-        ``parse_mode`` explicitly selects the Stage-1 OCR engine, independent of
+        ``parse_mode`` explicitly selects the OCR engine, independent of
         ``category``: ``"fast"`` (fast text extraction) or
         ``"advanced"`` (advanced layout-aware parsing for dense tables/forms —
         higher accuracy, slower, costs more; available on paid tiers). Omit it
@@ -1084,7 +1297,7 @@ class AsyncHyperAPIClient:
         """
         path = self._resolve_path(file_path)
         resolved_schema = self._resolve_schema(schema)
-        # The router honours `schema` on non_financial only; on financial it is
+        # The API applies `schema` to non_financial only; on financial it is
         # ignored server-side. Silently dropping it would return plausible
         # output shaped by a different extractor, with nothing to tell the
         # caller their template never applied — so this fails loudly instead.
@@ -1094,8 +1307,8 @@ class AsyncHyperAPIClient:
                 f'(got category="{category}")'
             )
         # A schema with no declared category: send non_financial explicitly rather
-        # than deferring. The SDK cannot read the org's default (that endpoint is
-        # JWT-only, unreachable with an API key), so deferring would risk resolving
+        # than deferring. The SDK cannot read the organization default (that endpoint is
+        # dashboard-only, unreachable with an API key), so deferring would risk resolving
         # to financial — where the server ignores `schema` silently and the caller
         # gets invoice-shaped output with no indication their template was dropped.
         # Passing a schema is only meaningful on non_financial, so inferring it is
@@ -1113,10 +1326,10 @@ class AsyncHyperAPIClient:
             "extract",
             path,
             params={
-                # Omitted when None so the router's request > org > platform
-                # precedence can reach the org tier — same mechanism `parse_mode`
-                # below already uses. Sending a value unconditionally is what made
-                # an org's `defaults.extract_category` unreachable from the SDK.
+                # Omitted when None so the server-side default applies — same
+                # mechanism `parse_mode` below already uses. Sending a value
+                # unconditionally is what made an organization's configured
+                # default category unreachable from the SDK.
                 **({"category": effective_category} if effective_category is not None else {}),
                 **({"parse_mode": parse_mode} if parse_mode is not None else {}),
             },
@@ -1130,17 +1343,22 @@ class AsyncHyperAPIClient:
         file_path: str | Path,
         *,
         parse_mode: ParseMode | None = None,
+        force_refresh: bool = False,
         use_presigned: bool = True,
     ) -> Job:
         """Submit an Advanced extract job asynchronously and return immediately.
 
         Advanced extraction auto-detects the document type (no ``category``
-        needed): invoice-family documents route to the two-leg IDP adapter,
-        everything else to schema-less grounded extraction. Returns the same
+        needed): invoice-family documents use the built-in invoice and receipt
+        fields, everything else schema-less grounded extraction. Returns the same
         envelope shape as :py:meth:`submit_extract`.
 
-        ``parse_mode`` selects the Stage-1 OCR engine (``"fast"``/``"advanced"``,
+        ``parse_mode`` selects the OCR engine (``"fast"``/``"advanced"``,
         same meaning as :py:meth:`submit_extract`).
+
+        ``force_refresh=True`` reprocesses instead of returning the stored
+        result for an identical document and options (same meaning and same
+        billing caveat as on :py:meth:`submit_extract`).
         """
         path = self._resolve_path(file_path)
         # op_name="extract" is deliberate error-taxonomy reuse (same ExtractError,
@@ -1151,6 +1369,7 @@ class AsyncHyperAPIClient:
             "extract",
             path,
             params={"parse_mode": parse_mode} if parse_mode is not None else {},
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
 
@@ -1247,15 +1466,17 @@ class AsyncHyperAPIClient:
         """Submit a redact/deidentify job asynchronously and return immediately.
 
 
-        Inline output is capped at **36 pages**; ``output="urls"`` raises the
-        cap to **60** where the deployment offers it (feature-detect on
-        ``redact.urls_max_pages`` in ``GET /v1/limits`` — absent means not
-        offered) and returns masked pages as short-lived presigned links in
-        ``result["pages"]`` (``{page_number, image_url}``) instead of inline
+        Inline output has a page cap; ``output="urls"`` raises it where your
+        account offers that mode. Both figures vary by plan and are returned
+        by :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
+        and ``limits["redact"]["urls_max_pages"]`` for URL output (absent
+        means URL output is not offered — feature-detect on that key).
+        ``output="urls"`` returns masked pages as short-lived presigned links
+        in ``result["pages"]`` (``{page_number, image_url}``) instead of inline
         base64 ``result["images"]`` — ``download_pages()`` accepts that shape
         directly. An over-cap document returns ``413`` up front, before any
         OCR is billed; ``output="urls"`` cannot be combined with
-        ``include_logos`` (``400``). See README "Limits by operation".
+        ``include_logos`` (``400``).
 
         ``mode="redact"`` applies black boxes; ``mode="deidentify"`` overlays
         synthetic values. ``pii_config`` (``{"mode": "extend"|"replace",
@@ -1267,7 +1488,7 @@ class AsyncHyperAPIClient:
         if output not in ("inline", "urls"):
             # Fail loudly client-side: only the non-default literal goes on the
             # wire, so a typo ("url", "URLS") would otherwise silently run
-            # inline at the 36-page cap with no server-side rejection possible.
+            # inline at the inline page cap with no server-side rejection possible.
             raise ValueError(f'output must be "inline" or "urls", got {output!r}')
         path = self._resolve_path(file_path)
         data = (
@@ -1419,15 +1640,29 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Submit a batch of already-uploaded documents for async processing.
 
-        Returns ``{batch_id, status, total_items}``; poll :meth:`get_batch` (or
-        :meth:`wait_for_batch`) for per-document results. Endpoint is one of
-        ``/v1/parse``, ``/v1/extract``, ``/v1/classify``, ``/v1/split``, ``/v1/redact``.
-        A repeated ``idempotency_key`` returns the existing batch. ``webhook_url``
-        registers a completion callback; ``metadata`` attaches caller-supplied
-        key/value tags echoed back on reads and in the webhook payload.
-        ``parse_mode`` (``/v1/parse`` only) selects ``fast`` (default) or
-        ``advanced`` (advanced layout-aware, paid plans only — 403 otherwise);
-        advanced batch runs on the lowest-priority lane (24h SLA).
+        Returns immediately with ``{batch_id, status, total_items}``; the work
+        runs on spare capacity. Poll :meth:`get_batch` (or :meth:`wait_for_batch`)
+        for per-document results (each result lands in S3, keyed by ``doc_index``).
+
+        Args:
+            endpoint: One of ``/v1/parse``, ``/v1/extract``, ``/v1/classify``,
+                ``/v1/split``, ``/v1/redact``.
+            document_keys: Keys from :meth:`upload_document`, one per document.
+            options: Task-specific options, forwarded to each document's run.
+            parse_mode: ``fast`` (default) or ``advanced``, for ``/v1/parse`` only.
+                ``advanced`` runs layout-aware parsing. Advanced parse may not
+                be available for batch on your plan: the API then rejects the
+                batch with a ``400`` or ``403`` whose message says why. Batch
+                advanced parse runs on the lowest-priority lane, yielding to
+                interactive traffic, so it may take longer under load (24h SLA).
+                Ignored by non-``/v1/parse`` endpoints.
+            webhook_url: Optional completion webhook (delivered when available).
+            metadata: Optional caller-supplied key/value tags stored with the
+                batch and echoed back on :meth:`get_batch` / :meth:`list_batches`
+                and in the completion webhook payload.
+            estimated_pages_per_doc: Hint for the up-front quota check.
+            idempotency_key: Resubmitting with the same key returns the existing
+                batch instead of creating a duplicate.
         """
         body: dict = {
             "endpoint": endpoint,
@@ -1530,8 +1765,11 @@ class AsyncHyperAPIClient:
         *,
         image_path: str | Path | None = None,
         mode: ParseMode | None = None,
-        include_boxes: bool = False,
-        include_image: bool = False,
+        include_boxes: bool | None = None,
+        include_image: bool | None = None,
+        include_layout: bool | None = None,
+        parse_figures: str | None = None,
+        groups_profile: str | None = None,
         force_refresh: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
@@ -1539,41 +1777,68 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Parse a document using OCR. Submits asynchronously and polls until done.
 
-        Omit ``mode`` to use the organization default (platform default:
-        ``"fast"``). ``mode="advanced"`` explicitly runs layout-aware structured OCR: each
-        ``result["result"]["pages"]`` entry gains a ``structured`` dict with ``html``,
-        ``markdown``, and ``regions``. Only meaningful on the default OCR
-        engine; noticeably slower than ``"fast"``.
+        The returned dict is the response envelope; the parse payload is nested
+        one level under ``result`` — OCR text at ``result["result"]["ocr"]`` and
+        the page list at ``result["result"]["pages"]``.
 
-        ``include_boxes=True`` adds to each entry of ``result["result"]["pages"]``
-        a ``boxes`` list of line boxes (``{"text", "bbox": [left, top, right,
-        bottom], "confidence"}``) and, for PDF, XPS and image inputs, a
-        ``word_boxes`` list with one entry per word carrying typography:
-        ``font``, ``size`` (in ``page_size["unit"]``), ``color``, ``bold``,
-        ``italic``, ``background`` (only where it differs from the page) and
-        ``font_source`` (``"document"`` when declared by the file's text layer,
-        ``"model"`` when estimated from the pixels, which can be wrong). Keys are
-        omitted when not stated; ``word_boxes`` is ``[]`` when none were
-        produced. Box coordinates are pixels in the page's ``dimensions``
-        space. Office documents (docx, pptx) return ``boxes`` only with
-        ``include_image=True``; ``mode="advanced"`` returns no boxes.
+        Args:
+            file_path: Path to the file (PDF, PNG, JPG, WEBP, TIFF, GIF).
+            image_path: Deprecated alias for file_path.
+            mode: Explicit ``"fast"`` or ``"advanced"``. Omit to use the
+                organization default (platform default: ``"fast"``). Advanced
+                is layout-aware structured OCR: each ``result["result"]["pages"]``
+                entry gains a ``structured`` dict with ``html``, ``markdown``,
+                and ``regions``). Advanced only applies on the default OCR
+                engine and is noticeably slower.
+            include_boxes: Tri-state. ``None`` (default) sends nothing, so the
+                API default applies — ON in ``"fast"`` mode. ``False`` opts
+                out; ``True`` asks explicitly. When on, each
+                ``result["result"]["pages"]`` entry includes a ``boxes`` list
+                of line boxes (``{"text", "bbox": [left, top, right, bottom],
+                "confidence"}``) and, for PDF, XPS and image inputs, a
+                ``word_boxes`` list of per-word boxes with ``font``, ``size``,
+                ``color``, ``bold``, ``italic``, ``background`` and
+                ``font_source`` (``"document"`` or ``"model"``). Coordinates
+                are pixels in the page's ``dimensions`` space.
+                ``mode="advanced"`` returns no boxes. See :py:meth:`submit_parse`.
+            include_image: Tri-state, same convention; the API default is ON.
+                When on, each ``result["result"]["pages"]`` entry includes an
+                ``image_url`` (presigned GET for the deskew-corrected page,
+                valid about 15 minutes). ``dimensions`` (``{"width",
+                "height"}`` in that image's pixel space, which matches the box
+                coordinate space) is present on PDF, XPS and image pages in
+                fast mode regardless, alongside ``page_size`` and
+                ``background``.
+            include_layout: Tri-state, same convention; the API default is ON
+                in ``"fast"`` mode. When on, each page gains ``layout`` and
+                ``layout_text`` and the result gains ``layout_text``. Not for
+                ``mode="advanced"`` (``True`` there is a ``400``). See
+                :py:meth:`submit_parse`.
+            parse_figures: Comma-separated region kinds to parse further —
+                ``"image"``, ``"chart"``, ``"table"`` — or ``"none"``.
+                Omitted, the API parses all three when the layout is on.
+                Needs the layout on. See :py:meth:`submit_parse`.
+            groups_profile: ``"A"`` (API default) or ``"B"`` — how the
+                document outline in ``result["result"]["groups"]`` is built.
+                See :py:meth:`submit_parse`.
+            force_refresh: Re-run OCR instead of returning the cached result
+                (results are cached for 24 hours). See :py:meth:`submit_parse`.
+            use_presigned: Use the presigned-S3 upload flow (default True).
+            poll_timeout: Override the constructor's poll_timeout for this call.
+            poll_interval: Override the constructor's poll_interval for this call.
 
-        PDF, XPS and image pages from ``mode="fast"`` always carry
-        ``dimensions`` (``{"width", "height"}`` in pixels), ``page_size``
-        (``{"width", "height", "unit"}``, ``"pt"`` for PDF/XPS, ``"px"`` for
-        images) and ``background`` (the page's background colour, hex).
+        Returns:
+            Response envelope; OCR text at ``result["result"]["ocr"]`` and pages
+            at ``result["result"]["pages"]``.
 
-        ``include_image=True`` adds a presigned ``image_url`` to each
-        ``result["result"]["pages"]`` entry for the deskew-corrected page image
-        (plus ``dimensions`` where the page does not already carry it).
-
-        A large advanced document (over the 60-page cap, admitted on deployments
-        that allow it — see :py:meth:`submit_parse`) returns a different shape:
-        no inline ``pages``/``ocr``, the payload behind a presigned
-        ``result["result_url"]``, and failed page ranges in
-        ``result["metadata"]["gaps"]``. Branch on ``result_url`` being present
-        rather than assuming the inline shape, and raise ``poll_timeout`` — such
-        a job can outlast the 3600 s default.
+            EXCEPT for a large advanced document (past the ordinary advanced
+            page cap, admitted on plans that allow it — see
+            :py:meth:`submit_parse` and :py:meth:`get_limits`): those carry no
+            inline ``pages``/``ocr``. The payload is behind a presigned
+            ``result["result_url"]`` and failed page ranges are listed in
+            ``result["metadata"]["gaps"]``. Branch on ``result_url`` being
+            present rather than assuming the inline shape, and raise
+            ``poll_timeout`` — such a job can outlast the 3600 s default.
         """
         job = await self.submit_parse(
             file_path=file_path,
@@ -1581,6 +1846,9 @@ class AsyncHyperAPIClient:
             mode=mode,
             include_boxes=include_boxes,
             include_image=include_image,
+            include_layout=include_layout,
+            parse_figures=parse_figures,
+            groups_profile=groups_profile,
             force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
@@ -1602,16 +1870,37 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Extract structured data from a document.
 
-        This is the Basic extractor. ``category="financial"`` (default) runs
-        the two-leg IDP adapter (invoices/receipts). ``category="non_financial"``
-        is extract-fast: no document-type detection at all — pass ``schema``,
-        a blank template (dict, path to a JSON file, or raw JSON string) with
-        ``None``/``False``/``"unselected"`` placeholders, and the response
-        fills in that SAME structure from the document at
-        ``result["result"]["data"]``. Omit ``schema`` to use this org's
-        stored default template instead (set up separately, offline). For
-        auto-detecting Advanced extraction (no ``category`` needed), use
-        :py:meth:`extract_advanced`.
+        Submits asynchronously and polls until done. Bypasses any edge-timeout
+        ceiling because each individual HTTP request stays sub-second.
+
+        This is the Basic extractor. ``category="financial"`` (default) uses the
+        built-in invoice and receipt fields. ``category="non_financial"``
+        is extract-fast: no document-type detection; pass ``schema`` to
+        describe the documents — a blank
+        template with ``None``/``False``/``"unselected"`` as placeholders
+        (e.g. ``{"patient_name": None, "insurance": {"Medicare":
+        "unselected", "Self-Pay": "unselected"}}``, as a dict, a path to a
+        JSON file, or a raw JSON string), and the response fills in that SAME
+        structure from the document — nothing is stored server-side, pass a
+        different ``schema`` next call for a different shape, no
+        merge/versioning to reason about. Omit ``schema`` to use this org's
+        stored default template instead (set up separately, offline — not
+        through this SDK); with no schema and no stored default, this
+        currently falls back to a generic extraction (a known gap, not yet
+        unified with this flow). For auto-detecting Advanced extraction (no
+        ``category`` needed), use :py:meth:`extract_advanced`.
+
+        Returns:
+            Response envelope. For ``category="financial"``: the structured
+            payload is one level under ``result``:
+            ``result["result"]["entities"]`` (header/party fields),
+            ``result["result"]["line_items"]`` (per-line rows), and
+            ``result["result"]["summary"]`` (document-level totals/tax/currency —
+            e.g. the grand total lives here, ``summary["total_amount"]``, NOT in
+            entities). For ``category="non_financial"`` (extract-fast): the
+            filled-in template is at ``result["result"]["data"]`` (same shape
+            as ``schema``, or the org's stored default). Raw OCR is at the
+            envelope top level, ``result["ocr_text"]``, in both cases.
         """
         job = await self.submit_extract(
             file_path,
@@ -1630,19 +1919,23 @@ class AsyncHyperAPIClient:
         file_path: str | Path,
         *,
         parse_mode: ParseMode | None = None,
+        force_refresh: bool = False,
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> dict:
         """Advanced extraction — auto-detects the document type, no ``category``.
 
-        Invoice-family documents route to the two-leg IDP adapter; everything
-        else to schema-less grounded extraction. Submits asynchronously and
+        Invoice-family documents use the built-in invoice and receipt fields;
+        everything else schema-less grounded extraction. Submits asynchronously and
         polls until done. Returns the same envelope shape as :py:meth:`extract`.
+        ``force_refresh=True`` reprocesses instead of returning the stored
+        result (see :py:meth:`submit_extract_advanced`).
         """
         job = await self.submit_extract_advanced(
             file_path,
             parse_mode=parse_mode,
+            force_refresh=force_refresh,
             use_presigned=use_presigned,
         )
         return await self.wait_for_job(
@@ -1670,6 +1963,13 @@ class AsyncHyperAPIClient:
         ``non_domain_label``, ``non_domain_exit_label``, ``confusion_neighbors``,
         and the token/page budgets (``start_token_budget``, ``end_token_budget``,
         ``max_start_pages``, ``max_end_pages``).
+
+        Returns:
+            Response envelope. The prediction is one level under ``result``:
+            ``result["result"]["document_type"]`` (e.g. ``"invoice"``), with
+            ``confidence`` (a categorical label such as ``"very_high"``, not a
+            float), ``domain``, and ``needs_review`` alongside it. Raw OCR is at
+            the envelope top level in ``result["ocr_text"]``.
         """
         job = await self.submit_classify(
             file_path,
@@ -1699,6 +1999,13 @@ class AsyncHyperAPIClient:
         ``use_thinking``, ``segment_classes``, ``extend_segment_classes``,
         and ``custom_domain_guidelines`` (its ``domain_name`` sub-field is
         required when the object is supplied).
+
+        Returns:
+            Response envelope. The detected parts are at
+            ``result["result"]["segmentation"]["splits"]`` — a list where each
+            item has ``split_label``, ``start_page``, ``end_page``,
+            ``confidence``, and ``sub_documents``. (Note the ``segmentation``
+            wrapper: this is one level deeper than the other operations' payloads.)
         """
         job = await self.submit_split(
             file_path,
@@ -1727,15 +2034,17 @@ class AsyncHyperAPIClient:
         """Redact or deidentify PII in a document. Submits async + polls until done.
 
 
-        Inline output is capped at **36 pages**; ``output="urls"`` raises the
-        cap to **60** where the deployment offers it (feature-detect on
-        ``redact.urls_max_pages`` in ``GET /v1/limits`` — absent means not
-        offered) and returns masked pages as short-lived presigned links in
-        ``result["pages"]`` (``{page_number, image_url}``) instead of inline
+        Inline output has a page cap; ``output="urls"`` raises it where your
+        account offers that mode. Both figures vary by plan and are returned
+        by :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
+        and ``limits["redact"]["urls_max_pages"]`` for URL output (absent
+        means URL output is not offered — feature-detect on that key).
+        ``output="urls"`` returns masked pages as short-lived presigned links
+        in ``result["pages"]`` (``{page_number, image_url}``) instead of inline
         base64 ``result["images"]`` — ``download_pages()`` accepts that shape
         directly. An over-cap document returns ``413`` up front, before any
         OCR is billed; ``output="urls"`` cannot be combined with
-        ``include_logos`` (``400``). See README "Limits by operation".
+        ``include_logos`` (``400``).
 
         ``mode="redact"`` masks PII with black boxes; ``mode="deidentify"``
         overlays synthetic replacements. ``include_logos=True`` also masks logos.
@@ -1895,16 +2204,26 @@ class AsyncHyperAPIClient:
         *,
         prefix: str = "page",
     ) -> list[Path]:
-        """Download a result's page images to a folder. Async mirror of the sync client's
-        :py:meth:`~hyperapi.client.HyperAPIClient.download_pages`.
+        """Download a result's page images to a folder.
 
-        Works with :py:meth:`edit_detect` (blank detected pages), :py:meth:`edit_fill` /
-        :py:meth:`edit` (filled pages), or :py:meth:`parse` with ``include_image=True``.
-        Files land at ``<dest_dir>/<prefix>-<page number>.png``. Pages are downloaded
-        concurrently.
+        Works with whatever you just got back — :py:meth:`edit_detect` (the blank detected
+        pages), :py:meth:`edit_fill` / :py:meth:`edit` (the filled ones), or
+        :py:meth:`parse` with page images on (the API default; do not pass
+        ``include_image=False``). Files are written as
+        ``<dest_dir>/<prefix>-<page number>.png``; the directory is created if needed.
+        Pages are downloaded concurrently.
 
-        Presigned URLs live ~15 min. If they have expired, re-poll with :py:meth:`get_job`
-        for fresh ones (the job itself survives 24 h) and call this again.
+        Page images are served as **short-lived presigned URLs** (~15 min), so download
+        promptly. If they have expired, re-poll with :py:meth:`get_job` — the server mints
+        fresh URLs for the full 24 h the job lives — and call this again.
+
+        Args:
+            result: The dict returned by an op that produced page images.
+            dest_dir: Folder to write into. Created if it does not exist.
+            prefix: Filename stem; defaults to ``page`` → ``page-1.png``.
+
+        Returns:
+            The written paths, in page order.
 
         Raises:
             ValueError: If the result carries no pages, or a page has no ``image_url``.
@@ -1936,8 +2255,8 @@ class AsyncHyperAPIClient:
         """Parse and extract in one call.
 
         Uploads the document once, then submits the parse and extract legs
-        back-to-back. The platform runs the two legs concurrently on the
-        backend; the SDK polls both jobs concurrently via ``asyncio.gather``.
+        back-to-back. The server runs the two legs concurrently; the SDK polls
+        both jobs concurrently via ``asyncio.gather``.
         Total wall-clock ≈ max(parse, extract) + small polling overhead.
 
         Returns:
@@ -1946,8 +2265,8 @@ class AsyncHyperAPIClient:
         path = self._resolve_path(file_path, image_path)
         document_key = await self.upload_document(path)
         # The two submissions could in principle be gathered too, but keeping
-        # them sequential matches the sync client's behavior and the backend
-        # router serializes them anyway through the shared document_key.
+        # them sequential matches the sync client's behavior and the server
+        # serializes them anyway through the shared document_key.
         parse_job = await self._submit_via_doc_key(
             "/v1/parse",
             "parse",

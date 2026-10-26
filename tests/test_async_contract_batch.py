@@ -1,6 +1,6 @@
 """Async twin of test_contract_batch.py — POST/GET /v1/batch.
 
-Hermetic — respx (`mock_backend`) intercepts every /v1/batch call; no network.
+Hermetic — respx (`mock_api`) intercepts every /v1/batch call; no network.
 Focused on the async surface, especially the webhook_url/metadata body fields.
 """
 
@@ -14,8 +14,8 @@ import pytest
 from hyperapi import HyperAPIError
 
 
-async def test_create_batch_posts_body_and_returns(async_client, mock_backend):
-    route = mock_backend.post("/v1/batch").mock(
+async def test_create_batch_posts_body_and_returns(async_client, mock_api):
+    route = mock_api.post("/v1/batch").mock(
         return_value=httpx.Response(
             202, json={"batch_id": "b1", "status": "queued", "total_items": 2}
         )
@@ -27,8 +27,8 @@ async def test_create_batch_posts_body_and_returns(async_client, mock_backend):
     assert payload["document_keys"] == ["k1", "k2"]
 
 
-async def test_create_batch_sends_webhook_url_and_metadata_when_set(async_client, mock_backend):
-    route = mock_backend.post("/v1/batch").mock(
+async def test_create_batch_sends_webhook_url_and_metadata_when_set(async_client, mock_api):
+    route = mock_api.post("/v1/batch").mock(
         return_value=httpx.Response(
             202, json={"batch_id": "b1", "status": "queued", "total_items": 1}
         )
@@ -44,8 +44,8 @@ async def test_create_batch_sends_webhook_url_and_metadata_when_set(async_client
     assert payload["metadata"] == {"run": "nightly", "team": "ap"}
 
 
-async def test_create_batch_omits_webhook_url_and_metadata_when_unset(async_client, mock_backend):
-    route = mock_backend.post("/v1/batch").mock(
+async def test_create_batch_omits_webhook_url_and_metadata_when_unset(async_client, mock_api):
+    route = mock_api.post("/v1/batch").mock(
         return_value=httpx.Response(
             202, json={"batch_id": "b1", "status": "queued", "total_items": 1}
         )
@@ -56,8 +56,8 @@ async def test_create_batch_omits_webhook_url_and_metadata_when_unset(async_clie
     assert "metadata" not in payload
 
 
-async def test_get_batch_404_raises(async_client, mock_backend):
-    mock_backend.get("/v1/batch/missing").mock(
+async def test_get_batch_404_raises(async_client, mock_api):
+    mock_api.get("/v1/batch/missing").mock(
         return_value=httpx.Response(404, json={"detail": "Batch not found"})
     )
     with pytest.raises(HyperAPIError):

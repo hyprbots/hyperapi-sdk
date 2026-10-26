@@ -13,19 +13,19 @@ import pytest
 from tests.test_contract_extract_schema import TEMPLATE, _sent_schema
 
 
-def _seed_presigned(mock_backend, *, key="doc_sch_a"):
-    mock_backend.post("/v1/documents/upload").mock(
+def _seed_presigned(mock_api, *, key="doc_sch_a"):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": key,
             "upload_url": f"https://s3.local/{key}?sig=x",
             "expires_in": 600,
         }),
     )
-    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
+    mock_api.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
 
 
-def _seed_submit(mock_backend, *, job_id="job_sch_a1"):
-    return mock_backend.post("/v1/extract").mock(
+def _seed_submit(mock_api, *, job_id="job_sch_a1"):
+    return mock_api.post("/v1/extract").mock(
         return_value=httpx.Response(202, json={
             "job_id": job_id, "status": "pending", "poll_url": f"/v1/jobs/{job_id}",
         }),
@@ -33,9 +33,9 @@ def _seed_submit(mock_backend, *, job_id="job_sch_a1"):
 
 
 @pytest.mark.asyncio
-async def test_async_dict_schema_is_sent(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    route = _seed_submit(mock_backend)
+async def test_async_dict_schema_is_sent(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    route = _seed_submit(mock_api)
 
     await async_client.submit_extract(
         tiny_pdf, category="non_financial", schema=TEMPLATE
@@ -45,9 +45,9 @@ async def test_async_dict_schema_is_sent(mock_backend, async_client, tiny_pdf):
 
 
 @pytest.mark.asyncio
-async def test_async_raw_json_string_is_accepted(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    route = _seed_submit(mock_backend)
+async def test_async_raw_json_string_is_accepted(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    route = _seed_submit(mock_api)
 
     await async_client.submit_extract(
         tiny_pdf, category="non_financial", schema=json.dumps(TEMPLATE)
@@ -57,9 +57,9 @@ async def test_async_raw_json_string_is_accepted(mock_backend, async_client, tin
 
 
 @pytest.mark.asyncio
-async def test_async_omitted_schema_sends_no_field(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    route = _seed_submit(mock_backend)
+async def test_async_omitted_schema_sends_no_field(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    route = _seed_submit(mock_api)
 
     await async_client.submit_extract(tiny_pdf, category="non_financial")
 
