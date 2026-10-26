@@ -1,9 +1,9 @@
 """Basic extract defers `category` to the organization unless the caller declares one.
 
 `category` used to default to "financial" and was sent on every request, so the
-router's request > org > platform precedence could never reach the org tier: an
-organization with `defaults.extract_category` configured was unreachable from the
-SDK entirely, and every call landed on the two-leg invoice adapter.
+server-side default could never apply: an organization with a configured default
+category was unreachable from the SDK entirely, and every call used the built-in
+invoice and receipt fields.
 
 Omission is the mechanism — the same one `parse_mode` already uses two lines down.
 `process()` has always omitted it, so before this change the SDK's two extract
@@ -26,51 +26,51 @@ TEMPLATE = {"listings": [{"street_name": None}]}
 
 
 class TestOmissionIsTheMechanism:
-    def test_no_category_means_no_query_param(self, mock_backend, client, tiny_pdf):
-        _seed_presigned(mock_backend)
-        submit, _ = _seed_completed(mock_backend, job_id="j_omit", path="/v1/extract")
+    def test_no_category_means_no_query_param(self, mock_api, client, tiny_pdf):
+        _seed_presigned(mock_api)
+        submit, _ = _seed_completed(mock_api, job_id="j_omit", path="/v1/extract")
         client.extract(tiny_pdf)
         assert "category" not in submit.calls[0].request.url.params
 
-    def test_explicit_financial_is_still_sent(self, mock_backend, client, tiny_pdf):
+    def test_explicit_financial_is_still_sent(self, mock_api, client, tiny_pdf):
         """Deferring must not erase an explicit choice — that is the contract."""
-        _seed_presigned(mock_backend)
-        submit, _ = _seed_completed(mock_backend, job_id="j_fin", path="/v1/extract")
+        _seed_presigned(mock_api)
+        submit, _ = _seed_completed(mock_api, job_id="j_fin", path="/v1/extract")
         client.extract(tiny_pdf, category="financial")
         assert submit.calls[0].request.url.params["category"] == "financial"
 
-    def test_explicit_non_financial_is_still_sent(self, mock_backend, client, tiny_pdf):
-        _seed_presigned(mock_backend)
-        submit, _ = _seed_completed(mock_backend, job_id="j_non", path="/v1/extract")
+    def test_explicit_non_financial_is_still_sent(self, mock_api, client, tiny_pdf):
+        _seed_presigned(mock_api)
+        submit, _ = _seed_completed(mock_api, job_id="j_non", path="/v1/extract")
         client.extract(tiny_pdf, category="non_financial")
         assert submit.calls[0].request.url.params["category"] == "non_financial"
 
 
 class TestSchemaWithoutACategory:
-    def test_it_does_not_raise(self, mock_backend, client, tiny_pdf):
+    def test_it_does_not_raise(self, mock_api, client, tiny_pdf):
         """The call this change exists to enable. Under the old guard,
         `None != "non_financial"` was True and this raised client-side."""
-        _seed_presigned(mock_backend)
-        submit, _ = _seed_completed(mock_backend, job_id="j_sch", path="/v1/extract")
+        _seed_presigned(mock_api)
+        submit, _ = _seed_completed(mock_api, job_id="j_sch", path="/v1/extract")
         client.extract(tiny_pdf, schema=TEMPLATE)  # must not raise
         assert submit.calls[0].request.url.params["category"] == "non_financial"
 
-    def test_the_template_still_rides(self, mock_backend, client, tiny_pdf):
-        _seed_presigned(mock_backend)
-        submit, _ = _seed_completed(mock_backend, job_id="j_sch2", path="/v1/extract")
+    def test_the_template_still_rides(self, mock_api, client, tiny_pdf):
+        _seed_presigned(mock_api)
+        submit, _ = _seed_completed(mock_api, job_id="j_sch2", path="/v1/extract")
         client.extract(tiny_pdf, schema=TEMPLATE)
         body = submit.calls[0].request.content.decode()
         assert json.dumps(TEMPLATE) in body or "listings" in body
 
-    def test_it_is_inferred_rather_than_deferred(self, mock_backend, client, tiny_pdf):
+    def test_it_is_inferred_rather_than_deferred(self, mock_api, client, tiny_pdf):
         """non_financial is sent EXPLICITLY, not omitted. Deferring would risk an
         org whose default is financial, where the server ignores `schema` silently
         — invoice-shaped output with nothing to tell the caller their template was
-        dropped. The SDK cannot detect that (the org default is JWT-only), so it
+        dropped. The SDK cannot detect that (the organization default is dashboard-only), so it
         infers from the one signal it has: a schema is meaningful on non_financial
         alone."""
-        _seed_presigned(mock_backend)
-        submit, _ = _seed_completed(mock_backend, job_id="j_sch3", path="/v1/extract")
+        _seed_presigned(mock_api)
+        submit, _ = _seed_completed(mock_api, job_id="j_sch3", path="/v1/extract")
         client.extract(tiny_pdf, schema=TEMPLATE)
         assert "category" in submit.calls[0].request.url.params
 

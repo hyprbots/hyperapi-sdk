@@ -254,8 +254,8 @@ def test_client_repr_masks_api_key():
 
 
 def test_client_sets_user_agent_header():
-    """User-Agent must be present on the underlying httpx.Client so backend
-    log analytics + customer firewalls can identify SDK traffic. Format mirrors
+    """User-Agent must be present on the underlying httpx.Client so server-side
+    analytics + customer firewalls can identify SDK traffic. Format mirrors
     OpenAI/Stripe convention: `<product>/<version> (<runtime-stack>)`."""
     client = HyperAPIClient(api_key="hk_test_ua")
     ua = client._client.headers.get("user-agent")
@@ -344,10 +344,9 @@ def test_content_types_include_common_formats():
     assert CONTENT_TYPES[".webp"] == "image/webp"
 
 
-# The router's upload allow-list (hyperapi-router app/api/documents.py:
-# _ALLOWED_UPLOAD_CONTENT_TYPES), copied here because the SDK cannot import it.
-# A type outside it is rejected with 415 before any upload happens (bug #309).
-_ROUTER_UPLOAD_ALLOW_LIST = {
+# The API's upload allow-list, copied here because the SDK cannot import it.
+# A type outside it is rejected with 415 before any upload happens.
+_API_UPLOAD_ALLOW_LIST = {
     "application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp",
     "image/tiff", "image/heic", "image/heif",
     "application/csv", "application/json", "application/msword", "application/rtf",
@@ -363,17 +362,17 @@ _ROUTER_UPLOAD_ALLOW_LIST = {
 }
 
 
-def test_every_mapped_content_type_is_accepted_by_the_router():
-    rejected = {ext: ct for ext, ct in CONTENT_TYPES.items() if ct not in _ROUTER_UPLOAD_ALLOW_LIST}
+def test_every_mapped_content_type_is_accepted_by_the_api():
+    rejected = {ext: ct for ext, ct in CONTENT_TYPES.items() if ct not in _API_UPLOAD_ALLOW_LIST}
     assert not rejected
 
 
 def test_office_text_and_email_files_get_a_real_content_type():
-    # Bug #309: these fell back to application/octet-stream and the upload 415'd.
+    # These used to fall back to application/octet-stream and the upload 415'd.
     for ext in (".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".csv", ".txt",
                 ".md", ".rtf", ".json", ".xml", ".xps", ".oxps", ".eml", ".msg"):
         assert CONTENT_TYPES[ext] != "application/octet-stream", ext
-        assert CONTENT_TYPES[ext] in _ROUTER_UPLOAD_ALLOW_LIST, ext
+        assert CONTENT_TYPES[ext] in _API_UPLOAD_ALLOW_LIST, ext
 
 
 # ── Path resolution ─────────────────────────────────────────────────────

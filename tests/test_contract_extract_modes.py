@@ -7,8 +7,8 @@ Basic ``extract()`` carries ``category`` as a query param on ``/v1/extract``
 import httpx
 
 
-def _seed_presigned(mock_backend, *, key="doc_em"):
-    mock_backend.post("/v1/documents/upload").mock(
+def _seed_presigned(mock_api, *, key="doc_em"):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -18,13 +18,13 @@ def _seed_presigned(mock_backend, *, key="doc_em"):
             },
         ),
     )
-    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(
+    mock_api.put(f"https://s3.local/{key}?sig=x").mock(
         return_value=httpx.Response(200)
     )
 
 
-def _seed_completed(mock_backend, *, job_id, path):
-    submit = mock_backend.post(path).mock(
+def _seed_completed(mock_api, *, job_id, path):
+    submit = mock_api.post(path).mock(
         return_value=httpx.Response(
             202,
             json={
@@ -34,7 +34,7 @@ def _seed_completed(mock_backend, *, job_id, path):
             },
         ),
     )
-    poll = mock_backend.get(f"/v1/jobs/{job_id}").mock(
+    poll = mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -52,9 +52,9 @@ def _seed_completed(mock_backend, *, job_id, path):
     return submit, poll
 
 
-def test_basic_extract_omits_category_by_default(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit, _ = _seed_completed(mock_backend, job_id="j_fin", path="/v1/extract")
+def test_basic_extract_omits_category_by_default(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit, _ = _seed_completed(mock_api, job_id="j_fin", path="/v1/extract")
 
     client.extract(tiny_pdf)
 
@@ -63,9 +63,9 @@ def test_basic_extract_omits_category_by_default(mock_backend, client, tiny_pdf)
     assert "category" not in req.url.params
 
 
-def test_basic_extract_non_financial_sets_category(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit, _ = _seed_completed(mock_backend, job_id="j_nf", path="/v1/extract")
+def test_basic_extract_non_financial_sets_category(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit, _ = _seed_completed(mock_api, job_id="j_nf", path="/v1/extract")
 
     client.extract(tiny_pdf, category="non_financial")
 
@@ -74,10 +74,10 @@ def test_basic_extract_non_financial_sets_category(mock_backend, client, tiny_pd
     assert req.url.params["category"] == "non_financial"
 
 
-def test_advanced_extract_hits_omni_endpoint(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
+def test_advanced_extract_hits_omni_endpoint(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
     submit, poll = _seed_completed(
-        mock_backend, job_id="j_adv", path="/v1/extract-omni"
+        mock_api, job_id="j_adv", path="/v1/extract-omni"
     )
 
     result = client.extract_advanced(tiny_pdf)
@@ -89,10 +89,10 @@ def test_advanced_extract_hits_omni_endpoint(mock_backend, client, tiny_pdf):
     assert poll.called
 
 
-def test_submit_extract_advanced_returns_job_no_polling(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
+def test_submit_extract_advanced_returns_job_no_polling(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
     submit, poll = _seed_completed(
-        mock_backend, job_id="j_adv2", path="/v1/extract-omni"
+        mock_api, job_id="j_adv2", path="/v1/extract-omni"
     )
 
     job = client.submit_extract_advanced(tiny_pdf)
@@ -104,10 +104,10 @@ def test_submit_extract_advanced_returns_job_no_polling(mock_backend, client, ti
 
 # ── async mirrors (the async client is a hand-maintained parallel impl) ────────
 async def test_async_basic_extract_omits_category_by_default(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    submit, _ = _seed_completed(mock_backend, job_id="aj_fin", path="/v1/extract")
+    _seed_presigned(mock_api)
+    submit, _ = _seed_completed(mock_api, job_id="aj_fin", path="/v1/extract")
 
     await async_client.extract(tiny_pdf)
 
@@ -117,10 +117,10 @@ async def test_async_basic_extract_omits_category_by_default(
 
 
 async def test_async_basic_extract_non_financial_sets_category(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    submit, _ = _seed_completed(mock_backend, job_id="aj_nf", path="/v1/extract")
+    _seed_presigned(mock_api)
+    submit, _ = _seed_completed(mock_api, job_id="aj_nf", path="/v1/extract")
 
     await async_client.extract(tiny_pdf, category="non_financial")
 
@@ -128,11 +128,11 @@ async def test_async_basic_extract_non_financial_sets_category(
 
 
 async def test_async_advanced_extract_hits_omni_endpoint(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
+    _seed_presigned(mock_api)
     submit, poll = _seed_completed(
-        mock_backend, job_id="aj_adv", path="/v1/extract-omni"
+        mock_api, job_id="aj_adv", path="/v1/extract-omni"
     )
 
     result = await async_client.extract_advanced(tiny_pdf)
@@ -145,11 +145,11 @@ async def test_async_advanced_extract_hits_omni_endpoint(
 
 
 async def test_async_submit_extract_advanced_returns_job_no_polling(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
+    _seed_presigned(mock_api)
     submit, poll = _seed_completed(
-        mock_backend, job_id="aj_adv2", path="/v1/extract-omni"
+        mock_api, job_id="aj_adv2", path="/v1/extract-omni"
     )
 
     job = await async_client.submit_extract_advanced(tiny_pdf)
@@ -163,19 +163,19 @@ async def test_async_submit_extract_advanced_returns_job_no_polling(
 # Orthogonal to category and to the Basic/Advanced product split — rides as a
 # query param on both /v1/extract and /v1/extract-omni.
 def test_basic_extract_omits_parse_mode_for_server_default(
-    mock_backend, client, tiny_pdf
+    mock_api, client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    submit, _ = _seed_completed(mock_backend, job_id="j_pm_fast", path="/v1/extract")
+    _seed_presigned(mock_api)
+    submit, _ = _seed_completed(mock_api, job_id="j_pm_fast", path="/v1/extract")
 
     client.extract(tiny_pdf)
 
     assert "parse_mode" not in submit.calls[0].request.url.params
 
 
-def test_basic_extract_advanced_parse_mode_sets_param(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit, _ = _seed_completed(mock_backend, job_id="j_pm_adv", path="/v1/extract")
+def test_basic_extract_advanced_parse_mode_sets_param(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit, _ = _seed_completed(mock_api, job_id="j_pm_adv", path="/v1/extract")
 
     client.extract(tiny_pdf, parse_mode="advanced")
 
@@ -184,10 +184,10 @@ def test_basic_extract_advanced_parse_mode_sets_param(mock_backend, client, tiny
     assert "category" not in req.url.params  # orthogonal to category
 
 
-def test_basic_extract_explicit_fast_sets_param(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
+def test_basic_extract_explicit_fast_sets_param(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
     submit, _ = _seed_completed(
-        mock_backend, job_id="j_pm_explicit_fast", path="/v1/extract"
+        mock_api, job_id="j_pm_explicit_fast", path="/v1/extract"
     )
 
     client.extract(tiny_pdf, parse_mode="fast")
@@ -195,10 +195,10 @@ def test_basic_extract_explicit_fast_sets_param(mock_backend, client, tiny_pdf):
     assert submit.calls[0].request.url.params["parse_mode"] == "fast"
 
 
-def test_advanced_extract_carries_parse_mode(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
+def test_advanced_extract_carries_parse_mode(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
     submit, _ = _seed_completed(
-        mock_backend, job_id="j_pm_omni", path="/v1/extract-omni"
+        mock_api, job_id="j_pm_omni", path="/v1/extract-omni"
     )
 
     client.extract_advanced(tiny_pdf, parse_mode="advanced")
@@ -209,10 +209,10 @@ def test_advanced_extract_carries_parse_mode(mock_backend, client, tiny_pdf):
 
 
 async def test_async_basic_extract_omits_parse_mode_for_server_default(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    submit, _ = _seed_completed(mock_backend, job_id="aj_pm_fast", path="/v1/extract")
+    _seed_presigned(mock_api)
+    submit, _ = _seed_completed(mock_api, job_id="aj_pm_fast", path="/v1/extract")
 
     await async_client.extract(tiny_pdf)
 
@@ -220,10 +220,10 @@ async def test_async_basic_extract_omits_parse_mode_for_server_default(
 
 
 async def test_async_basic_extract_advanced_parse_mode_sets_param(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    submit, _ = _seed_completed(mock_backend, job_id="aj_pm_adv", path="/v1/extract")
+    _seed_presigned(mock_api)
+    submit, _ = _seed_completed(mock_api, job_id="aj_pm_adv", path="/v1/extract")
 
     await async_client.extract(tiny_pdf, parse_mode="advanced")
 
@@ -231,11 +231,11 @@ async def test_async_basic_extract_advanced_parse_mode_sets_param(
 
 
 async def test_async_advanced_extract_carries_parse_mode(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
+    _seed_presigned(mock_api)
     submit, _ = _seed_completed(
-        mock_backend, job_id="aj_pm_omni", path="/v1/extract-omni"
+        mock_api, job_id="aj_pm_omni", path="/v1/extract-omni"
     )
 
     await async_client.extract_advanced(tiny_pdf, parse_mode="advanced")

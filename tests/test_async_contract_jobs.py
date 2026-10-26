@@ -54,15 +54,15 @@ def _failed_response(error="Insufficient credits", status_code=402):
 # ── get_job ──────────────────────────────────────────────────────────────
 
 
-async def test_async_get_job_returns_envelope(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-1").mock(return_value=_completed_response({"ocr": "hi"}))
+async def test_async_get_job_returns_envelope(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-1").mock(return_value=_completed_response({"ocr": "hi"}))
     envelope = await async_client.get_job("j-1")
     assert envelope["status"] == "completed"
     assert envelope["result"] == {"ocr": "hi"}
 
 
-async def test_async_get_job_404_raises_typed(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/missing").mock(return_value=httpx.Response(404))
+async def test_async_get_job_404_raises_typed(mock_api, async_client):
+    mock_api.get("/v1/jobs/missing").mock(return_value=httpx.Response(404))
 
     with pytest.raises(HyperAPIError) as ei:
         await async_client.get_job("missing")
@@ -70,15 +70,15 @@ async def test_async_get_job_404_raises_typed(mock_backend, async_client):
     assert "not found" in str(ei.value).lower() or "expired" in str(ei.value).lower()
 
 
-async def test_async_get_job_401_raises_authentication(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-1").mock(return_value=httpx.Response(401))
+async def test_async_get_job_401_raises_authentication(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-1").mock(return_value=httpx.Response(401))
     with pytest.raises(AuthenticationError) as ei:
         await async_client.get_job("j-1")
     assert ei.value.status_code == 401
 
 
-async def test_async_get_job_sends_api_key_header(mock_backend, async_client):
-    route = mock_backend.get("/v1/jobs/j-1").mock(return_value=_completed_response({}))
+async def test_async_get_job_sends_api_key_header(mock_api, async_client):
+    route = mock_api.get("/v1/jobs/j-1").mock(return_value=_completed_response({}))
     await async_client.get_job("j-1")
     assert route.calls[0].request.headers["X-API-Key"] == "hk_test_unit"
 
@@ -86,8 +86,8 @@ async def test_async_get_job_sends_api_key_header(mock_backend, async_client):
 # ── wait_for_job ─────────────────────────────────────────────────────────
 
 
-async def test_async_wait_for_job_polls_until_completed(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-2").mock(side_effect=[
+async def test_async_wait_for_job_polls_until_completed(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-2").mock(side_effect=[
         _pending_response(),
         _pending_response(),
         _completed_response({"data": {"vendor": "Acme"}}),
@@ -99,8 +99,8 @@ async def test_async_wait_for_job_polls_until_completed(mock_backend, async_clie
     assert result == {"data": {"vendor": "Acme"}}
 
 
-async def test_async_wait_for_job_failed_raises_op_specific_error(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-3").mock(return_value=_failed_response(
+async def test_async_wait_for_job_failed_raises_op_specific_error(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-3").mock(return_value=_failed_response(
         error="Insufficient credits", status_code=402,
     ))
     job = Job(job_id="j-3", status="pending", poll_url="/v1/jobs/j-3", op="extract")
@@ -111,16 +111,16 @@ async def test_async_wait_for_job_failed_raises_op_specific_error(mock_backend, 
     assert "credits" in str(ei.value).lower()
 
 
-async def test_async_wait_for_job_with_raw_job_id_uses_generic_error(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-4").mock(return_value=_failed_response(error="boom"))
+async def test_async_wait_for_job_with_raw_job_id_uses_generic_error(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-4").mock(return_value=_failed_response(error="boom"))
 
     with pytest.raises(HyperAPIError) as ei:
         await async_client.wait_for_job("j-4")
     assert type(ei.value) is HyperAPIError
 
 
-async def test_async_wait_for_job_timeout_raises_job_timeout(mock_backend):
-    mock_backend.get("/v1/jobs/j-5").mock(return_value=_pending_response())
+async def test_async_wait_for_job_timeout_raises_job_timeout(mock_api):
+    mock_api.get("/v1/jobs/j-5").mock(return_value=_pending_response())
     client = AsyncHyperAPIClient(
         api_key="hk_test_t",
         base_url="http://test.local",
@@ -138,8 +138,8 @@ async def test_async_wait_for_job_timeout_raises_job_timeout(mock_backend):
         await client.aclose()
 
 
-async def test_async_wait_for_job_per_call_overrides(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-6").mock(return_value=_pending_response())
+async def test_async_wait_for_job_per_call_overrides(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-6").mock(return_value=_pending_response())
     job = Job(job_id="j-6", status="pending", poll_url="/v1/jobs/j-6", op="parse")
 
     with pytest.raises(JobTimeoutError):
@@ -149,8 +149,8 @@ async def test_async_wait_for_job_per_call_overrides(mock_backend, async_client)
 # ── _poll_with_retry ─────────────────────────────────────────────────────
 
 
-async def test_async_poll_retries_on_5xx_then_succeeds(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-7").mock(side_effect=[
+async def test_async_poll_retries_on_5xx_then_succeeds(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-7").mock(side_effect=[
         httpx.Response(500, json={"message": "Authentication service unavailable"}),
         _completed_response({"x": 1}),
     ])
@@ -161,8 +161,8 @@ async def test_async_poll_retries_on_5xx_then_succeeds(mock_backend, async_clien
     assert result == {"x": 1}
 
 
-async def test_async_poll_exhausts_transient_retries_then_raises(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-8").mock(return_value=httpx.Response(503))
+async def test_async_poll_exhausts_transient_retries_then_raises(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-8").mock(return_value=httpx.Response(503))
     job = Job(job_id="j-8", status="pending", poll_url="/v1/jobs/j-8", op="parse")
 
     with pytest.raises(HyperAPIError) as ei:
@@ -170,8 +170,8 @@ async def test_async_poll_exhausts_transient_retries_then_raises(mock_backend, a
     assert ei.value.status_code == 503
 
 
-async def test_async_poll_does_not_retry_on_401(mock_backend, async_client):
-    route = mock_backend.get("/v1/jobs/j-9").mock(return_value=httpx.Response(401))
+async def test_async_poll_does_not_retry_on_401(mock_api, async_client):
+    route = mock_api.get("/v1/jobs/j-9").mock(return_value=httpx.Response(401))
     job = Job(job_id="j-9", status="pending", poll_url="/v1/jobs/j-9", op="parse")
 
     with pytest.raises(AuthenticationError):
@@ -179,8 +179,8 @@ async def test_async_poll_does_not_retry_on_401(mock_backend, async_client):
     assert route.call_count == 1
 
 
-async def test_async_poll_does_not_retry_on_404(mock_backend, async_client):
-    route = mock_backend.get("/v1/jobs/j-10").mock(return_value=httpx.Response(404))
+async def test_async_poll_does_not_retry_on_404(mock_api, async_client):
+    route = mock_api.get("/v1/jobs/j-10").mock(return_value=httpx.Response(404))
     job = Job(job_id="j-10", status="pending", poll_url="/v1/jobs/j-10", op="parse")
 
     with pytest.raises(HyperAPIError):
@@ -191,9 +191,9 @@ async def test_async_poll_does_not_retry_on_404(mock_backend, async_client):
 # ── wait_for_jobs (async-gather) ─────────────────────────────────────────
 
 
-async def test_async_wait_for_jobs_returns_results_in_order(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/A").mock(return_value=_completed_response({"a": 1}))
-    mock_backend.get("/v1/jobs/B").mock(return_value=_completed_response({"b": 2}))
+async def test_async_wait_for_jobs_returns_results_in_order(mock_api, async_client):
+    mock_api.get("/v1/jobs/A").mock(return_value=_completed_response({"a": 1}))
+    mock_api.get("/v1/jobs/B").mock(return_value=_completed_response({"b": 2}))
     job_a = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="parse")
     job_b = Job(job_id="B", status="pending", poll_url="/v1/jobs/B", op="extract")
 
@@ -202,9 +202,9 @@ async def test_async_wait_for_jobs_returns_results_in_order(mock_backend, async_
     assert results == [{"a": 1}, {"b": 2}]
 
 
-async def test_async_wait_for_jobs_raises_on_first_failure(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/A").mock(return_value=_failed_response(error="boom"))
-    mock_backend.get("/v1/jobs/B").mock(return_value=_pending_response())
+async def test_async_wait_for_jobs_raises_on_first_failure(mock_api, async_client):
+    mock_api.get("/v1/jobs/A").mock(return_value=_failed_response(error="boom"))
+    mock_api.get("/v1/jobs/B").mock(return_value=_pending_response())
     job_a = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="extract")
     job_b = Job(job_id="B", status="pending", poll_url="/v1/jobs/B", op="parse")
 
@@ -226,9 +226,9 @@ async def test_async_wait_for_jobs_empty_input_returns_empty():
 # ── 429 + malformed-JSON edge cases ─────────────────────────────────────
 
 
-async def test_async_get_job_429_raises_rate_limit_error(mock_backend, async_client):
+async def test_async_get_job_429_raises_rate_limit_error(mock_api, async_client):
     from hyperapi import RateLimitError
-    mock_backend.get("/v1/jobs/j-rl").mock(return_value=httpx.Response(
+    mock_api.get("/v1/jobs/j-rl").mock(return_value=httpx.Response(
         429,
         headers={"Retry-After": "60"},
         json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
@@ -242,7 +242,7 @@ async def test_async_get_job_429_raises_rate_limit_error(mock_backend, async_cli
 
 
 async def test_async_wait_for_job_backs_off_on_429_then_completes(
-    mock_backend, async_client, monkeypatch
+    mock_api, async_client, monkeypatch
 ):
     """Async twin: a 429 during the poll loop backs off (Retry-After) and resumes
     rather than aborting the wait — the free-tier submit+poll collision."""
@@ -252,7 +252,7 @@ async def test_async_wait_for_job_backs_off_on_429_then_completes(
         slept.append(s)
 
     monkeypatch.setattr("hyperapi.async_client.asyncio.sleep", _fake_sleep)
-    mock_backend.get("/v1/jobs/j-rl2").mock(side_effect=[
+    mock_api.get("/v1/jobs/j-rl2").mock(side_effect=[
         httpx.Response(429, headers={"Retry-After": "2"},
                        json={"message": "Rate limit exceeded", "tier": "free", "limit": 1}),
         _completed_response({"ok": 1}),
@@ -265,9 +265,9 @@ async def test_async_wait_for_job_backs_off_on_429_then_completes(
     assert any(2.0 <= s < 3.0 for s in slept), slept   # Retry-After + jitter
 
 
-async def test_async_wait_for_job_429_deadline_too_short_fails_fast(mock_backend):
+async def test_async_wait_for_job_429_deadline_too_short_fails_fast(mock_api):
     from hyperapi import RateLimitError
-    mock_backend.get("/v1/jobs/j-rl3").mock(return_value=httpx.Response(
+    mock_api.get("/v1/jobs/j-rl3").mock(return_value=httpx.Response(
         429, headers={"Retry-After": "120"},
         json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
     ))
@@ -283,8 +283,8 @@ async def test_async_wait_for_job_429_deadline_too_short_fails_fast(mock_backend
     await client.aclose()
 
 
-async def test_async_wait_for_job_result_null_returns_empty_dict(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-nr").mock(return_value=httpx.Response(
+async def test_async_wait_for_job_result_null_returns_empty_dict(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-nr").mock(return_value=httpx.Response(
         200, json={"status": "completed", "result": None, "request_id": "req-x"},
     ))
     job = Job(job_id="j-nr", status="pending", poll_url="/v1/jobs/j-nr", op="parse")
@@ -293,11 +293,11 @@ async def test_async_wait_for_job_result_null_returns_empty_dict(mock_backend, a
 
 
 async def test_async_wait_for_job_missing_result_key_does_not_leak_envelope(
-    mock_backend, async_client
+    mock_api, async_client
 ):
     """Async twin of the sync leak test: a completed envelope with no `result`
     key returns {}, never the raw envelope (status/timing/usage fields)."""
-    mock_backend.get("/v1/jobs/j-leak").mock(return_value=httpx.Response(
+    mock_api.get("/v1/jobs/j-leak").mock(return_value=httpx.Response(
         200, json={"status": "completed", "request_id": "req-x",
                    "duration_ms": 9, "usage": {"pages": 3}},
     ))
@@ -308,13 +308,13 @@ async def test_async_wait_for_job_missing_result_key_does_not_leak_envelope(
     assert "usage" not in out and "request_id" not in out
 
 
-async def test_async_wait_for_jobs_cancels_siblings_on_failure(mock_backend):
+async def test_async_wait_for_jobs_cancels_siblings_on_failure(mock_api):
     """When one job fails, wait_for_jobs must CANCEL the sibling pollers rather
     than orphan them. `asyncio.gather` alone does not cancel siblings; combined
     with 429-backoff (which no longer fast-fails) an orphan would poll for up to
     poll_timeout. Verify the sibling's polling stops once the failure propagates."""
-    mock_backend.get("/v1/jobs/FAIL").mock(return_value=_failed_response())
-    slow_route = mock_backend.get("/v1/jobs/SLOW").mock(return_value=_pending_response())
+    mock_api.get("/v1/jobs/FAIL").mock(return_value=_failed_response())
+    slow_route = mock_api.get("/v1/jobs/SLOW").mock(return_value=_pending_response())
     client = AsyncHyperAPIClient(
         api_key="hk_test_c", base_url="http://test.local",
         poll_interval=0.0, poll_timeout=30.0,   # would poll ~forever if not cancelled
@@ -333,8 +333,8 @@ async def test_async_wait_for_jobs_cancels_siblings_on_failure(mock_backend):
     await client.aclose()
 
 
-async def test_async_get_job_malformed_json_raises_typed(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-bad").mock(return_value=httpx.Response(
+async def test_async_get_job_malformed_json_raises_typed(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-bad").mock(return_value=httpx.Response(
         200,
         headers={"Content-Type": "text/html"},
         text="<html>oops</html>",
@@ -346,10 +346,10 @@ async def test_async_get_job_malformed_json_raises_typed(mock_backend, async_cli
     assert ei.value.status_code == 200
 
 
-async def test_async_wait_for_job_with_zero_timeout_raises_immediately(mock_backend):
+async def test_async_wait_for_job_with_zero_timeout_raises_immediately(mock_api):
     """Edge case: timeout=0 must not silently swap in the constructor default
     via Python's `or` truthiness — same fix as the sync client."""
-    mock_backend.get("/v1/jobs/j-zero").mock(return_value=httpx.Response(
+    mock_api.get("/v1/jobs/j-zero").mock(return_value=httpx.Response(
         200, json={"status": "pending"},
     ))
     client = AsyncHyperAPIClient(
@@ -367,12 +367,12 @@ async def test_async_wait_for_job_with_zero_timeout_raises_immediately(mock_back
 
 
 async def test_async_wait_for_jobs_returns_full_length_with_empty_result_envelope(
-    mock_backend, async_client,
+    mock_api, async_client,
 ):
-    mock_backend.get("/v1/jobs/A").mock(return_value=httpx.Response(
+    mock_api.get("/v1/jobs/A").mock(return_value=httpx.Response(
         200, json={"status": "completed", "result": None},
     ))
-    mock_backend.get("/v1/jobs/B").mock(return_value=httpx.Response(
+    mock_api.get("/v1/jobs/B").mock(return_value=httpx.Response(
         200, json={"status": "completed", "result": {"ok": 1}},
     ))
     job_a = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="parse")
@@ -389,8 +389,8 @@ async def test_async_wait_for_jobs_returns_full_length_with_empty_result_envelop
     assert results[1] == {"ok": 1}
 
 
-async def test_async_failed_job_request_id_carries_to_exception(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-11").mock(return_value=httpx.Response(
+async def test_async_failed_job_request_id_carries_to_exception(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-11").mock(return_value=httpx.Response(
         200,
         json={
             "status": "failed", "error": "service down",
@@ -407,7 +407,7 @@ async def test_async_failed_job_request_id_carries_to_exception(mock_backend, as
 # ── KeyboardInterrupt + connection-error guards ──────────────────────────
 
 
-async def test_async_wait_for_job_propagates_keyboard_interrupt(mock_backend, async_client):
+async def test_async_wait_for_job_propagates_keyboard_interrupt(mock_api, async_client):
     """Ctrl+C mid-poll must NOT be swallowed by the SDK's transient-retry path."""
     call_count = {"n": 0}
 
@@ -417,7 +417,7 @@ async def test_async_wait_for_job_propagates_keyboard_interrupt(mock_backend, as
             return httpx.Response(200, json={"status": "pending", "request_id": "req-x"})
         raise KeyboardInterrupt("user pressed Ctrl+C")
 
-    mock_backend.get("/v1/jobs/j-kbi").mock(side_effect=_side_effect)
+    mock_api.get("/v1/jobs/j-kbi").mock(side_effect=_side_effect)
     job = Job(job_id="j-kbi", status="pending", poll_url="/v1/jobs/j-kbi", op="parse")
 
     with pytest.raises(KeyboardInterrupt):
@@ -436,7 +436,7 @@ class _TestSignal(BaseException):
     """
 
 
-async def test_async_wait_for_jobs_propagates_base_exception(mock_backend, async_client):
+async def test_async_wait_for_jobs_propagates_base_exception(mock_api, async_client):
     """asyncio.gather must propagate BaseException from a child task — the user
     contract is that Ctrl+C / SystemExit / similar interrupt-class exceptions
     inside `await client.wait_for_jobs(...)` reach application code rather than
@@ -450,8 +450,8 @@ async def test_async_wait_for_jobs_propagates_base_exception(mock_backend, async
             return httpx.Response(200, json={"status": "pending", "request_id": "req-x"})
         raise _TestSignal("simulated interrupt")
 
-    mock_backend.get("/v1/jobs/A").mock(side_effect=_a_side_effect)
-    mock_backend.get("/v1/jobs/B").mock(return_value=_pending_response())
+    mock_api.get("/v1/jobs/A").mock(side_effect=_a_side_effect)
+    mock_api.get("/v1/jobs/B").mock(return_value=_pending_response())
     job_a = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="parse")
     job_b = Job(job_id="B", status="pending", poll_url="/v1/jobs/B", op="extract")
 
@@ -459,9 +459,9 @@ async def test_async_wait_for_jobs_propagates_base_exception(mock_backend, async
         await async_client.wait_for_jobs([job_a, job_b])
 
 
-async def test_async_poll_retries_on_connection_error_then_succeeds(mock_backend):
+async def test_async_poll_retries_on_connection_error_then_succeeds(mock_api):
     """ConnectError on a poll must be absorbed by transient-retry; next poll succeeds."""
-    mock_backend.get("/v1/jobs/j-conn").mock(side_effect=[
+    mock_api.get("/v1/jobs/j-conn").mock(side_effect=[
         httpx.ConnectError("DNS failed"),
         _completed_response({"data": {"ok": True}}),
     ])
@@ -483,13 +483,13 @@ async def test_async_poll_retries_on_connection_error_then_succeeds(mock_backend
         await client.aclose()
 
 
-async def test_async_wait_for_jobs_timeout_raises_job_timeout(mock_backend):
+async def test_async_wait_for_jobs_timeout_raises_job_timeout(mock_api):
     """Async divergence note: asyncio.gather raises the FIRST timeout immediately
     and cancels the rest, so the raised JobTimeoutError's job_id is a single id
     (whichever fired first), NOT the sync client's "A,B" comma-joined form.
     """
-    mock_backend.get("/v1/jobs/A").mock(return_value=_pending_response())
-    mock_backend.get("/v1/jobs/B").mock(return_value=_pending_response())
+    mock_api.get("/v1/jobs/A").mock(return_value=_pending_response())
+    mock_api.get("/v1/jobs/B").mock(return_value=_pending_response())
     client = AsyncHyperAPIClient(
         api_key="hk_test_multi",
         base_url="http://test.local",
@@ -511,8 +511,8 @@ async def test_async_wait_for_jobs_timeout_raises_job_timeout(mock_backend):
         await client.aclose()
 
 
-async def test_async_failed_job_message_includes_http_status(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/j-msg").mock(return_value=httpx.Response(
+async def test_async_failed_job_message_includes_http_status(mock_api, async_client):
+    mock_api.get("/v1/jobs/j-msg").mock(return_value=httpx.Response(
         200,
         json={
             "status": "failed",
@@ -532,13 +532,13 @@ async def test_async_failed_job_message_includes_http_status(mock_backend, async
 # ── Concurrent fan-out: a meaningful async-specific check ────────────────
 
 
-async def test_async_concurrent_polling_yields_to_event_loop(mock_backend, async_client):
+async def test_async_concurrent_polling_yields_to_event_loop(mock_api, async_client):
     """Async-specific: while one wait_for_job is sleeping between polls, the
     event loop must remain free to service other coroutines. We assert this by
     running two parallel wait_for_job calls and confirming both complete in
     roughly the time of a single poll, not 2× sequential."""
-    mock_backend.get("/v1/jobs/X").mock(return_value=_completed_response({"x": 1}))
-    mock_backend.get("/v1/jobs/Y").mock(return_value=_completed_response({"y": 2}))
+    mock_api.get("/v1/jobs/X").mock(return_value=_completed_response({"x": 1}))
+    mock_api.get("/v1/jobs/Y").mock(return_value=_completed_response({"y": 2}))
     job_x = Job(job_id="X", status="pending", poll_url="/v1/jobs/X", op="parse")
     job_y = Job(job_id="Y", status="pending", poll_url="/v1/jobs/Y", op="extract")
 
@@ -550,7 +550,7 @@ async def test_async_concurrent_polling_yields_to_event_loop(mock_backend, async
     assert y_res == {"y": 2}
 
 
-async def test_async_wait_for_jobs_polls_concurrently_not_sequentially(mock_backend):
+async def test_async_wait_for_jobs_polls_concurrently_not_sequentially(mock_api):
     """Concrete proof that asyncio.gather makes wait_for_jobs poll concurrently:
     if two jobs each take ~3 polls of 50ms to complete, total wall time should be
     ≈150ms (concurrent), NOT ≈300ms (sequential).
@@ -577,8 +577,8 @@ async def test_async_wait_for_jobs_polls_concurrently_not_sequentially(mock_back
             return httpx.Response(200, json={"status": "pending"})
         return _completed_response({"b": 2})
 
-    mock_backend.get("/v1/jobs/A").mock(side_effect=_a_side_effect)
-    mock_backend.get("/v1/jobs/B").mock(side_effect=_b_side_effect)
+    mock_api.get("/v1/jobs/A").mock(side_effect=_a_side_effect)
+    mock_api.get("/v1/jobs/B").mock(side_effect=_b_side_effect)
 
     client = AsyncHyperAPIClient(
         api_key="hk_test_concur",
@@ -607,7 +607,7 @@ async def test_async_wait_for_jobs_polls_concurrently_not_sequentially(mock_back
         await client.aclose()
 
 
-async def test_async_process_polls_parse_and_extract_concurrently(mock_backend, async_client, tiny_pdf):
+async def test_async_process_polls_parse_and_extract_concurrently(mock_api, async_client, tiny_pdf):
     """The full process() flow: upload once, submit parse + extract, then
     asyncio.gather both polls. Verifies the polling halves run concurrently
     via wall-time comparison — same approach as the wait_for_jobs concurrency
@@ -616,18 +616,18 @@ async def test_async_process_polls_parse_and_extract_concurrently(mock_backend, 
     import time
 
     # Reuse the standard upload + submit mocks
-    mock_backend.post("/v1/documents/upload").mock(
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": "doc_concur",
             "upload_url": "https://s3.local/concur?sig=x",
             "expires_in": 600,
         }),
     )
-    mock_backend.put("https://s3.local/concur?sig=x").mock(return_value=httpx.Response(200))
-    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(202, json={
+    mock_api.put("https://s3.local/concur?sig=x").mock(return_value=httpx.Response(200))
+    mock_api.post("/v1/parse").mock(return_value=httpx.Response(202, json={
         "job_id": "p_concur", "status": "pending", "poll_url": "/v1/jobs/p_concur",
     }))
-    mock_backend.post("/v1/extract").mock(return_value=httpx.Response(202, json={
+    mock_api.post("/v1/extract").mock(return_value=httpx.Response(202, json={
         "job_id": "e_concur", "status": "pending", "poll_url": "/v1/jobs/e_concur",
     }))
 
@@ -647,8 +647,8 @@ async def test_async_process_polls_parse_and_extract_concurrently(mock_backend, 
             return httpx.Response(200, json={"status": "pending"})
         return httpx.Response(200, json={"status": "completed", "result": {"entities": {"v": 1}}})
 
-    mock_backend.get("/v1/jobs/p_concur").mock(side_effect=_p_side_effect)
-    mock_backend.get("/v1/jobs/e_concur").mock(side_effect=_e_side_effect)
+    mock_api.get("/v1/jobs/p_concur").mock(side_effect=_p_side_effect)
+    mock_api.get("/v1/jobs/e_concur").mock(side_effect=_e_side_effect)
 
     # async_client fixture has poll_interval=0.0, which would race; use a
     # client with a small positive interval so wall-time comparison is meaningful.
@@ -679,16 +679,16 @@ async def test_async_process_polls_parse_and_extract_concurrently(mock_backend, 
 # ── Mixed sync + async in the same process ──────────────────────────────
 
 
-async def test_async_and_sync_clients_coexist_in_same_process(mock_backend):
+async def test_async_and_sync_clients_coexist_in_same_process(mock_api):
     """Defensive: a customer migrating from sync to async may have both clients
     instantiated in the same process for a transition period. Both must work
     independently — different connection pools, different httpx.Client instances,
     no shared mutable state."""
     from hyperapi import HyperAPIClient
 
-    # Both clients should hit the same mocked backend and behave independently.
-    mock_backend.get("/v1/jobs/sync-j").mock(return_value=_completed_response({"who": "sync"}))
-    mock_backend.get("/v1/jobs/async-j").mock(return_value=_completed_response({"who": "async"}))
+    # Both clients should hit the same mocked API and behave independently.
+    mock_api.get("/v1/jobs/sync-j").mock(return_value=_completed_response({"who": "sync"}))
+    mock_api.get("/v1/jobs/async-j").mock(return_value=_completed_response({"who": "async"}))
 
     sync_client = HyperAPIClient(
         api_key="hk_test_s", base_url="http://test.local",
@@ -736,8 +736,8 @@ _RECENT_ROWS = [
 ]
 
 
-async def test_async_list_recent_jobs_defaults(mock_backend, async_client):
-    route = mock_backend.get("/v1/jobs/recent").mock(
+async def test_async_list_recent_jobs_defaults(mock_api, async_client):
+    route = mock_api.get("/v1/jobs/recent").mock(
         return_value=httpx.Response(200, json={"jobs": _RECENT_ROWS}),
     )
 
@@ -750,8 +750,8 @@ async def test_async_list_recent_jobs_defaults(mock_backend, async_client):
     assert "source" not in req.url.params
 
 
-async def test_async_list_recent_jobs_limit_and_source_params(mock_backend, async_client):
-    route = mock_backend.get("/v1/jobs/recent").mock(
+async def test_async_list_recent_jobs_limit_and_source_params(mock_api, async_client):
+    route = mock_api.get("/v1/jobs/recent").mock(
         return_value=httpx.Response(200, json={"jobs": []}),
     )
 
@@ -762,16 +762,16 @@ async def test_async_list_recent_jobs_limit_and_source_params(mock_backend, asyn
     assert req.url.params["source"] == "playground"
 
 
-async def test_async_list_recent_jobs_401_raises_authentication(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/recent").mock(return_value=httpx.Response(401))
+async def test_async_list_recent_jobs_401_raises_authentication(mock_api, async_client):
+    mock_api.get("/v1/jobs/recent").mock(return_value=httpx.Response(401))
 
     with pytest.raises(AuthenticationError) as ei:
         await async_client.list_recent_jobs()
     assert ei.value.status_code == 401
 
 
-async def test_async_list_recent_jobs_malformed_envelope_raises_typed(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/recent").mock(
+async def test_async_list_recent_jobs_malformed_envelope_raises_typed(mock_api, async_client):
+    mock_api.get("/v1/jobs/recent").mock(
         return_value=httpx.Response(200, json={"unexpected": True}),
     )
 
@@ -780,8 +780,8 @@ async def test_async_list_recent_jobs_malformed_envelope_raises_typed(mock_backe
     assert "Malformed" in str(ei.value)
 
 
-async def test_async_list_recent_jobs_non_list_jobs_raises_typed(mock_backend, async_client):
-    mock_backend.get("/v1/jobs/recent").mock(
+async def test_async_list_recent_jobs_non_list_jobs_raises_typed(mock_api, async_client):
+    mock_api.get("/v1/jobs/recent").mock(
         return_value=httpx.Response(200, json={"jobs": {"x": 1}}),
     )
 
@@ -790,9 +790,9 @@ async def test_async_list_recent_jobs_non_list_jobs_raises_typed(mock_backend, a
     assert "Malformed" in str(ei.value)
 
 
-async def test_async_list_recent_jobs_429_raises_rate_limit_error(mock_backend, async_client):
+async def test_async_list_recent_jobs_429_raises_rate_limit_error(mock_api, async_client):
     from hyperapi import RateLimitError
-    mock_backend.get("/v1/jobs/recent").mock(return_value=httpx.Response(
+    mock_api.get("/v1/jobs/recent").mock(return_value=httpx.Response(
         429,
         headers={"Retry-After": "30"},
         json={"message": "Rate limit exceeded", "tier": "free", "limit": 1},
@@ -807,8 +807,8 @@ async def test_async_list_recent_jobs_429_raises_rate_limit_error(mock_backend, 
 # ── delete_job (cancel semantics) ────────────────────────────────────────
 
 
-async def test_async_delete_job_204_returns_none(mock_backend, async_client):
-    route = mock_backend.delete("/v1/jobs/j-del").mock(return_value=httpx.Response(204))
+async def test_async_delete_job_204_returns_none(mock_api, async_client):
+    route = mock_api.delete("/v1/jobs/j-del").mock(return_value=httpx.Response(204))
 
     assert await async_client.delete_job("j-del") is None
     req = route.calls[0].request
@@ -816,14 +816,14 @@ async def test_async_delete_job_204_returns_none(mock_backend, async_client):
     assert req.headers["X-API-Key"] == "hk_test_unit"
 
 
-async def test_async_delete_job_idempotent_204_for_unknown_id(mock_backend, async_client):
-    mock_backend.delete("/v1/jobs/never-existed").mock(return_value=httpx.Response(204))
+async def test_async_delete_job_idempotent_204_for_unknown_id(mock_api, async_client):
+    mock_api.delete("/v1/jobs/never-existed").mock(return_value=httpx.Response(204))
 
     await async_client.delete_job("never-existed")  # no raise
 
 
-async def test_async_delete_job_404_raises_typed(mock_backend, async_client):
-    mock_backend.delete("/v1/jobs/other-org").mock(return_value=httpx.Response(404))
+async def test_async_delete_job_404_raises_typed(mock_api, async_client):
+    mock_api.delete("/v1/jobs/other-org").mock(return_value=httpx.Response(404))
 
     with pytest.raises(HyperAPIError) as ei:
         await async_client.delete_job("other-org")
@@ -831,8 +831,44 @@ async def test_async_delete_job_404_raises_typed(mock_backend, async_client):
     assert "not found" in str(ei.value).lower() or "expired" in str(ei.value).lower()
 
 
-async def test_async_delete_job_401_raises_authentication(mock_backend, async_client):
-    mock_backend.delete("/v1/jobs/j-del").mock(return_value=httpx.Response(401))
+async def test_async_delete_job_401_raises_authentication(mock_api, async_client):
+    mock_api.delete("/v1/jobs/j-del").mock(return_value=httpx.Response(401))
 
     with pytest.raises(AuthenticationError):
         await async_client.delete_job("j-del")
+
+
+# ── cancelled jobs ───────────────────────────────────────────────────────────
+
+
+def _cancelled_response():
+    return httpx.Response(200, json={
+        "status": "failed",
+        "error": "cancelled: job was cancelled — please retry",
+        "request_id": "req-c",
+    })
+
+
+async def test_async_wait_for_job_cancelled_raises_job_cancelled_error(mock_api, async_client):
+    from hyperapi import JobCancelledError, ParseError
+    mock_api.get("/v1/jobs/j-c").mock(return_value=_cancelled_response())
+    job = Job(job_id="j-c", status="pending", poll_url="/v1/jobs/j-c", op="parse")
+
+    with pytest.raises(JobCancelledError) as ei:
+        await async_client.wait_for_job(job)
+
+    assert ei.value.job_id == "j-c"
+    assert not isinstance(ei.value, ParseError)
+
+
+async def test_async_wait_for_jobs_cancelled_raises_job_cancelled_error(mock_api, async_client):
+    from hyperapi import JobCancelledError
+    mock_api.get("/v1/jobs/j-ok").mock(return_value=_completed_response({"a": 1}))
+    mock_api.get("/v1/jobs/j-c3").mock(return_value=_cancelled_response())
+    jobs = [
+        Job(job_id="j-ok", status="pending", poll_url="/v1/jobs/j-ok", op="parse"),
+        Job(job_id="j-c3", status="pending", poll_url="/v1/jobs/j-c3", op="extract"),
+    ]
+    with pytest.raises(JobCancelledError) as ei:
+        await async_client.wait_for_jobs(jobs)
+    assert ei.value.job_id == "j-c3"

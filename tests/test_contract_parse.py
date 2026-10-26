@@ -13,8 +13,8 @@ import pytest
 from hyperapi import AuthenticationError, Job, ParseError
 
 
-def _seed_presigned(mock_backend, *, key="doc_parse"):
-    mock_backend.post("/v1/documents/upload").mock(
+def _seed_presigned(mock_api, *, key="doc_parse"):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -24,13 +24,13 @@ def _seed_presigned(mock_backend, *, key="doc_parse"):
             },
         ),
     )
-    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(
+    mock_api.put(f"https://s3.local/{key}?sig=x").mock(
         return_value=httpx.Response(200)
     )
 
 
-def _seed_submit(mock_backend, *, job_id="job_parse_1"):
-    return mock_backend.post("/v1/parse").mock(
+def _seed_submit(mock_api, *, job_id="job_parse_1"):
+    return mock_api.post("/v1/parse").mock(
         return_value=httpx.Response(
             202,
             json={
@@ -42,8 +42,8 @@ def _seed_submit(mock_backend, *, job_id="job_parse_1"):
     )
 
 
-def _seed_completed(mock_backend, *, job_id="job_parse_1", ocr="Hello"):
-    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+def _seed_completed(mock_api, *, job_id="job_parse_1", ocr="Hello"):
+    return mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -56,10 +56,10 @@ def _seed_completed(mock_backend, *, job_id="job_parse_1", ocr="Hello"):
     )
 
 
-def test_parse_submits_with_x_async_then_polls(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    poll_route = _seed_completed(mock_backend, ocr="Invoice #12345")
+def test_parse_submits_with_x_async_then_polls(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    poll_route = _seed_completed(mock_api, ocr="Invoice #12345")
 
     result = client.parse(tiny_pdf)
 
@@ -73,11 +73,11 @@ def test_parse_submits_with_x_async_then_polls(mock_backend, client, tiny_pdf):
     assert poll_route.called
 
 
-def _seed_completed_with_boxes(mock_backend, *, job_id="job_parse_1"):
+def _seed_completed_with_boxes(mock_api, *, job_id="job_parse_1"):
     boxes = [
         {"text": "Invoice #4471", "bbox": [120, 340, 410, 372], "confidence": 0.987}
     ]
-    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+    return mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -95,12 +95,12 @@ def _seed_completed_with_boxes(mock_backend, *, job_id="job_parse_1"):
     )
 
 
-def _seed_completed_with_image(mock_backend, *, job_id="job_parse_1"):
+def _seed_completed_with_image(mock_api, *, job_id="job_parse_1"):
     image_url = "https://s3.example.com/deskewed/org/hash/0.webp?sig=xxx"
     boxes = [
         {"text": "Invoice #4471", "bbox": [120, 340, 410, 372], "confidence": 0.987}
     ]
-    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+    return mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -124,32 +124,77 @@ def _seed_completed_with_image(mock_backend, *, job_id="job_parse_1"):
     )
 
 
-def test_parse_default_sends_include_boxes_false(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
+def test_parse_default_omits_output_flags(mock_api, client, tiny_pdf):
+    """The API treats an omitted include_* flag as ON (fast mode) and a literal
+    `false` as an opt-out. The SDK must therefore send nothing unless the caller
+    set a flag — sending `false` by default silently stripped boxes, word boxes,
+    layout and page images from every result."""
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed(mock_api)
 
     client.parse(tiny_pdf)
 
-    assert submit_route.calls[0].request.url.params["include_boxes"] == "false"
+    params = submit_route.calls[0].request.url.params
+    for flag in ("include_boxes", "include_image", "include_layout",
+                 "parse_figures", "groups_profile", "mode"):
+        assert flag not in params, flag
 
 
-def test_parse_default_sends_include_image_false(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
+@pytest.mark.parametrize("flag", ["include_boxes", "include_image", "include_layout"])
+def test_parse_explicit_false_is_sent_as_opt_out(mock_api, client, tiny_pdf, flag):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed(mock_api)
 
-    client.parse(tiny_pdf)
+    client.parse(tiny_pdf, **{flag: False})
 
-    assert submit_route.calls[0].request.url.params["include_image"] == "false"
+    params = submit_route.calls[0].request.url.params
+    assert params[flag] == "false"
+    # Only the flag that was set reaches the wire.
+    others = {"include_boxes", "include_image", "include_layout"} - {flag}
+    for other in others:
+        assert other not in params, other
+
+
+def test_parse_include_layout_true_is_sent(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed(mock_api)
+
+    client.parse(tiny_pdf, include_layout=True)
+
+    assert submit_route.calls[0].request.url.params["include_layout"] == "true"
+
+
+def test_parse_figures_and_groups_profile_propagate(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed(mock_api)
+
+    client.parse(tiny_pdf, parse_figures="table,chart", groups_profile="B")
+
+    params = submit_route.calls[0].request.url.params
+    assert params["parse_figures"] == "table,chart"
+    assert params["groups_profile"] == "B"
+
+
+def test_submit_parse_figures_none_opts_out(mock_api, client, tiny_pdf):
+    """`"none"` is the API's documented opt-out literal and must pass through verbatim."""
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+
+    client.submit_parse(tiny_pdf, parse_figures="none")
+
+    assert submit_route.calls[0].request.url.params["parse_figures"] == "none"
 
 
 def test_parse_include_image_propagates_and_returns_image_url(
-    mock_backend, client, tiny_pdf
+    mock_api, client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed_with_image(mock_backend)
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed_with_image(mock_api)
 
     result = client.parse(tiny_pdf, include_image=True)
 
@@ -159,9 +204,9 @@ def test_parse_include_image_propagates_and_returns_image_url(
     assert page["dimensions"] == {"width": 824, "height": 1066}
 
 
-def test_submit_parse_include_image_propagates(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
+def test_submit_parse_include_image_propagates(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
 
     client.submit_parse(tiny_pdf, include_image=True)
 
@@ -169,11 +214,11 @@ def test_submit_parse_include_image_propagates(mock_backend, client, tiny_pdf):
 
 
 def test_parse_include_boxes_propagates_and_returns_boxes(
-    mock_backend, client, tiny_pdf
+    mock_api, client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed_with_boxes(mock_backend)
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed_with_boxes(mock_api)
 
     result = client.parse(tiny_pdf, include_boxes=True)
 
@@ -186,19 +231,19 @@ def test_parse_include_boxes_propagates_and_returns_boxes(
     assert box["confidence"] == 0.987
 
 
-def test_submit_parse_include_boxes_propagates(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
+def test_submit_parse_include_boxes_propagates(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
 
     client.submit_parse(tiny_pdf, include_boxes=True)
 
     assert submit_route.calls[0].request.url.params["include_boxes"] == "true"
 
 
-def test_parse_image_path_alias_still_works(mock_backend, client, tiny_png):
-    _seed_presigned(mock_backend)
-    _seed_submit(mock_backend)
-    _seed_completed(mock_backend, ocr="image text")
+def test_parse_image_path_alias_still_works(mock_api, client, tiny_png):
+    _seed_presigned(mock_api)
+    _seed_submit(mock_api)
+    _seed_completed(mock_api, ocr="image text")
 
     result = client.parse(image_path=tiny_png)
 
@@ -206,13 +251,13 @@ def test_parse_image_path_alias_still_works(mock_backend, client, tiny_png):
 
 
 def test_parse_use_presigned_false_falls_back_to_presigned(
-    mock_backend, client, tiny_pdf
+    mock_api, client, tiny_pdf
 ):
     """use_presigned=False is no longer supported by the API (no direct-upload
     path); the SDK warns and falls back to the presigned document_key flow."""
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed(mock_api)
 
     with pytest.warns(DeprecationWarning):
         client.parse(tiny_pdf, use_presigned=False)
@@ -224,18 +269,18 @@ def test_parse_use_presigned_false_falls_back_to_presigned(
     assert req.headers["X-Async"] == "true"
 
 
-def test_parse_submit_401_raises_authentication_error(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    mock_backend.post("/v1/parse").mock(return_value=httpx.Response(401))
+def test_parse_submit_401_raises_authentication_error(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/parse").mock(return_value=httpx.Response(401))
 
     with pytest.raises(AuthenticationError) as ei:
         client.parse(tiny_pdf)
     assert ei.value.status_code == 401
 
 
-def test_parse_submit_500_raises_parse_error(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    mock_backend.post("/v1/parse").mock(
+def test_parse_submit_500_raises_parse_error(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/parse").mock(
         return_value=httpx.Response(500, json={"message": "service down"}),
     )
 
@@ -244,10 +289,10 @@ def test_parse_submit_500_raises_parse_error(mock_backend, client, tiny_pdf):
     assert ei.value.status_code == 500
 
 
-def test_parse_failed_job_raises_parse_error(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_submit(mock_backend)
-    mock_backend.get("/v1/jobs/job_parse_1").mock(
+def test_parse_failed_job_raises_parse_error(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_submit(mock_api)
+    mock_api.get("/v1/jobs/job_parse_1").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -264,11 +309,11 @@ def test_parse_failed_job_raises_parse_error(mock_backend, client, tiny_pdf):
     assert "OCR pipeline failed" in str(ei.value)
 
 
-def test_submit_parse_returns_job_no_polling(mock_backend, client, tiny_pdf):
+def test_submit_parse_returns_job_no_polling(mock_api, client, tiny_pdf):
     """submit_parse should return immediately with a Job; never call /v1/jobs/."""
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend, job_id="my_job_id")
-    poll_route = mock_backend.get("/v1/jobs/my_job_id")
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api, job_id="my_job_id")
+    poll_route = mock_api.get("/v1/jobs/my_job_id")
 
     job = client.submit_parse(tiny_pdf)
 
@@ -280,11 +325,11 @@ def test_submit_parse_returns_job_no_polling(mock_backend, client, tiny_pdf):
     assert not poll_route.called  # NO polling happened
 
 
-def test_parse_per_call_poll_overrides_propagate(mock_backend, client, tiny_pdf):
+def test_parse_per_call_poll_overrides_propagate(mock_api, client, tiny_pdf):
     """Per-call poll_timeout should override the constructor's value."""
-    _seed_presigned(mock_backend)
-    _seed_submit(mock_backend)
-    mock_backend.get("/v1/jobs/job_parse_1").mock(
+    _seed_presigned(mock_api)
+    _seed_submit(mock_api)
+    mock_api.get("/v1/jobs/job_parse_1").mock(
         return_value=httpx.Response(200, json={"status": "pending"}),
     )
 
@@ -295,10 +340,10 @@ def test_parse_per_call_poll_overrides_propagate(mock_backend, client, tiny_pdf)
         client.parse(tiny_pdf, poll_timeout=0.05, poll_interval=0.01)
 
 
-def test_parse_each_call_has_unique_request_id(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
+def test_parse_each_call_has_unique_request_id(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed(mock_api)
 
     client.parse(tiny_pdf)
     client.parse(tiny_pdf)
@@ -310,13 +355,13 @@ def test_parse_each_call_has_unique_request_id(mock_backend, client, tiny_pdf):
 # ── mode (fast | advanced) ───────────────────────────────────────────────
 
 
-def _seed_completed_with_structured(mock_backend, *, job_id="job_parse_1"):
+def _seed_completed_with_structured(mock_api, *, job_id="job_parse_1"):
     structured = {
         "html": "<table><tr><td>Invoice #4471</td></tr></table>",
         "markdown": "| Invoice #4471 |",
         "regions": [{"type": "table", "bbox": [10, 10, 600, 200]}],
     }
-    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+    return mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -338,20 +383,20 @@ def _seed_completed_with_structured(mock_backend, *, job_id="job_parse_1"):
     )
 
 
-def test_parse_default_omits_mode_for_server_default(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
+def test_parse_default_omits_mode_for_server_default(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed(mock_api)
 
     client.parse(tiny_pdf)
 
     assert "mode" not in submit_route.calls[0].request.url.params
 
 
-def test_parse_explicit_fast_is_sent(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
+def test_parse_explicit_fast_is_sent(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed(mock_api)
 
     client.parse(tiny_pdf, mode="fast")
 
@@ -359,11 +404,11 @@ def test_parse_explicit_fast_is_sent(mock_backend, client, tiny_pdf):
 
 
 def test_parse_advanced_mode_propagates_and_returns_structured(
-    mock_backend, client, tiny_pdf
+    mock_api, client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed_with_structured(mock_backend)
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed_with_structured(mock_api)
 
     result = client.parse(tiny_pdf, mode="advanced")
 
@@ -375,9 +420,9 @@ def test_parse_advanced_mode_propagates_and_returns_structured(
     assert structured["regions"][0]["type"] == "table"
 
 
-def test_submit_parse_mode_advanced_propagates(mock_backend, client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
+def test_submit_parse_mode_advanced_propagates(mock_api, client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
 
     client.submit_parse(tiny_pdf, mode="advanced")
 

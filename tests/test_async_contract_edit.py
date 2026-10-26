@@ -27,11 +27,11 @@ from tests.test_contract_edit import (  # noqa: F401
 
 
 async def test_detect_uses_async_and_markdown_assist_query_param(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_detect_submit(mock_backend)
-    poll_route = _seed_detect_completed(mock_backend)
+    _seed_presigned(mock_api)
+    submit_route = _seed_detect_submit(mock_api)
+    poll_route = _seed_detect_completed(mock_api)
 
     result = await async_client.edit_detect(tiny_pdf)
 
@@ -43,29 +43,29 @@ async def test_detect_uses_async_and_markdown_assist_query_param(
     assert poll_route.called
 
 
-async def test_detect_markdown_assist_true(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_detect_submit(mock_backend)
-    _seed_detect_completed(mock_backend)
+async def test_detect_markdown_assist_true(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_detect_submit(mock_api)
+    _seed_detect_completed(mock_api)
 
     await async_client.edit_detect(tiny_pdf, markdown_assist=True)
 
     assert submit_route.calls[0].request.url.params["markdown_assist"] == "true"
 
 
-async def test_detect_stamps_detect_job_id_onto_envelope(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_detect_submit(mock_backend)
-    _seed_detect_completed(mock_backend)
+async def test_detect_stamps_detect_job_id_onto_envelope(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_detect_submit(mock_api)
+    _seed_detect_completed(mock_api)
 
     result = await async_client.edit_detect(tiny_pdf)
 
     assert result["detect_job_id"] == "job_ed_detect"
 
 
-async def test_submit_detect_returns_job_with_edit_op(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_detect_submit(mock_backend)
+async def test_submit_detect_returns_job_with_edit_op(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_detect_submit(mock_api)
 
     job = await async_client.submit_edit_detect(tiny_pdf)
 
@@ -76,9 +76,9 @@ async def test_submit_detect_returns_job_with_edit_op(mock_backend, async_client
 # ── fill ────────────────────────────────────────────────────────────────────
 
 
-async def test_fill_posts_json_with_detect_job_id_and_values(mock_backend, async_client):
-    submit_route = _seed_fill_submit(mock_backend)
-    _seed_fill_completed(mock_backend)
+async def test_fill_posts_json_with_detect_job_id_and_values(mock_api, async_client):
+    submit_route = _seed_fill_submit(mock_api)
+    _seed_fill_completed(mock_api)
 
     result = await async_client.edit_fill("job_ed_detect", values={"0": "Jane Doe"})
 
@@ -93,9 +93,9 @@ async def test_fill_posts_json_with_detect_job_id_and_values(mock_backend, async
     }
 
 
-async def test_fill_natural_language_sends_content(mock_backend, async_client):
-    submit_route = _seed_fill_submit(mock_backend)
-    _seed_fill_completed(mock_backend)
+async def test_fill_natural_language_sends_content(mock_api, async_client):
+    submit_route = _seed_fill_submit(mock_api)
+    _seed_fill_completed(mock_api)
 
     await async_client.edit_fill(
         "job_ed_detect", content="Patient is Jane Doe", natural_language=True
@@ -115,8 +115,8 @@ async def test_fill_natural_language_sends_content(mock_backend, async_client):
         ({}, "requires values"),
     ],
 )
-async def test_fill_mode_mismatches_fail_client_side(mock_backend, async_client, kwargs, match):
-    route = _seed_fill_submit(mock_backend)
+async def test_fill_mode_mismatches_fail_client_side(mock_api, async_client, kwargs, match):
+    route = _seed_fill_submit(mock_api)
 
     with pytest.raises(ValueError, match=match):
         await async_client.edit_fill("job_ed_detect", **kwargs)
@@ -128,13 +128,13 @@ async def test_fill_mode_mismatches_fail_client_side(mock_backend, async_client,
 
 
 async def test_edit_chains_detect_then_natural_language_fill(
-    mock_backend, async_client, tiny_pdf
+    mock_api, async_client, tiny_pdf
 ):
-    _seed_presigned(mock_backend)
-    _seed_detect_submit(mock_backend)
-    _seed_detect_completed(mock_backend)
-    fill_route = _seed_fill_submit(mock_backend)
-    _seed_fill_completed(mock_backend)
+    _seed_presigned(mock_api)
+    _seed_detect_submit(mock_api)
+    _seed_detect_completed(mock_api)
+    fill_route = _seed_fill_submit(mock_api)
+    _seed_fill_completed(mock_api)
 
     result = await async_client.edit(tiny_pdf, content="Patient is Jane Doe")
 
@@ -145,11 +145,11 @@ async def test_edit_chains_detect_then_natural_language_fill(
     assert (body["detect_job_id"], body["natural_language"]) == ("job_ed_detect", True)
 
 
-async def test_edit_one_shot_takes_no_values(mock_backend, async_client, tiny_pdf):
+async def test_edit_one_shot_takes_no_values(mock_api, async_client, tiny_pdf):
     """Mirrors the sync client: one-shot is content-only — it detects the schema for the
     first time, so the caller cannot know the indices `values` are keyed by."""
-    _seed_presigned(mock_backend)
-    route = _seed_detect_submit(mock_backend)
+    _seed_presigned(mock_api)
+    route = _seed_detect_submit(mock_api)
 
     with pytest.raises(TypeError, match="values"):
         await async_client.edit(tiny_pdf, values={"0": "Jane"})
@@ -158,9 +158,9 @@ async def test_edit_one_shot_takes_no_values(mock_backend, async_client, tiny_pd
 
 
 @pytest.mark.parametrize("content", ["", "   "], ids=["empty", "whitespace"])
-async def test_edit_requires_non_empty_content(mock_backend, async_client, tiny_pdf, content):
-    _seed_presigned(mock_backend)
-    route = _seed_detect_submit(mock_backend)
+async def test_edit_requires_non_empty_content(mock_api, async_client, tiny_pdf, content):
+    _seed_presigned(mock_api)
+    route = _seed_detect_submit(mock_api)
 
     with pytest.raises(ValueError, match="content"):
         await async_client.edit(tiny_pdf, content=content)
@@ -172,10 +172,10 @@ async def test_edit_requires_non_empty_content(mock_backend, async_client, tiny_
 # ── failures ────────────────────────────────────────────────────────────────
 
 
-async def test_failed_detect_job_raises_edit_error(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_detect_submit(mock_backend)
-    mock_backend.get("/v1/jobs/job_ed_detect").mock(
+async def test_failed_detect_job_raises_edit_error(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_detect_submit(mock_api)
+    mock_api.get("/v1/jobs/job_ed_detect").mock(
         return_value=httpx.Response(200, json={
             "status": "failed",
             "error": "edit-service /detect failed (502)",
@@ -189,8 +189,8 @@ async def test_failed_detect_job_raises_edit_error(mock_backend, async_client, t
     assert exc.value.status_code == 502
 
 
-async def test_fill_404_on_unknown_detect_job(mock_backend, async_client):
-    mock_backend.post("/v1/edit/fill").mock(
+async def test_fill_404_on_unknown_detect_job(mock_api, async_client):
+    mock_api.post("/v1/edit/fill").mock(
         return_value=httpx.Response(404, json={"detail": "detect_job_id not found"}),
     )
 
@@ -198,3 +198,27 @@ async def test_fill_404_on_unknown_detect_job(mock_backend, async_client):
         await async_client.edit_fill("job_missing", values={"0": "x"})
 
     assert exc.value.status_code == 404
+
+
+# ── availability ─────────────────────────────────────────────────────────────
+
+
+async def test_detect_404_means_edit_api_not_available(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    mock_api.post("/v1/edit/detect").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Not Found"}}),
+    )
+
+    with pytest.raises(EditError) as exc:
+        await async_client.submit_edit_detect(tiny_pdf)
+
+    assert exc.value.status_code == 404
+    assert str(exc.value) == "The edit API is not available for this account."
+
+
+async def test_fill_404_without_detect_job_hint_means_not_available(mock_api, async_client):
+    mock_api.post("/v1/edit/fill").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Not Found"}}),
+    )
+    with pytest.raises(EditError, match="not available for this account"):
+        await async_client.submit_edit_fill("job_x", values={"0": "x"})

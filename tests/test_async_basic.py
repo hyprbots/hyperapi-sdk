@@ -108,7 +108,7 @@ def test_async_constructor_exposes_poll_knobs():
 
 
 def test_async_client_user_agent_has_async_suffix():
-    """The async client's User-Agent gets a '-async' suffix so backend log
+    """The async client's User-Agent gets a '-async' suffix so server-side
     analytics can distinguish sync vs async client traffic without inspecting
     other signals."""
     client = AsyncHyperAPIClient(api_key="hk_test_ua")

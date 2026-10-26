@@ -6,27 +6,27 @@ import pytest
 from hyperapi import Job, RedactError
 
 
-def _seed_presigned(mock_backend, *, key="doc_rd"):
-    mock_backend.post("/v1/documents/upload").mock(
+def _seed_presigned(mock_api, *, key="doc_rd"):
+    mock_api.post("/v1/documents/upload").mock(
         return_value=httpx.Response(200, json={
             "document_key": key,
             "upload_url": f"https://s3.local/{key}?sig=x",
             "expires_in": 600,
         }),
     )
-    mock_backend.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
+    mock_api.put(f"https://s3.local/{key}?sig=x").mock(return_value=httpx.Response(200))
 
 
-def _seed_submit(mock_backend, *, job_id="job_rd_1"):
-    return mock_backend.post("/v1/redact").mock(
+def _seed_submit(mock_api, *, job_id="job_rd_1"):
+    return mock_api.post("/v1/redact").mock(
         return_value=httpx.Response(202, json={
             "job_id": job_id, "status": "pending", "poll_url": f"/v1/jobs/{job_id}",
         }),
     )
 
 
-def _seed_completed(mock_backend, *, job_id="job_rd_1"):
-    return mock_backend.get(f"/v1/jobs/{job_id}").mock(
+def _seed_completed(mock_api, *, job_id="job_rd_1"):
+    return mock_api.get(f"/v1/jobs/{job_id}").mock(
         return_value=httpx.Response(200, json={
             "status": "completed",
             "result": {
@@ -41,10 +41,10 @@ def _seed_completed(mock_backend, *, job_id="job_rd_1"):
     )
 
 
-async def test_async_redact_default_uses_async_with_mode_and_logos(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    poll_route = _seed_completed(mock_backend)
+async def test_async_redact_default_uses_async_with_mode_and_logos(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    poll_route = _seed_completed(mock_api)
 
     result = await async_client.redact(tiny_pdf)
 
@@ -56,10 +56,10 @@ async def test_async_redact_default_uses_async_with_mode_and_logos(mock_backend,
     assert poll_route.called
 
 
-async def test_async_redact_deidentify_and_pii_config(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    submit_route = _seed_submit(mock_backend)
-    _seed_completed(mock_backend)
+async def test_async_redact_deidentify_and_pii_config(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    submit_route = _seed_submit(mock_api)
+    _seed_completed(mock_api)
 
     await async_client.redact(
         tiny_pdf,
@@ -75,9 +75,9 @@ async def test_async_redact_deidentify_and_pii_config(mock_backend, async_client
     assert "pii_config" in body and "SSN" in body
 
 
-async def test_async_submit_redact_returns_job(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_submit(mock_backend, job_id="rd_async")
+async def test_async_submit_redact_returns_job(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_submit(mock_api, job_id="rd_async")
 
     job = await async_client.submit_redact(tiny_pdf)
 
@@ -86,10 +86,10 @@ async def test_async_submit_redact_returns_job(mock_backend, async_client, tiny_
     assert job.job_id == "rd_async"
 
 
-async def test_async_redact_failed_job_raises(mock_backend, async_client, tiny_pdf):
-    _seed_presigned(mock_backend)
-    _seed_submit(mock_backend)
-    mock_backend.get("/v1/jobs/job_rd_1").mock(return_value=httpx.Response(
+async def test_async_redact_failed_job_raises(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    _seed_submit(mock_api)
+    mock_api.get("/v1/jobs/job_rd_1").mock(return_value=httpx.Response(
         200, json={"status": "failed", "error": "redact pipeline crashed"},
     ))
 
