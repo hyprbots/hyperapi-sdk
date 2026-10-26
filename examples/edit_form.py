@@ -11,6 +11,9 @@ Walks the human-in-the-loop flow the two-call API is designed for:
 
 Step 3 is what a UI does after the user edits a proposed value. It's free —
 the document is metered once, at detect.
+
+The edit API is not enabled for every account; where it is off, every edit
+call raises EditError("The edit API is not available for this account.").
 """
 
 from __future__ import annotations

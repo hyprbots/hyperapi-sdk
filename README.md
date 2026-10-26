@@ -14,7 +14,7 @@
 
 ## Architecture
 
-HyperAPI uses a **two-stage pipeline** for document processing:
+Every operation follows the same **OCR → task** path on the server:
 
 ```
                           ┌─────────────────┐
@@ -22,16 +22,16 @@ HyperAPI uses a **two-stage pipeline** for document processing:
                           └────────┬────────┘
                                    │
                     ┌──────────────▼──────────────┐
-                    │     Stage 1: OCR Engine      │
+                    │             OCR              │
                     │                              │
                     │  ┌──────────┐ ┌───────────┐  │
-                    │  │ standard │ │  layout-  │  │
-                    │  │ (default)│ │  aware    │  │
+                    │  │   fast   │ │ advanced  │  │
+                    │  │ (default)│ │  (layout) │  │
                     │  └──────────┘ └───────────┘  │
                     └──────────────┬──────────────┘
-                                   │ ocr_pages + ocr_text
+                                   │ OCR output
                     ┌──────────────▼──────────────┐
-                    │   Stage 2: Task processing   │
+                    │       Task processing        │
                     │                              │
                     │  parse → (skip, OCR only)    │
                     │  extract → structured extract│
@@ -41,7 +41,7 @@ HyperAPI uses a **two-stage pipeline** for document processing:
                     └─────────────────────────────┘
 ```
 
-**Stage 1** runs OCR server-side. **Stage 2** routes the OCR output to task-specific processing. For `parse`, Stage 2 is skipped — you get the raw OCR result directly.
+The API runs OCR first, then applies the task you asked for to the OCR output. For `parse`, the task step is skipped — you get the OCR result directly.
 
 ## Why Choose HyperAPI?
 
@@ -110,7 +110,9 @@ ocr_result = client.parse("complex_table.pdf")
 
 `mode="advanced"` runs layout-aware structured OCR: each page gains a
 `structured` dict with `html`, `markdown`, and `regions` — tables come back as
-tables, not flattened text. Slower than the default `mode="fast"`.
+tables, not flattened text. Slower than `mode="fast"`. When `mode` is omitted
+the SDK sends nothing and the API default applies (`fast` unless your
+organization is configured otherwise).
 
 ```python
 result = client.parse("annual_report.pdf", mode="advanced")
@@ -119,8 +121,48 @@ print(page["structured"]["markdown"])   # layout-aware markdown
 print(page["structured"]["regions"])    # typed regions with bounding boxes
 ```
 
-Re-parsing the same document returns the **cached** OCR output — 24h in
-production — so a retry after a bad parse hands back the same bad parse. Pass
+### Fast-mode response shape
+
+In `fast` mode the API returns boxes, page images and the document layout by
+default. The SDK's `include_boxes`, `include_image`, `include_layout` and
+`parse_figures` arguments default to `None`, which leaves the choice to the API;
+pass `False` (or `parse_figures="none"`) to opt out of a part you do not need.
+`mode="advanced"` returns `structured` instead and produces none of the fields
+below.
+
+```python
+result = client.parse("invoice.pdf")                     # API defaults: everything on
+lean   = client.parse("invoice.pdf", include_boxes=False, include_image=False,
+                      include_layout=False)              # text and geometry only
+```
+
+| Field | Where | Meaning |
+|---|---|---|
+| `ocr` | `result` | Full text of the document, pages joined by blank lines; prefer `pages` for per-page work |
+| `pages[].text` | per page | The page's text |
+| `pages[].dimensions` / `page_size` / `background` | per page | Pixel space of every `bbox`; the page's own size (`pt` for PDF/XPS, `px` for images); page background colour. PDF, XPS and image inputs |
+| `pages[].boxes` | per page | Line boxes `{text, bbox: [left, top, right, bottom], confidence}`. Off with `include_boxes=False`. Office documents return boxes only together with a page image |
+| `pages[].word_boxes` | per page | Per-word boxes with typography: `font`, `size`, `color`, `bold`, `italic`, `background`, `font_source` (`document` from the file's text layer, `model` estimated from pixels). PDF, XPS and images; keys omitted when not stated |
+| `pages[].image_url` | per page | Presigned page image, valid about 15 minutes. Off with `include_image=False` |
+| `pages[].layout` / `pages[].layout_text` | per page | Detected regions in reading order with `bbox`, and the text rebuilt around them. `result.layout_text` carries the whole document. Off with `include_layout=False` |
+| `pages[].gaps` | per page | Large empty vertical bands between two consecutive blocks in the same column, as `{bbox, height, after, before, ratio}`. Present only on pages that have one. Information only |
+| `blocks[]` | `result` | The document's components (headings, paragraphs, tables, figures, …) in reading order across all pages: `id` (`b<page>-<n>`), `order`, `page`, `label`, `bbox`, `html`, `heading` (level 1-6), `group`, `furniture`, `style`. `empty: true` marks a block with no text and nothing drawn that is kept because it still occupies its box. `paint` on an embedded-picture block gives its `index` in the page's paint order and the `asset` it was drawn from |
+| `groups[]` | `result` | The outline built over `blocks`: `section` and `preamble` groups form the tree; `figure`, `table`, `list`, `formula`, `algorithm`, `note` and `aside` are self-contained; `page_header` / `page_footer` hold running heads and feet (skip them when rebuilding text). Each has `id`, `kind`, `pages`, `children` (block and group ids in reading order), `boxes`, and `level` / `heading` on sections |
+| `figure_parse` | `result` | Summary of figure parsing: `requested`, `available`, `blocks_total`, `blocks_parsed`, `blocks_skipped`, `gaps`. Regions that were parsed gain `content` and `parse_status` in `layout` |
+| `metadata.groups_profile` | envelope | The grouping profile actually applied, reported when `groups_profile="B"` was requested (falls back to `A` where `B` cannot be used) |
+
+`parse_figures` takes a comma-separated subset of `image`, `chart`, `table` (or
+`"none"`) and requires the layout to be on; a parsed chart's `content` is a
+markdown table, an image's is its caption or text, a table's is HTML.
+`groups_profile="A"` (the default) gives a tree in reading order in which every
+block belongs to exactly one group; `"B"` ranks headings by measured type size,
+binds captions to their figure or table, joins tables that continue across
+pages and is not in reading order (use `blocks[].order`). The full field
+reference is on the public docs site at
+[apis.hyperbots.com/docs/api/parse](https://apis.hyperbots.com/docs/api/parse).
+
+Re-parsing the same document within 24 hours returns the **cached** OCR output,
+so a retry after a bad parse hands back the same bad parse. Pass
 `force_refresh=True` to re-run OCR and overwrite the stored result:
 
 ```python
@@ -132,29 +174,38 @@ it when a result actually looks wrong — not as a default.
 
 ### Large documents (beyond the advanced page cap)
 
-Advanced parse normally caps at **60 pages / 50 MB** — past either limit the
-server returns `413`. Selected deployments raise that to **500 pages / 512 MiB**
-for a narrow case. Every one of these must hold, or you get the ordinary `413`:
+Advanced parse has a page and byte ceiling that depends on your plan; past
+either limit the server returns `413`. Read the effective numbers for your
+account from `client.get_limits()` rather than hard-coding them:
+
+```python
+limits = client.get_limits()                       # GET /v1/limits
+print(limits["parse_advanced"])                    # {"max_bytes": ..., "max_pages": ...}
+print(limits.get("bulk_parse"))                    # None when the raised path is not offered
+```
+
+The raised ceiling (`bulk_parse` in the limits response) applies only when every
+one of these holds, or you get the ordinary `413`:
 
 | Condition | Why |
 |---|---|
-| `mode="advanced"` | `mode="fast"` was never page-capped |
+| `mode="advanced"` | `mode="fast"` is never page-capped |
 | Submitted **asynchronously** | A multi-hour job can't be served on one connection |
-| Org on the **`custom`** tier | Hours of GPU time is a provisioned privilege |
+| Plan that includes bulk advanced parse | Hours of processing time is a provisioned privilege |
 | Called with an **API key** (not the dashboard) | The playground has a human waiting on a short timeout |
-| ≤ 500 pages, ≤ 512 MiB | The hard ceiling for this path |
+| Within the `bulk_parse` page and byte limits | The hard ceiling for this path |
 
 The SDK already satisfies the async and API-key conditions — every convenience
-method submits with `X-Async: true`, and the gateway tags API-key traffic as
-`api` for you. Nothing to pass; the server decides. The server never tells you
-*which* condition you missed, so a surprise `413` on a large document is most
-likely tier or deployment.
+method submits with `X-Async: true`, and the server records the source of the
+request. Nothing to pass; the server decides. The server never tells you *which*
+condition you missed, so a surprise `413` on a large document is most likely
+the plan.
 
-> **Availability.** This is enabled per-deployment and is not on everywhere.
-> Check with HyperAPI support before relying on it; without it the 60-page /
-> 50 MB `413` stands.
+> **Availability.** The raised ceiling is not offered on every account. If
+> `bulk_parse` is absent from `get_limits()`, the standard `parse_advanced`
+> ceiling stands.
 
-The document runs as page-range segments on the batch queue, but stays **one**
+The document is processed in page ranges, but stays **one**
 request — one `request_id`, one usage record, one job. Two things differ from an
 ordinary parse:
 
@@ -216,24 +267,32 @@ while (envelope := client.get_job(job.job_id))["status"] == "pending":
 
 Upload accepts any supported file up to your byte ceiling, but each operation
 enforces its own page ceiling when the document is submitted — **before** any
-billable processing runs. "—" means no page rejection for that operation.
+billable processing runs. The ceilings depend on your plan, so read them from
+the API instead of hard-coding them:
 
-| Operation | Max upload | Max pages | Notes |
-|---|---|---|---|
-| Parse (fast) | 50 MB | — | Never page-capped |
-| Parse (advanced) | 50 MB | 60 | Raised to 500 pages / 512 MiB for the narrow bulk case above |
-| Extract (fast) | 50 MB | — | Never page-capped |
-| Extract (advanced) | 50 MB | 60 | Same cap as advanced parse |
-| Classify | 50 MB | — | Reads the first pages it needs |
-| Split | 50 MB | — | |
-| Redact / Deidentify (inline, default) | 50 MB | 36 | Over-cap documents return `413` up front, before any OCR is billed |
-| Redact / Deidentify (`output="urls"`) | 50 MB | 60 | Masked pages come back as presigned links; offered only where `GET /v1/limits` advertises `redact.urls_max_pages` |
+```python
+limits = client.get_limits()
+for task, ceiling in limits.items():
+    if isinstance(ceiling, dict):
+        print(task, ceiling["max_bytes"], ceiling.get("max_pages"))   # max_pages None = no page cap
+```
 
-Don't hardcode these numbers: `GET /v1/limits` returns your organization's
-effective ceilings, and the same `limits` object rides on every
-`/v1/documents/upload` response. Asynchronous submissions return `200` when
-the job is *accepted* — the final verdict, including a limit rejection, lands
-on the job record you poll.
+| Key in `get_limits()` | Operation | Notes |
+|---|---|---|
+| `max_upload_bytes` | upload | Your effective upload grant; a task may admit less than this |
+| `parse_fast` | Parse (fast) | `max_pages` is `null`: never page-capped |
+| `parse_advanced` | Parse (advanced) | Page-capped |
+| `bulk_parse` | Parse (advanced, async, bulk) | Present only where the raised ceiling above is offered |
+| `extract_fast` | Extract (fast) | Never page-capped |
+| `extract_advanced` | Extract (advanced) | Present only where advanced extract is offered |
+| `classify` | Classify | Reads the first pages it needs |
+| `split` | Split | |
+| `redact` | Redact / Deidentify | `max_pages` caps inline output. `urls_max_pages` is present only where `output="urls"` is offered and caps that mode. Over-cap documents return `413` up front, before any OCR is billed |
+
+A missing key means that mode is not offered to your account, never "unlimited".
+The same `limits` object rides on every `/v1/documents/upload` response.
+Asynchronous submissions return `200` when the job is *accepted* — the final
+verdict, including a limit rejection, lands on the job record you poll.
 
 ## Extract: Basic vs Advanced
 
@@ -262,7 +321,7 @@ fields = client.extract_advanced("mixed_document.pdf")
 print(fields["result"]["entities"])
 ```
 
-Both also accept `parse_mode` to pick the Stage-1 OCR engine — `"fast"`
+Both also accept `parse_mode` to pick the OCR engine — `"fast"`
 (default, quick text extraction) or `"advanced"` (advanced layout-aware parsing
 for dense tables and forms; higher accuracy, slower, costs more, paid tiers).
 It's independent of `category` and of the Basic/Advanced split:
@@ -305,8 +364,9 @@ of the request.
 
 ## Redact / Deidentify
 
-> Documents are capped at **36 pages** for redact — over-cap files return `413`
-> before any processing is billed. See [Limits by operation](#limits-by-operation).
+> Redact has a plan-dependent page cap — over-cap files return `413` before any
+> processing is billed. Read it from `client.get_limits()["redact"]`; see
+> [Limits by operation](#limits-by-operation).
 
 
 `redact()` masks PII with black boxes; `mode="deidentify"` overlays synthetic
@@ -321,8 +381,8 @@ for page_png_b64 in result["result"]["images"]:
 print(result["result"]["summary"])       # {"PERSON_NAME": 2, "EMAIL": 1, ...}
 
 # Streaming output — masked pages as short-lived presigned links instead of
-# inline base64, and a 60-page cap instead of 36. Feature-detect first:
-# GET /v1/limits advertises redact.urls_max_pages only where the mode is
+# inline base64, with a higher page cap. Feature-detect first:
+# client.get_limits()["redact"] carries urls_max_pages only where the mode is
 # offered. Not combinable with include_logos.
 result = client.redact("long-contract.pdf", output="urls")
 client.download_pages(result, "masked/")   # pages[*].image_url — works as-is
@@ -335,6 +395,10 @@ client.redact(
 ```
 
 ## Edit (form detect + fill)
+
+The edit API is not enabled for every account: where it is off, `edit_detect()`,
+`edit_fill()` and `edit()` raise `EditError("The edit API is not available for
+this account.")`.
 
 Detect every blank fillable field on a form, then draw values onto it and get
 back rendered page images. A two-call flow: `edit_detect()` returns the schema,
@@ -501,6 +565,11 @@ job = client.submit_extract("big_binder.pdf")
 client.delete_job(job.job_id)
 ```
 
+A cancelled job is reported by `get_job()` as `status: "failed"` with an `error`
+that starts with `cancelled:`. `wait_for_job()` on such a job raises
+`JobCancelledError` (carrying `job_id`) as soon as it sees that state, rather
+than waiting until its deadline.
+
 ### Recovering which job belongs to which document
 
 Each summary row carries a `document_key` — the server-side handle for that
@@ -531,8 +600,8 @@ for job_id, path in submitted.items():
 > `document_key` it used, and no public method accepts a pre-uploaded
 > `document_key`. So while `document_key` identifies rows uniquely, you cannot
 > currently pre-compute it to build your own key→file map through the SDK —
-> retain the `job_id` instead. `document_key` is also `None` on jobs created
-> before 2026-08-17, and the listing only covers the last 24 hours.
+> retain the `job_id` instead. `document_key` is `None` on older jobs, and the
+> listing only covers the last 24 hours.
 
 ## Batch API (async, deferred)
 
@@ -540,6 +609,13 @@ Process many documents in one async job. You submit already-uploaded documents,
 get a `batch_id` back immediately, and poll (or wait) for per-document results —
 the work runs on spare capacity, so it never competes with your interactive
 calls. Supported endpoints: `/v1/parse`, `/v1/extract`, `/v1/classify`, `/v1/split`, `/v1/redact`.
+
+For `/v1/parse` batches, `parse_mode="advanced"` requests layout-aware parsing.
+Advanced parse in a batch is plan-dependent: a batch that asks for it may be
+rejected with `400` or `403` where it is not available to your account. Each
+finished item's `result_url` is a time-limited presigned link to its result
+JSON — download it promptly, and re-poll `get_batch()` for a fresh one if it
+has lapsed.
 
 ```python
 # Upload first, or use the convenience that uploads for you:
@@ -554,7 +630,7 @@ print(batch["batch_id"], batch["status"], batch["total_items"])
 result = client.wait_for_batch(batch["batch_id"], timeout=3600)
 print(result["counts"])                      # {total, queued, processing, done, failed}
 for item in result["items"]:
-    print(item["doc_index"], item["status"], item.get("result_key"))
+    print(item["doc_index"], item["status"], item.get("result_url"))
 
 # Or drive it manually:
 client.get_batch(batch["batch_id"])          # single status poll
@@ -586,9 +662,9 @@ client.extract(file)
 
 This is the pattern used by [LlamaParse](https://docs.llamaindex.ai/en/stable/llama_cloud/llama_parse/) and [Reducto](https://docs.reducto.ai/) for the same reason.
 
-> **Rate limits and polling.** The gateway rate-limits requests **per organization**, and job-status polls (`GET /v1/jobs/{id}`) count against the same limit as the submit — the window is a rolling 60 seconds. The **free tier allows 1 request per 60 s**, so a submit immediately followed by a poll would otherwise trip a `429`. The SDK handles this for you: when a poll is rate-limited, `wait_for_job` / `wait_for_jobs` / `wait_for_batch` **sleep for the server's `Retry-After` and resume**, rather than failing the call. If the job's remaining `poll_timeout` is shorter than the rate window the call raises `RateLimitError` (with `retry_after` set) so you can wait and resume via `submit_<op>` + `wait_for_job`. A single-shot `get_job()` still raises `RateLimitError` immediately — only the *waiting* helpers back off. On the free tier, prefer one blocking convenience call at a time over manual tight-loop polling.
+> **Rate limits and polling.** The API rate-limits requests **per organization**, and job-status polls (`GET /v1/jobs/{id}`) count against the same limit as the submit — the window is a rolling 60 seconds. The **free tier allows 1 request per 60 s**, so a submit immediately followed by a poll would otherwise trip a `429`. The SDK handles this for you: when a poll is rate-limited, `wait_for_job` / `wait_for_jobs` / `wait_for_batch` **sleep for the server's `Retry-After` and resume**, rather than failing the call. If the job's remaining `poll_timeout` is shorter than the rate window the call raises `RateLimitError` (with `retry_after` set) so you can wait and resume via `submit_<op>` + `wait_for_job`. A single-shot `get_job()` still raises `RateLimitError` immediately — only the *waiting* helpers back off. On the free tier, prefer one blocking convenience call at a time over manual tight-loop polling.
 
-## Async client (new in 0.2.0)
+## Async client
 
 `AsyncHyperAPIClient` is an `async`/`await` twin of `HyperAPIClient` for code that already runs inside an event loop — FastAPI / Starlette / aiohttp servers, LLM agent loops, Discord/Slack bots, and any high-concurrency processor that fans out with `asyncio.gather`. Same constructor signature, same method names, same `Job` dataclass, same typed exceptions — swap the import and add `await`.
 
@@ -658,7 +734,7 @@ async with AsyncHyperAPIClient() as client:
 
 - **`wait_for_jobs([...])`** uses `asyncio.gather` under the hood — true concurrent polling. On timeout the first job to fail raises a `JobTimeoutError` and the rest are cancelled. (The sync client's "comma-joined `'A,B'` job_id" shape is async-specific divergence — see the CHANGELOG.)
 - **Submit-and-poll is identical** — `AsyncHyperAPIClient.submit_extract(...)` returns the same `Job` dataclass; `await client.wait_for_job(job)` blocks the coroutine without blocking the event loop.
-- **`User-Agent`** carries an `-async` suffix so backend analytics can split traffic by client type.
+- **`User-Agent`** carries an `-async` suffix so server-side analytics can split traffic by client type.
 
 ### Advanced: explicit submit + poll
 
@@ -742,10 +818,11 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `edit(file, *, content=…)` | detect → fill | Both legs in one call. Content-only — no `values`, since this call is detecting the schema for the first time. |
 | `download_pages(result, dir)` | — | Write any result's page images to a folder (edit legs, or `parse(include_image=True)`). |
 | `process(file)` | OCR → parse + extract | Combined parse + extract sharing one upload. Submit + poll on both legs. |
-| `submit_parse / submit_extract / submit_extract_advanced / submit_classify / submit_split / submit_redact / submit_edit_detect / submit_edit_fill` | OCR (+ Stage 2) | Submit asynchronously, return a `Job` immediately. |
+| `submit_parse / submit_extract / submit_extract_advanced / submit_classify / submit_split / submit_redact / submit_edit_detect / submit_edit_fill` | OCR (+ task) | Submit asynchronously, return a `Job` immediately. |
 | `get_job(job_id)` | — | One-shot status poll. No waiting, no retry. |
+| `get_limits()` | — | Your account's effective upload and per-operation ceilings (`GET /v1/limits`). |
 | `list_recent_jobs(*, limit=20, source=None)` | — | List the org's recent jobs (summary rows, newest first). |
-| `delete_job(job_id)` | — | Cancel a job. Idempotent; completed jobs keep their result. |
+| `delete_job(job_id)` | — | Cancel a job. Idempotent; completed jobs keep their result. A cancelled job reads back as `failed` with an error starting `cancelled:`. |
 | `wait_for_job(job, *, timeout=None, interval=None)` | — | Block until the job completes, fails, or `timeout` elapses. |
 | `wait_for_jobs([job1, job2], …)` | — | Poll multiple jobs concurrently. Sync: round-robin loop. Async: `asyncio.gather`. |
 | **Lifecycle (sync)** `close()` / `with HyperAPIClient() as client:` | — | Release HTTP connection pool. |
@@ -755,13 +832,21 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 
 | Parameter | Type | Default | Available On |
 |-----------|------|---------|-------------|
-| `mode` (parse) | `"fast"` \| `"advanced"` | `"fast"` | parse — `"advanced"` adds per-page `structured` layout |
+| `mode` (parse) | `"fast"` \| `"advanced"` \| `None` | `None` (API default: `"fast"`) | parse — when omitted nothing is sent and the API default applies; `"advanced"` adds per-page `structured` layout |
+| `include_boxes` (parse) | `bool \| None` | `None` (API default: on in `fast` mode) | parse — `False` leaves out `boxes` and `word_boxes` |
+| `include_image` (parse) | `bool \| None` | `None` (API default: on in `fast` mode) | parse — `False` leaves out per-page `image_url` |
+| `include_layout` (parse) | `bool \| None` | `None` (API default: on in `fast` mode) | parse — `False` leaves out `layout`, `layout_text`, `blocks`, `groups` and turns figure parsing off. `fast` mode only; `True` with `mode="advanced"` returns `400` |
+| `parse_figures` (parse) | `str \| None` | `None` (API default: `"image,chart,table"` when the layout is on) | parse — comma-separated subset of `image`, `chart`, `table`, or `"none"`; requires the layout |
+| `groups_profile` (parse) | `"A"` \| `"B"` \| `None` | `None` (API default: `"A"`) | parse — how `groups[]` is built; see the fast-mode response shape above |
+| `force_refresh` | `bool` | `False` | parse / extract / extract_advanced / classify / split / redact — re-run instead of returning the cached result (a forced run is billed) |
 | `category` (extract) | `"financial"` \| `"non_financial"` | `"financial"` | extract — Basic extractor profile; `extract_advanced()` auto-detects instead (no `category`) |
 | `schema` (extract) | `dict \| str \| Path \| None` | `None` | Basic + Other only (`category="non_financial"`): blank JSON template that defines the output shape for this request |
 | `mode` (classify / split) | `str` | `"default"` | classify / split — task selector |
 | `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |
+| `output` (redact) | `"inline"` \| `"urls"` | `"inline"` | redact — `"urls"` returns masked pages as presigned `pages[*].image_url` links with a higher page cap, where offered; other values raise `ValueError` client-side |
 | `options` | `dict \| None` | `None` | classify / split — service knobs, sent as a JSON form field |
 | `pii_config` / `include_logos` | `dict \| None` / `bool` | `None` / `False` | redact |
+| `source` (list_recent_jobs) | `"api"` \| `"playground"` \| `None` | `None` | list_recent_jobs — channel filter; omitted returns all channels |
 | `markdown_assist` | `bool` | `False` | edit_detect / edit — layout-aware detection (more precise, slower) |
 | `values` / `content` | `dict \| list \| None` / `str \| None` | `None` | edit_fill / edit — deterministic values vs. natural-language text (exactly one) |
 | `use_presigned` | `bool` | `True` | parse / extract / classify / split / redact / edit_detect |
@@ -775,17 +860,33 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `HyperAPIError` | Base — anything not specifically classified |
 | `AuthenticationError` | 401 from server, missing API key |
 | `RateLimitError` | 429 from server (carries `retry_after`, `tier`, `limit`) |
-| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` / `RedactError` / `EditError` | The corresponding op fails |
+| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` / `RedactError` / `EditError` | The corresponding op fails. `EditError` is also raised with "not available for this account" where the edit API is not enabled |
 | `DocumentUploadError` | Presigned-URL flow or S3 PUT fails |
 | `JobTimeoutError` | `wait_for_job` exceeded its timeout (job still running on server) |
+| `JobCancelledError` | The job being waited on was cancelled with `delete_job()` (reported by the API as `failed` with an error starting `cancelled:`); carries `job_id` |
 
-Every exception carries `status_code` (HTTP status if applicable) and `request_id` (the `X-Request-ID` we sent — paste it into a support ticket).
+Every exception carries `status_code` (HTTP status if applicable), `request_id`
+(the `X-Request-ID` we sent — paste it into a support ticket) and `code`, the
+machine-readable error code from the API's error envelope when one was
+returned (for example `page_quota_exceeded`), otherwise `None`. A quota
+exhaustion (`code == "page_quota_exceeded"`) is not retried: the waiting
+helpers raise immediately instead of backing off, since retrying cannot
+succeed until the quota resets or the plan changes.
 
 ### Supported Formats
 
-- PNG, JPG, JPEG
-- TIFF, WEBP, GIF
-- PDF
+The upload content type is derived from the file extension:
+
+| Family | Extensions |
+|---|---|
+| PDF | `.pdf` |
+| Images | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.tiff`, `.tif`, `.heic`, `.heif` |
+| Office documents | `.docx`, `.doc`, `.xlsx`, `.xls`, `.pptx`, `.ppt` |
+| Text and data | `.csv`, `.txt`, `.md`, `.rtf`, `.json`, `.xml` |
+| Fixed-layout pages | `.xps`, `.oxps` |
+| Email | `.eml`, `.msg` |
+
+An unrecognised extension is rejected by the upload step with `415`.
 
 ## Operational Notes
 
