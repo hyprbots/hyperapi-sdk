@@ -3,7 +3,9 @@
 Notable user-facing changes to the HyperAPI Python SDK are documented here.
 The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0]
+
+First release on PyPI, as `hyperapi-sdk` (`pip install hyperapi-sdk`; import name `hyperapi`).
 
 ### Added
 
