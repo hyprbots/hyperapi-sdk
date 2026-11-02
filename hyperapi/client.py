@@ -101,7 +101,7 @@ CONTENT_TYPES = {
 }
 
 ParseMode = Literal["fast", "advanced"]
-# Basic extract document family. ``financial`` (default) uses the built-in
+# Basic extract document family. ``financial`` (platform default) uses the built-in
 # invoice and receipt fields; ``non_financial`` uses the generic
 # single-pass extractor. Advanced extraction (auto-detect) is a separate method.
 ExtractCategory = Literal["financial", "non_financial"]
@@ -2371,8 +2371,10 @@ class HyperAPIClient:
         Submits asynchronously and polls until done. Bypasses any edge-timeout
         ceiling because each individual HTTP request stays sub-second.
 
-        This is the Basic extractor. ``category="financial"`` (default) uses the
-        built-in invoice and receipt fields. ``category="non_financial"``
+        This is the Basic extractor. ``category="financial"`` uses the
+        built-in invoice and receipt fields. Omit ``category`` to use the
+        organization default (platform default: ``"financial"``; a ``schema``
+        with no ``category`` is sent as ``"non_financial"``). ``category="non_financial"``
         is extract-fast: no document-type detection; pass ``schema`` to
         describe the documents — a blank
         template with ``None``/``False``/``"unselected"`` as placeholders
