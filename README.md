@@ -725,7 +725,7 @@ async def extract_endpoint(file: UploadFile):
     return await app.state.hyperapi.extract(tmp_path)
 ```
 
-A runnable version (standalone CLI + FastAPI snippet) lives at [`examples/async_quickstart.py`](examples/async_quickstart.py).
+A runnable version (standalone CLI + FastAPI snippet) lives at [`examples/async_quickstart.py`](https://github.com/hyprbots/hyperapi-sdk/blob/main/examples/async_quickstart.py).
 
 ### Concurrent fan-out
 
@@ -931,7 +931,7 @@ The SDK does **not** auto-retry submit POSTs. Resubmitting after a transient fai
 
 | Tutorial | Description |
 |----------|-------------|
-| [`tutorial/The_Billing_Typo.ipynb`](tutorial/The_Billing_Typo.ipynb) | Compare HyperAPI vs GPT-4, Claude, Gemini on extraction task when typos are present|
+| [`tutorial/The_Billing_Typo.ipynb`](https://github.com/hyprbots/hyperapi-sdk/blob/main/tutorial/The_Billing_Typo.ipynb) | Compare HyperAPI vs GPT-4, Claude, Gemini on extraction task when typos are present|
 
 ## Papers
 If you use **HyperAPI** or ideas related to its document intelligence and validation pipeline in your research, please cite the following papers:
@@ -965,7 +965,7 @@ pytest tests/ -v
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE) for details.
 
 ## Links
 
