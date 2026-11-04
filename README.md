@@ -64,14 +64,20 @@ Invoice Line Item:
 ## Installation
 
 ```bash
+pip install hyperapi-sdk
+```
+
+The package installs as `hyperapi-sdk` and imports as `hyperapi`. Python 3.9 or later.
+
+To install from source instead:
+
+```bash
 git clone https://github.com/hyprbots/hyperapi-sdk
 cd hyperapi-sdk
 python3 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 python -m pip install .
 ```
-
-PyPI installation will be documented after the first package release.
 
 ## Quick Start
 
