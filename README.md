@@ -301,7 +301,7 @@ Basic `extract()` runs the tier you select with `category`; **Advanced**
 
 ```python
 # Basic Financial: HyperAPI uses the invoice and receipt fields
-fields = client.extract("invoice.pdf")                        # category="financial" (default)
+fields = client.extract("invoice.pdf")                        # no category: organization default (platform default: financial)
 
 # Basic Other: define the exact output shape for this request
 schema = {
@@ -808,7 +808,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 |--------|----------|-------------|
 | `upload_document(file)` | presigned upload | Upload file, returns `document_key` (valid 24 h). |
 | `parse(file)` | OCR only | Parse document into structured text. Submit + poll under the hood. |
-| `extract(file, *, category="financial", schema=None)` | OCR → structured extraction | Basic extractor. Financial uses the built-in fields. Other (`non_financial`) accepts a JSON output schema. Submit + poll. |
+| `extract(file, *, category=None, schema=None)` | OCR → structured extraction | Basic extractor. Financial uses the built-in fields. Other (`non_financial`) accepts a JSON output schema. Submit + poll. |
 | `extract_advanced(file)` | OCR → structured extraction | Advanced extractor — auto-detects the document type (no `category`). Submit + poll. |
 | `classify(file)` | OCR → classification | Classify document type. Submit + poll. |
 | `split(file)` | OCR → document splitting | Split multi-document binders. Submit + poll. |
@@ -839,7 +839,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `parse_figures` (parse) | `str \| None` | `None` (API default: `"image,chart,table"` when the layout is on) | parse — comma-separated subset of `image`, `chart`, `table`, or `"none"`; requires the layout |
 | `groups_profile` (parse) | `"A"` \| `"B"` \| `None` | `None` (API default: `"A"`) | parse — how `groups[]` is built; see the fast-mode response shape above |
 | `force_refresh` | `bool` | `False` | parse / extract / extract_advanced / classify / split / redact — re-run instead of returning the cached result (a forced run is billed) |
-| `category` (extract) | `"financial"` \| `"non_financial"` | `"financial"` | extract — Basic extractor profile; `extract_advanced()` auto-detects instead (no `category`) |
+| `category` (extract) | `"financial"` \| `"non_financial"` \| `None` | `None` (organization default; platform default `"financial"`; `"non_financial"` if `schema` is given) | extract — Basic extractor profile; `extract_advanced()` auto-detects instead (no `category`) |
 | `schema` (extract) | `dict \| str \| Path \| None` | `None` | Basic + Other only (`category="non_financial"`): blank JSON template that defines the output shape for this request |
 | `mode` (classify / split) | `str` | `"default"` | classify / split — task selector |
 | `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |
