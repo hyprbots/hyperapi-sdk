@@ -64,12 +64,12 @@ Invoice Line Item:
 ## Installation
 
 ```bash
-pip install hyperapi-sdk
+pip install "hyperapi-sdk @ git+https://github.com/hyprbots/hyperapi-sdk.git"
 ```
 
 The package installs as `hyperapi-sdk` and imports as `hyperapi`. Python 3.9 or later.
 
-To install from source instead:
+To install from a local clone instead:
 
 ```bash
 git clone https://github.com/hyprbots/hyperapi-sdk

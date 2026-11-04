@@ -7,7 +7,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.7.0] - 2026-11-04
 
-First release on PyPI, as `hyperapi-sdk` (`pip install hyperapi-sdk`; import name `hyperapi`).
+The distribution is now named `hyperapi-sdk` (import name `hyperapi`). Install specs that name
+`hyperapi @ git+…` must change to `hyperapi-sdk @ git+…`.
 
 ### Added
 
