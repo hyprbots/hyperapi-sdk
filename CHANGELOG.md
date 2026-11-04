@@ -5,6 +5,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-04
+
+First release on PyPI, as `hyperapi-sdk` (`pip install hyperapi-sdk`; import name `hyperapi`).
+
 ### Added
 
 - Synchronous and asynchronous clients for parse, extract, classify, split,

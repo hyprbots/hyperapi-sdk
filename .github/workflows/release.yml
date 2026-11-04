@@ -45,7 +45,7 @@ jobs:
     needs: test
     environment:
       name: release
-      url: https://pypi.org/project/hyperapi/
+      url: https://pypi.org/project/hyperapi-sdk/
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -57,10 +57,13 @@ jobs:
 
       - name: Verify tag matches package version
         run: |
+          # Read versions without importing the package: its runtime deps
+          # (httpx) are not installed in this job.
           TAG="${GITHUB_REF##*/}"
-          VERSION="v$(python -c 'import hyperapi; print(hyperapi.__version__)')"
-          if [ "$TAG" != "$VERSION" ]; then
-            echo "::error::Tag $TAG does not match package version $VERSION"
+          PYPROJECT="v$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          INIT="v$(python -c 'import re; print(re.search(r"__version__ = \"([^\"]+)\"", open("hyperapi/__init__.py").read()).group(1))')"
+          if [ "$TAG" != "$PYPROJECT" ] || [ "$TAG" != "$INIT" ]; then
+            echo "::error::Tag $TAG, pyproject $PYPROJECT and __init__ $INIT must all match"
             exit 1
           fi
 
