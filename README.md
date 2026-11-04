@@ -69,6 +69,9 @@ pip install "hyperapi-sdk @ git+https://github.com/hyprbots/hyperapi-sdk.git"
 
 The package installs as `hyperapi-sdk` and imports as `hyperapi`. Python 3.9 or later.
 
+The SDK is not on PyPI yet. The `hyperapi` name there belongs to a third party, so
+never `pip install hyperapi`. Once published, the package name will be `hyperapi-sdk`.
+
 To install from a local clone instead:
 
 ```bash
