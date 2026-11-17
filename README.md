@@ -105,7 +105,7 @@ For more control, use parse and extract separately:
 ```python
 # Step 1: Parse document (OCR)
 ocr_result = client.parse("invoice.png")
-print(ocr_result["result"]["ocr"])  # Markdown-formatted text
+print(ocr_result["result"]["ocr"])  # plain text, laid out like the page
 
 # Step 2: Extract structured fields (from the same file)
 fields = client.extract("invoice.png")
@@ -117,7 +117,7 @@ ocr_result = client.parse("complex_table.pdf")
 
 ## Advanced Parse (structured layout)
 
-`mode="advanced"` runs layout-aware structured OCR: each page gains a
+`mode="advanced"` (Plus plan or higher) returns structured output: each page gains a
 `structured` dict with `html`, `markdown`, and `regions` — tables come back as
 tables, not flattened text. Slower than `mode="fast"`. When `mode` is omitted
 the SDK sends nothing and the API default applies (`fast` unless your
@@ -126,7 +126,7 @@ organization is configured otherwise).
 ```python
 result = client.parse("annual_report.pdf", mode="advanced")
 page = result["result"]["pages"][0]
-print(page["structured"]["markdown"])   # layout-aware markdown
+print(page["structured"]["markdown"])   # the page as markdown
 print(page["structured"]["regions"])    # typed regions with bounding boxes
 ```
 
@@ -330,9 +330,9 @@ fields = client.extract_advanced("mixed_document.pdf")
 print(fields["result"]["entities"])
 ```
 
-Both also accept `parse_mode` to pick the OCR engine — `"fast"`
-(default, quick text extraction) or `"advanced"` (advanced layout-aware parsing
-for dense tables and forms; higher accuracy, slower, costs more, paid tiers).
+Both also accept `parse_mode` to pick the parse mode — `"fast"`
+(default, quick text extraction) or `"advanced"` (structured output with markdown,
+suited to dense tables and forms; slower, costs more, paid tiers).
 It's independent of `category` and of the Basic/Advanced split:
 
 ```python
@@ -444,15 +444,15 @@ for page in final["result"]["pages"]:
 ```
 
 A field's **position in `form_schema` is its fill index**. `values` accepts either
-`{"0": "Jane"}` or `[{"index": 0, "value": "Jane"}]`. `markdown_assist=True` routes
-detection through layout-aware parsing — more precise on dense forms, slower.
+`{"0": "Jane"}` or `[{"index": 0, "value": "Jane"}]`. `markdown_assist=True` uses
+advanced parsing for detection — more precise on dense forms, slower.
 
 ### `edit_detect` — input / output
 
 | Argument | Type | Default | |
 |---|---|---|---|
 | `file_path` | `str \| Path` | *required* | PDF or image to detect on |
-| `markdown_assist` | `bool` | `False` | Layout-aware detection. Also changes the returned image: `True` on a scan yields the **deskewed** page, so pixel dimensions differ from `False` |
+| `markdown_assist` | `bool` | `False` | More precise detection on dense forms. Also changes the returned image: `True` on a scan yields the **straightened** page, so pixel dimensions differ from `False` |
 | `use_presigned` | `bool` | `True` | Upload via presigned URL rather than multipart |
 | `poll_timeout` / `poll_interval` | `float \| None` | `None` | Override the client's polling defaults |
 
@@ -619,7 +619,7 @@ get a `batch_id` back immediately, and poll (or wait) for per-document results �
 the work runs on spare capacity, so it never competes with your interactive
 calls. Supported endpoints: `/v1/parse`, `/v1/extract`, `/v1/classify`, `/v1/split`, `/v1/redact`.
 
-For `/v1/parse` batches, `parse_mode="advanced"` requests layout-aware parsing.
+For `/v1/parse` batches, `parse_mode="advanced"` requests advanced parsing.
 Advanced parse in a batch is plan-dependent: a batch that asks for it may be
 rejected with `400` or `403` where it is not available to your account. Each
 finished item's `result_url` is a time-limited presigned link to its result
@@ -856,7 +856,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `options` | `dict \| None` | `None` | classify / split — service knobs, sent as a JSON form field |
 | `pii_config` / `include_logos` | `dict \| None` / `bool` | `None` / `False` | redact |
 | `source` (list_recent_jobs) | `"api"` \| `"playground"` \| `None` | `None` | list_recent_jobs — channel filter; omitted returns all channels |
-| `markdown_assist` | `bool` | `False` | edit_detect / edit — layout-aware detection (more precise, slower) |
+| `markdown_assist` | `bool` | `False` | edit_detect / edit — more precise detection on dense forms (slower) |
 | `values` / `content` | `dict \| list \| None` / `str \| None` | `None` | edit_fill / edit — deterministic values vs. natural-language text (exactly one) |
 | `use_presigned` | `bool` | `True` | parse / extract / classify / split / redact / edit_detect |
 | `poll_timeout` | `float` | constructor's | parse / extract / classify / split / redact / process / edit* |
