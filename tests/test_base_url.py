@@ -47,3 +47,30 @@ def test_env_var_is_validated(monkeypatch):
     monkeypatch.setenv("HYPERAPI_URL", "ftp://example.com")
     with pytest.raises(ValueError):
         HyperAPIClient(api_key=KEY)
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "https://apis.hyperbots.com@other.example",
+        "https://user:pw@example.com",
+        "https://example.com/?x=1",
+        "https://example.com/#frag",
+        "https://exa mple.com",
+    ],
+)
+def test_rejects_userinfo_query_fragment_whitespace(cls, bad):
+    with pytest.raises(ValueError, match="Invalid base_url"):
+        cls(api_key=KEY, base_url=bad)
+
+
+def test_userinfo_error_does_not_echo_password():
+    with pytest.raises(ValueError) as exc:
+        HyperAPIClient(api_key=KEY, base_url="https://user:s3cretpw@example.com")
+    assert "s3cretpw" not in str(exc.value)
+
+
+def test_lookalike_loopback_host_still_warns():
+    with pytest.warns(UserWarning, match="plain http"):
+        HyperAPIClient(api_key=KEY, base_url="http://localhost.other.example")

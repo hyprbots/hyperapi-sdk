@@ -138,6 +138,18 @@ def _resolve_base_url(base_url: str | None) -> str:
             f"Invalid base_url {raw!r}: use an absolute https:// URL, "
             f"for example {_DEFAULT_BASE_URL!r}."
         )
+    # "https://apis.hyperbots.com@other.example" sends the key to other.example,
+    # and credentials in the URL would show up in reprs and error messages.
+    if url.userinfo:
+        raise ValueError(
+            f"Invalid base_url for host {url.host!r}: it must not contain "
+            "a username or password ('user@host')."
+        )
+    if url.query or url.fragment or any(c.isspace() for c in raw):
+        raise ValueError(
+            f"Invalid base_url {raw!r}: it must not contain a query string, "
+            "a fragment or whitespace."
+        )
     if url.scheme == "http" and url.host not in _LOOPBACK_HOSTS:
         warnings.warn(
             f"base_url {raw!r} uses plain http: the API key is sent unencrypted. "

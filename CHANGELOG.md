@@ -14,6 +14,8 @@ First release on PyPI: `pip install hyperapi-sdk`.
 - `base_url` (and `HYPERAPI_URL`) must be an absolute `http(s)` URL with a host;
   anything else raises `ValueError`. Plain `http` to a non-loopback host warns,
   because the API key would travel unencrypted.
+  URLs with a username or password (`user@host`), a query string or a fragment
+  are rejected.
 - Minimum `httpx` raised to 0.28.1, which pulls in an `h11` without the
   chunked-encoding request-smuggling flaw (CVE-2025-43859).
 - Release pipeline: build and publish run as separate jobs; only the publish job
