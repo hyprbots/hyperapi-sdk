@@ -117,6 +117,36 @@ _DEFAULT_POLL_MAX_TRANSIENT_RETRIES = 3
 _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S = 0.5
 
 
+_DEFAULT_BASE_URL = "https://apis.hyperbots.com"
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _resolve_base_url(base_url: str | None) -> str:
+    """Pick the API base URL and check that it is safe to send the API key to.
+
+    The API key travels in a header on every request, so the URL must be an
+    absolute ``http(s)`` URL with a host. Plain ``http`` is accepted (local and
+    test servers need it) but warns unless the host is a loopback address.
+    """
+    raw = (base_url or os.environ.get("HYPERAPI_URL") or _DEFAULT_BASE_URL).strip()
+    try:
+        url = httpx.URL(raw)
+    except Exception as exc:  # httpx raises InvalidURL or ValueError
+        raise ValueError(f"Invalid base_url {raw!r}: {exc}") from None
+    if url.scheme not in ("https", "http") or not url.host:
+        raise ValueError(
+            f"Invalid base_url {raw!r}: use an absolute https:// URL, "
+            f"for example {_DEFAULT_BASE_URL!r}."
+        )
+    if url.scheme == "http" and url.host not in _LOOPBACK_HOSTS:
+        warnings.warn(
+            f"base_url {raw!r} uses plain http: the API key is sent unencrypted. "
+            "Use https:// outside local testing.",
+            stacklevel=3,
+        )
+    return raw.rstrip("/")
+
+
 logger = logging.getLogger("hyperapi")
 
 
@@ -621,9 +651,7 @@ class HyperAPIClient:
                 "API key required. Pass api_key or set HYPERAPI_KEY environment variable."
             )
 
-        self.base_url = (
-            base_url or os.environ.get("HYPERAPI_URL") or "https://apis.hyperbots.com"
-        ).rstrip("/")
+        self.base_url = _resolve_base_url(base_url)
         self.timeout = timeout
         self._poll_interval = poll_interval
         self._poll_timeout = poll_timeout
