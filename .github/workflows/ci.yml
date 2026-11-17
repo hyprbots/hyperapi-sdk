@@ -16,7 +16,7 @@ permissions:
 jobs:
   lint-and-test:
     name: Lint and L1 contract tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -46,7 +46,7 @@ jobs:
 
   dependency-audit:
     name: Dependency audit (pip-audit)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -55,8 +55,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Audit runtime dependencies
+        # Audit only what users get: the SDK's resolved runtime dependencies.
+        # `pip freeze` leaves out pip/setuptools of the throwaway venv itself.
         run: |
-          python -m venv /tmp/audit
-          /tmp/audit/bin/pip install --quiet .
+          python -m venv "$RUNNER_TEMP/audit"
+          "$RUNNER_TEMP/audit/bin/pip" install --quiet .
+          "$RUNNER_TEMP/audit/bin/pip" freeze --exclude hyperapi-sdk > "$RUNNER_TEMP/runtime-requirements.txt"
+          cat "$RUNNER_TEMP/runtime-requirements.txt"
           pip install --quiet "pip-audit==2.10.1"
-          pip-audit --path "$(/tmp/audit/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          pip-audit --no-deps --disable-pip -r "$RUNNER_TEMP/runtime-requirements.txt"
