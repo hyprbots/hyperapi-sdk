@@ -43,6 +43,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal
 from collections.abc import Iterable
+from urllib.parse import quote
 
 import httpx
 
@@ -423,6 +424,20 @@ def _request_id_of(response: httpx.Response, sent: str | None = None) -> str | N
         or response.headers.get("x-correlation-id")
         or sent
     )
+
+
+def _path_id(value: Any, *, name: str = "id") -> str:
+    """Percent-encode a job or batch id for use as one URL path segment.
+
+    Ids come from callers (and are often stored and replayed), so an id such
+    as ``"../limits?x="`` must stay inside its own path segment instead of
+    walking to another endpoint or adding a query string. Every reserved
+    character, including ``/``, is encoded.
+    """
+    text = "" if value is None else str(value)
+    if not text.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return quote(text, safe="")
 
 
 def _parse_params(
@@ -1226,7 +1241,9 @@ class HyperAPIClient:
         return Job(
             job_id=envelope["job_id"],
             status=envelope.get("status", "pending"),
-            poll_url=envelope.get("poll_url", f"/v1/jobs/{envelope['job_id']}"),
+            poll_url=envelope.get(
+                "poll_url", f"/v1/jobs/{_path_id(envelope['job_id'], name='job_id')}"
+            ),
             op=op,
         )
 
@@ -1240,7 +1257,8 @@ class HyperAPIClient:
 
         try:
             resp = self._client.get(
-                f"{self.base_url}/v1/jobs/{job_id}", headers=headers
+                f"{self.base_url}/v1/jobs/{_path_id(job_id, name='job_id')}",
+                headers=headers,
             )
         except httpx.RequestError as e:
             raise HyperAPIError(f"Job poll failed: {e}", request_id=request_id) from None
@@ -1388,7 +1406,8 @@ class HyperAPIClient:
 
         try:
             resp = self._client.delete(
-                f"{self.base_url}/v1/jobs/{job_id}", headers=headers
+                f"{self.base_url}/v1/jobs/{_path_id(job_id, name='job_id')}",
+                headers=headers,
             )
         except httpx.RequestError as e:
             raise HyperAPIError(f"Job cancel failed: {e}", request_id=request_id) from None
@@ -2269,7 +2288,9 @@ class HyperAPIClient:
     def get_batch(self, batch_id: str, *, limit: int = 200, offset: int = 0) -> dict:
         """Batch status: ``{status, counts, items:[{doc_index, status, ...}]}``."""
         return self._batch_request(
-            "GET", f"/v1/batch/{batch_id}", params={"limit": limit, "offset": offset}
+            "GET",
+            f"/v1/batch/{_path_id(batch_id, name='batch_id')}",
+            params={"limit": limit, "offset": offset},
         )
 
     def list_batches(self, *, limit: int = 50, offset: int = 0) -> dict:
@@ -2280,7 +2301,9 @@ class HyperAPIClient:
 
     def cancel_batch(self, batch_id: str) -> dict:
         """Cancel a batch — stops queued items; in-flight items finish."""
-        return self._batch_request("DELETE", f"/v1/batch/{batch_id}")
+        return self._batch_request(
+            "DELETE", f"/v1/batch/{_path_id(batch_id, name='batch_id')}"
+        )
 
     def wait_for_batch(
         self,

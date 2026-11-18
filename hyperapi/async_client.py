@@ -90,6 +90,7 @@ from .client import (
     _page_targets,
     _parse_ocr_text,
     _parse_params,
+    _path_id,
     _rate_limit_error_from,
     _rate_limit_wait,
     _request_id_of,
@@ -658,7 +659,9 @@ class AsyncHyperAPIClient:
         return Job(
             job_id=envelope["job_id"],
             status=envelope.get("status", "pending"),
-            poll_url=envelope.get("poll_url", f"/v1/jobs/{envelope['job_id']}"),
+            poll_url=envelope.get(
+                "poll_url", f"/v1/jobs/{_path_id(envelope['job_id'], name='job_id')}"
+            ),
             op=op,
         )
 
@@ -672,7 +675,8 @@ class AsyncHyperAPIClient:
 
         try:
             resp = await self._client.get(
-                f"{self.base_url}/v1/jobs/{job_id}", headers=headers
+                f"{self.base_url}/v1/jobs/{_path_id(job_id, name='job_id')}",
+                headers=headers,
             )
         except httpx.RequestError as e:
             raise HyperAPIError(f"Job poll failed: {e}", request_id=request_id) from None
@@ -815,7 +819,8 @@ class AsyncHyperAPIClient:
 
         try:
             resp = await self._client.delete(
-                f"{self.base_url}/v1/jobs/{job_id}", headers=headers
+                f"{self.base_url}/v1/jobs/{_path_id(job_id, name='job_id')}",
+                headers=headers,
             )
         except httpx.RequestError as e:
             raise HyperAPIError(f"Job cancel failed: {e}", request_id=request_id) from None
@@ -1659,7 +1664,9 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """Batch status: ``{status, counts, items:[{doc_index, status, ...}]}``."""
         return await self._batch_request(
-            "GET", f"/v1/batch/{batch_id}", params={"limit": limit, "offset": offset}
+            "GET",
+            f"/v1/batch/{_path_id(batch_id, name='batch_id')}",
+            params={"limit": limit, "offset": offset},
         )
 
     async def list_batches(self, *, limit: int = 50, offset: int = 0) -> dict:
@@ -1670,7 +1677,9 @@ class AsyncHyperAPIClient:
 
     async def cancel_batch(self, batch_id: str) -> dict:
         """Cancel a batch — stops queued items; in-flight items finish."""
-        return await self._batch_request("DELETE", f"/v1/batch/{batch_id}")
+        return await self._batch_request(
+            "DELETE", f"/v1/batch/{_path_id(batch_id, name='batch_id')}"
+        )
 
     async def wait_for_batch(
         self,
