@@ -4,7 +4,7 @@
   <p align="center"><strong>HyperAPI: </strong>Stop Prompting, Start Programming Financial Intelligence.</p>
 </p>
 <p align="center">
-  <a href="https://github.com/hyprbots/hyperapi-sdk"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+"></a>
+  <a href="https://github.com/hyprbots/hyperapi-sdk"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.9+"></a>
   <a href="https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
 </p>
 
@@ -67,7 +67,7 @@ Invoice Line Item:
 pip install hyperapi-sdk
 ```
 
-The package installs as `hyperapi-sdk` and imports as `hyperapi`. Python 3.9 or later.
+The package installs as `hyperapi-sdk` and imports as `hyperapi`. Python 3.10 or later.
 
 > **Install `hyperapi-sdk`, never `hyperapi`.** The `hyperapi` name on PyPI does not
 > belong to us. The only official package is

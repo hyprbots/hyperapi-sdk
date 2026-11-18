@@ -3,6 +3,11 @@
 Notable user-facing changes to the HyperAPI Python SDK are documented here.
 The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+- **Python 3.10 or later is now required** (`requires-python = ">=3.10"`). Python 3.9 reached end of life in October 2025, and CI runners no longer ship it. Installs on 3.9 keep resolving to the last release that supports it. Contract tests now run on 3.10–3.13.
+
 ## [Unreleased]
 
 ## [0.7.1] - 2026-11-17
