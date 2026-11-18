@@ -9,7 +9,32 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First release on PyPI: `pip install hyperapi-sdk`.
 
+### Changed
+
+- `schema` (on `extract` / `submit_extract`, both clients): a `str` is always
+  parsed as JSON text and never read as a file name; to load a schema file, pass
+  `pathlib.Path("template.json")`. A string that is not valid JSON raises
+  `ValueError` pointing at `pathlib.Path`. **Behaviour change for installs from
+  GitHub:** code that passed a file path as a plain string must wrap it in
+  `Path(...)`. This also fixes `OSError: File name too long` for JSON strings
+  over ~255 characters.
+- `process()` docstring: `data` is the extract job's envelope; fields are at
+  `result["data"]["result"]["entities"]` / `["line_items"]` / `["summary"]`.
+
 ### Security
+
+- A `str` schema can no longer make the SDK read and upload a local file, so an
+  application forwarding user-supplied schema text cannot be steered into
+  sending files from its host.
+- The API key (argument or `HYPERAPI_KEY`) is stripped of surrounding whitespace,
+  so a trailing newline from a file or secret mount no longer breaks requests. A
+  key containing inner whitespace, control or non-ASCII characters raises
+  `AuthenticationError` whose message does not include the key. `client.api_key`
+  is now read-only.
+- Transport errors (connection failures, timeouts) raise the SDK exception
+  without chaining the underlying `httpx` exception (`__cause__` is `None`).
+  The chained exception carried the request headers, including `X-API-Key` in
+  clear, and could print the full key in tracebacks and error reporters.
 
 - `base_url` (and `HYPERAPI_URL`) must be an absolute `http(s)` URL with a host;
   anything else raises `ValueError`. Plain `http` to a non-loopback host warns,
