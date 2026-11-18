@@ -177,24 +177,28 @@ class TestPathVsJsonHeuristic:
                 tiny_pdf, category="non_financial", schema="just some words"
             )
 
-    def test_json_filename_that_is_missing_still_says_file_not_found(
-        self, client, tiny_pdf, tmp_path
-    ):
-        # A .json path is unambiguously a file reference, so this must stay a
-        # FileNotFoundError — the fix must not swallow the case #31 added.
-        with pytest.raises(FileNotFoundError):
+    def test_json_filename_as_str_points_at_pathlib(self, client, tiny_pdf, tmp_path):
+        # 0.7.1: a str schema is always JSON text, never a file name. A string
+        # ending in .json is the likeliest "meant a file" mistake, so the error
+        # must name the fix (pass pathlib.Path) rather than a bare parse error.
+        with pytest.raises(ValueError, match=r"ends in '\.json'.*pathlib\.Path"):
             client.submit_extract(
                 tiny_pdf, category="non_financial", schema=str(tmp_path / "nope.json")
             )
 
-    def test_existing_file_without_json_suffix_is_still_read(
+    def test_existing_file_is_read_only_as_path(
         self, mock_api, client, tiny_pdf, tmp_path
     ):
+        # Any suffix works when the caller passes a Path; the same location as
+        # a str is refused (it would otherwise let schema text read local files).
         _seed_presigned(mock_api)
         route = _seed_submit(mock_api)
         f = tmp_path / "template.txt"
         f.write_text(json.dumps(TEMPLATE))
 
-        client.submit_extract(tiny_pdf, category="non_financial", schema=str(f))
+        with pytest.raises(ValueError, match=r"pathlib\.Path"):
+            client.submit_extract(tiny_pdf, category="non_financial", schema=str(f))
+
+        client.submit_extract(tiny_pdf, category="non_financial", schema=f)
 
         assert _sent_schema(route) == TEMPLATE

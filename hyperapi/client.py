@@ -159,6 +159,76 @@ def _resolve_base_url(base_url: str | None) -> str:
     return raw.rstrip("/")
 
 
+_API_KEY_REQUIRED = "API key required. Pass api_key or set HYPERAPI_KEY environment variable."
+
+
+def _clean_api_key(value: str | None) -> str:
+    """Return the API key with surrounding whitespace removed, or refuse it.
+
+    Keys read from files and secret mounts often carry a trailing newline; left
+    in, the HTTP layer rejects the header with an error that quotes the full
+    key. Inner whitespace, control characters and non-ASCII cannot be part of
+    an issued key and cannot travel in a header, so they are refused here — and
+    the message never includes the key.
+    """
+    key = value.strip() if isinstance(value, str) else ""
+    if not key:
+        raise AuthenticationError(_API_KEY_REQUIRED)
+    if not key.isascii() or any(ch.isspace() or not ch.isprintable() for ch in key):
+        raise AuthenticationError(
+            "API key contains whitespace or control characters; "
+            "check how it is loaded (for example a stray newline)."
+        )
+    return key
+
+
+def _load_schema(schema: dict | str | os.PathLike | None) -> dict | None:
+    """Resolve an extract ``schema`` argument to a dict (or None).
+
+    * ``dict`` — returned as is.
+    * ``pathlib.Path`` (any ``os.PathLike``) — the file is read and parsed.
+    * ``str`` — always parsed as JSON text; never treated as a file name.
+
+    A ``str`` never touches the filesystem: an application that forwards
+    user-supplied schema text must not be steerable into reading (and
+    uploading) local files, and a long JSON string must not be handed to
+    ``Path.exists()`` (which raises ``OSError: File name too long``).
+    """
+    if schema is None or isinstance(schema, dict):
+        return schema
+
+    if isinstance(schema, os.PathLike):
+        path = Path(schema)
+        if not path.exists():
+            raise FileNotFoundError(f"Schema file not found: {path}")
+        try:
+            parsed = json.loads(path.read_text())
+        except ValueError as e:
+            raise ValueError(f"Schema file {path} is not valid JSON: {e}") from None
+    elif isinstance(schema, str):
+        try:
+            parsed = json.loads(schema)
+        except ValueError as e:
+            if schema.strip().lower().endswith(".json"):
+                hint = (
+                    "This string ends in '.json' but a str schema is always JSON "
+                    "text, never a file name; to load a schema file pass "
+                    'pathlib.Path("...") instead.'
+                )
+            else:
+                hint = 'To load a schema from a file, pass pathlib.Path("...").'
+            raise ValueError(f"schema string is not valid JSON ({e}). {hint}") from None
+    else:
+        raise TypeError(
+            "schema must be a dict, a JSON string, or a pathlib.Path, "
+            f"not {type(schema).__name__}"
+        )
+
+    if not isinstance(parsed, dict):
+        raise ValueError("schema must resolve to a JSON object")
+    return parsed
+
+
 logger = logging.getLogger("hyperapi")
 
 
@@ -657,11 +727,7 @@ class HyperAPIClient:
                 network is bursty enough that 3 retries in 1.5 s isn't enough
                 breathing room.
         """
-        self.api_key = api_key or os.environ.get("HYPERAPI_KEY")
-        if not self.api_key:
-            raise AuthenticationError(
-                "API key required. Pass api_key or set HYPERAPI_KEY environment variable."
-            )
+        self._api_key = _clean_api_key(api_key or os.environ.get("HYPERAPI_KEY"))
 
         self.base_url = _resolve_base_url(base_url)
         self.timeout = timeout
@@ -686,10 +752,15 @@ class HyperAPIClient:
             headers={"User-Agent": self._user_agent},
         )
 
+    @property
+    def api_key(self) -> str:
+        """The API key this client sends (read-only; whitespace-stripped)."""
+        return self._api_key
+
     # ── Repr ─────────────────────────────────────────────────────────────
 
     def __repr__(self) -> str:
-        tail = self.api_key[-4:] if self.api_key else ""
+        tail = self._api_key[-4:]
         return f"HyperAPIClient(api_key='hk_***{tail}', base_url='{self.base_url}')"
 
     # ── Headers ──────────────────────────────────────────────────────────
@@ -698,7 +769,7 @@ class HyperAPIClient:
         """Per-request headers. Generates a fresh X-Request-ID per call so
         every request can be correlated end-to-end across the platform."""
         headers = {
-            "X-API-Key": self.api_key,
+            "X-API-Key": self._api_key,
             "X-Request-ID": str(uuid.uuid4()),
         }
         if async_mode:
@@ -720,52 +791,6 @@ class HyperAPIClient:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
         return path
-
-    def _resolve_schema(self, schema: dict | str | Path | None) -> dict | None:
-        """Accept a schema as an already-loaded dict, a path to a JSON file,
-        or a raw pasted JSON string — whichever is most convenient for the
-        caller. Returns None unchanged (no schema given)."""
-        if schema is None or isinstance(schema, dict):
-            return schema
-
-        # A Path, or a string that is not JSON text, is a filesystem path — and
-        # a path that does not exist must say so. Previously any missing path
-        # fell through to json.loads("/some/missing.json") and reported "must be
-        # a dict, a path to a JSON file, or a JSON string", pointing the caller
-        # at the wrong problem. _resolve_path (the sibling helper for documents)
-        # already raises FileNotFoundError here.
-        if isinstance(schema, Path):
-            if not schema.exists():
-                raise FileNotFoundError(f"Schema file not found: {schema}")
-            raw = schema.read_text()
-        else:
-            raw = str(schema)
-            # Treat the string as a FILE REFERENCE only when it plausibly is
-            # one: a single line that either ends in .json or actually exists.
-            # Everything else goes to json.loads, so free-form text (markdown,
-            # prose, a bare array) is reported as invalid JSON rather than as a
-            # missing file — naming the real rule instead of the wrong problem.
-            stripped = raw.strip()
-            looks_like_path = (
-                "\n" not in stripped
-                and len(stripped) < 4096
-                and (stripped.lower().endswith(".json") or Path(stripped).exists())
-            )
-            if looks_like_path:
-                path = Path(stripped)
-                if not path.exists():
-                    raise FileNotFoundError(f"Schema file not found: {stripped}")
-                raw = path.read_text()
-
-        try:
-            parsed = json.loads(raw)
-        except ValueError as e:
-            raise ValueError(
-                f"schema must be a dict, a path to a JSON file, or a JSON string: {e}"
-            )
-        if not isinstance(parsed, dict):
-            raise ValueError("schema must resolve to a JSON object")
-        return parsed
 
     # ── Upload ───────────────────────────────────────────────────────────
 
@@ -823,7 +848,7 @@ class HyperAPIClient:
         except httpx.RequestError as e:
             raise DocumentUploadError(
                 f"Failed to get upload URL: {e}", request_id=request_id
-            ) from e
+            ) from None
 
         self._raise_for_known_status(
             resp,
@@ -856,7 +881,7 @@ class HyperAPIClient:
         except httpx.RequestError as e:
             raise DocumentUploadError(
                 f"S3 upload failed: {e}", request_id=request_id
-            ) from e
+            ) from None
 
         if s3_resp.status_code not in (200, 204):
             raise DocumentUploadError(
@@ -914,7 +939,7 @@ class HyperAPIClient:
         try:
             resp = self._client.get(f"{self.base_url}/v1/limits", headers=headers)
         except httpx.RequestError as e:
-            raise HyperAPIError(f"Limits request failed: {e}", request_id=request_id) from e
+            raise HyperAPIError(f"Limits request failed: {e}", request_id=request_id) from None
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code == 401:
@@ -1068,14 +1093,14 @@ class HyperAPIClient:
                 headers=headers,
                 timeout=request_timeout,
             )
-        except httpx.TimeoutException as e:
+        except httpx.TimeoutException:
             raise error_cls(
                 "Request timed out",
                 status_code=504,
                 request_id=request_id,
-            ) from e
+            ) from None
         except httpx.RequestError as e:
-            raise error_cls(f"Request failed: {e}", request_id=request_id) from e
+            raise error_cls(f"Request failed: {e}", request_id=request_id) from None
 
         self._raise_for_known_status(
             response, request_id=request_id, error_cls=error_cls, op_name=op_name
@@ -1120,12 +1145,12 @@ class HyperAPIClient:
                 headers=headers,
                 timeout=request_timeout,
             )
-        except httpx.TimeoutException as e:
+        except httpx.TimeoutException:
             raise error_cls(
                 "Request timed out", status_code=504, request_id=request_id
-            ) from e
+            ) from None
         except httpx.RequestError as e:
-            raise error_cls(f"Request failed: {e}", request_id=request_id) from e
+            raise error_cls(f"Request failed: {e}", request_id=request_id) from None
 
         self._raise_for_known_status(
             response, request_id=request_id, error_cls=error_cls, op_name=op_name
@@ -1171,12 +1196,12 @@ class HyperAPIClient:
                 headers=headers,
                 timeout=request_timeout,
             )
-        except httpx.TimeoutException as e:
+        except httpx.TimeoutException:
             raise error_cls(
                 "Request timed out", status_code=504, request_id=request_id
-            ) from e
+            ) from None
         except httpx.RequestError as e:
-            raise error_cls(f"Request failed: {e}", request_id=request_id) from e
+            raise error_cls(f"Request failed: {e}", request_id=request_id) from None
 
         self._raise_for_known_status(
             response, request_id=request_id, error_cls=error_cls, op_name=op_name
@@ -1218,7 +1243,7 @@ class HyperAPIClient:
                 f"{self.base_url}/v1/jobs/{job_id}", headers=headers
             )
         except httpx.RequestError as e:
-            raise HyperAPIError(f"Job poll failed: {e}", request_id=request_id) from e
+            raise HyperAPIError(f"Job poll failed: {e}", request_id=request_id) from None
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code == 401:
@@ -1302,7 +1327,7 @@ class HyperAPIClient:
         except httpx.RequestError as e:
             raise HyperAPIError(
                 f"Recent-jobs request failed: {e}", request_id=request_id
-            ) from e
+            ) from None
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code == 401:
@@ -1366,7 +1391,7 @@ class HyperAPIClient:
                 f"{self.base_url}/v1/jobs/{job_id}", headers=headers
             )
         except httpx.RequestError as e:
-            raise HyperAPIError(f"Job cancel failed: {e}", request_id=request_id) from e
+            raise HyperAPIError(f"Job cancel failed: {e}", request_id=request_id) from None
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code in (200, 204):
@@ -1833,16 +1858,17 @@ class HyperAPIClient:
         the exact shape you want back, with ``None``/``False``/``"unselected"``
         as placeholders, e.g. ``{"patient_name": None, "insurance":
         {"Medicare": "unselected", "Self-Pay": "unselected"}}``. Pass it as an
-        already-loaded dict, a path to a JSON file, or a raw pasted JSON
-        string — whichever's convenient. The response fills in that SAME
-        structure from the document. Ephemeral — used for this call only,
+        already-loaded dict, a ``str`` of JSON text, or a ``pathlib.Path``
+        to a JSON file. A ``str`` is always parsed as JSON and never read as a
+        file name — to load a file, pass ``pathlib.Path("template.json")``.
+        The response fills in that SAME structure from the document. Ephemeral — used for this call only,
         nothing is stored server-side; pass a different ``schema`` next call
         for a different shape, no merge/versioning to reason about. Omit
         entirely to use this org's stored default template instead (set up
         separately, offline).
         """
         path = self._resolve_path(file_path)
-        resolved_schema = self._resolve_schema(schema)
+        resolved_schema = _load_schema(schema)
         # The API applies `schema` to non_financial only; on financial it is
         # ignored server-side. Silently dropping it would return plausible
         # output shaped by a different extractor, with nothing to tell the
@@ -2144,7 +2170,7 @@ class HyperAPIClient:
         except httpx.RequestError as e:
             raise HyperAPIError(
                 f"Batch request failed: {e}", request_id=request_id
-            ) from e
+            ) from None
 
         rid = _request_id_of(resp, request_id)
         if resp.status_code == 401:
@@ -2419,8 +2445,9 @@ class HyperAPIClient:
         describe the documents — a blank
         template with ``None``/``False``/``"unselected"`` as placeholders
         (e.g. ``{"patient_name": None, "insurance": {"Medicare":
-        "unselected", "Self-Pay": "unselected"}}``, as a dict, a path to a
-        JSON file, or a raw JSON string), and the response fills in that SAME
+        "unselected", "Self-Pay": "unselected"}}``, as a dict, a ``str`` of
+        JSON text, or a ``pathlib.Path`` to a JSON file — a ``str`` is never
+        read as a file name), and the response fills in that SAME
         structure from the document — nothing is stored server-side, pass a
         different ``schema`` next call for a different shape, no
         merge/versioning to reason about. Omit ``schema`` to use this org's
@@ -2792,7 +2819,12 @@ class HyperAPIClient:
         Polls both jobs round-robin via ``wait_for_jobs``.
 
         Returns:
-            ``{"ocr": <parse text>, "data": <extract structured fields>}``
+            ``{"ocr": <parse text>, "data": <extract job envelope>}``.
+            ``data`` is the extract job's full inference envelope (the same
+            dict :py:meth:`extract` returns), not the fields themselves: the
+            structured fields are at ``result["data"]["result"]["entities"]``,
+            ``result["data"]["result"]["line_items"]`` and
+            ``result["data"]["result"]["summary"]``.
         """
         path = self._resolve_path(file_path, image_path)
         document_key = self.upload_document(path)
