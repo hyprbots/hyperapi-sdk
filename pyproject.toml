@@ -7,7 +7,7 @@ name = "hyperapi-sdk"
 version = "0.7.1"
 description = "HyperAPI Python SDK - Document intelligence APIs (parse, extract, classify, split, redact)"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     {name = "HyperAPI", email = "research@hyperbots.com"}
 ]
@@ -17,10 +17,10 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
@@ -44,7 +44,7 @@ socks = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "N", "W", "UP"]
