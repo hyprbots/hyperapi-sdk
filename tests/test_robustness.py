@@ -7,8 +7,13 @@ retry for batch polls, the poll retry policy, and safe page downloads/uploads.
 
 from __future__ import annotations
 
+import inspect
+import pickle
+
 import httpx
 import pytest
+
+import hyperapi.exceptions as exc_mod
 
 
 TEST_BASE_URL = "http://test.local"
@@ -92,3 +97,36 @@ def test_submit_default_poll_url_is_escaped(mock_api, client, tiny_pdf):
     mock_api.post("/v1/parse").mock(return_value=httpx.Response(202, json={"job_id": "a/b"}))
     job = client.submit_parse(tiny_pdf)
     assert job.poll_url == "/v1/jobs/a%2Fb"
+
+
+# ── B9: every exception survives pickle ─────────────────────────────────────
+
+def _exception_samples():
+    common = {"request_id": "req-1"}
+    yield exc_mod.HyperAPIError("boom", 500, "req-1", code="X", details={"a": 1})
+    yield exc_mod.RateLimitError(
+        "slow down", retry_after=7, tier="free", limit=1, window_seconds=60,
+        degraded=True, code="page_quota_exceeded", details={"pages_used": 5}, **common,
+    )
+    yield exc_mod.JobTimeoutError("late", job_id="j1", elapsed_s=1.5, **common)
+    yield exc_mod.JobCancelledError("gone", job_id="j2", **common)
+    for name in ("AuthenticationError", "ParseError", "ExtractError", "ClassifyError",
+                 "SplitError", "RedactError", "EditError", "DocumentUploadError"):
+        yield getattr(exc_mod, name)("msg", 418, "req-1", code="c", details={"d": 2})
+
+
+def test_every_exception_class_is_covered():
+    classes = {
+        obj for _, obj in inspect.getmembers(exc_mod, inspect.isclass)
+        if issubclass(obj, exc_mod.HyperAPIError)
+    }
+    assert classes == {type(e) for e in _exception_samples()}
+
+
+@pytest.mark.parametrize("err", list(_exception_samples()), ids=lambda e: type(e).__name__)
+def test_exception_pickle_round_trip(err):
+    clone = pickle.loads(pickle.dumps(err))
+    assert type(clone) is type(err)
+    assert clone.__dict__ == err.__dict__
+    assert str(clone) == str(err)
+    assert clone.args == err.args

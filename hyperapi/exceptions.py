@@ -26,6 +26,18 @@ def _strip_api_key(text: str | None) -> str | None:
     return _API_KEY_PATTERN.sub("hk_***redacted", text)
 
 
+def _rebuild_error(cls: type, message: str) -> HyperAPIError:
+    """Unpickle helper: recreate ``cls`` without running its ``__init__``.
+
+    Subclasses take keyword-only arguments (``job_id``, ``elapsed_s``, ...),
+    so the default ``cls(*args)`` unpickling would fail. The instance
+    attributes are restored from the pickled ``__dict__`` afterwards.
+    """
+    err = cls.__new__(cls)
+    Exception.__init__(err, message)
+    return err
+
+
 class HyperAPIError(Exception):
     """Base exception for HyperAPI errors.
 
@@ -61,6 +73,11 @@ class HyperAPIError(Exception):
         self.code = code
         self.details = details
         super().__init__(self.message)
+
+    def __reduce__(self):
+        # Exceptions cross process boundaries (multiprocessing, concurrent.futures,
+        # Celery); every attribute must survive the round trip.
+        return (_rebuild_error, (type(self), self.message), self.__dict__.copy())
 
 
 class AuthenticationError(HyperAPIError):
