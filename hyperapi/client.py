@@ -431,6 +431,47 @@ def _request_id_of(response: httpx.Response, sent: str | None = None) -> str | N
     )
 
 
+_NOT_JSON = object()
+
+
+def _json_object(
+    resp: httpx.Response,
+    *,
+    request_id: str | None,
+    error_cls: type[HyperAPIError] = HyperAPIError,
+    required: Iterable[str] = (),
+    what: str = "server",
+) -> dict:
+    """Decode a success reply that must be a JSON object, or raise ``error_cls``.
+
+    A proxy error page served with 200, a JSON list, or an envelope without
+    the keys the SDK needs would otherwise escape as ``JSONDecodeError``,
+    ``AttributeError`` or ``KeyError``. ``required`` keys must be present and
+    not ``None`` or empty. The raised error carries the HTTP status and the
+    request id.
+    """
+    try:
+        body = resp.json()
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        body = _NOT_JSON
+    problem = None
+    if body is _NOT_JSON:
+        problem = "the body is not JSON"
+    elif not isinstance(body, dict):
+        problem = f"expected a JSON object, got {type(body).__name__}"
+    else:
+        missing = [key for key in required if body.get(key) in (None, "")]
+        if missing:
+            problem = "missing " + ", ".join(repr(key) for key in missing)
+    if problem is not None:
+        raise error_cls(
+            f"Malformed {what} response (HTTP {resp.status_code}): {problem}.",
+            status_code=resp.status_code,
+            request_id=request_id,
+        )
+    return body
+
+
 def _path_id(value: Any, *, name: str = "id") -> str:
     """Percent-encode a job or batch id for use as one URL path segment.
 
@@ -883,7 +924,13 @@ class HyperAPIClient:
                 request_id=_request_id_of(resp, request_id),
             )
 
-        upload_data = resp.json()
+        upload_data = _json_object(
+            resp,
+            request_id=_request_id_of(resp, request_id),
+            error_cls=DocumentUploadError,
+            required=("document_key", "upload_url"),
+            what="upload-URL",
+        )
         document_key = upload_data["document_key"]
         upload_url = upload_data["upload_url"]
 
@@ -1138,8 +1185,9 @@ class HyperAPIClient:
                 **_error_fields(response),
             )
 
-        envelope = response.json()
-        return self._job_from_envelope(envelope, op=op_name)
+        return self._job_from_envelope(
+            self._submit_reply(response, request_id, error_cls, op_name), op=op_name
+        )
 
     def _submit_via_doc_key(
         self,
@@ -1188,7 +1236,9 @@ class HyperAPIClient:
                 **_error_fields(response),
             )
 
-        return self._job_from_envelope(response.json(), op=op_name)
+        return self._job_from_envelope(
+            self._submit_reply(response, request_id, error_cls, op_name), op=op_name
+        )
 
     def _submit_json(
         self,
@@ -1239,7 +1289,22 @@ class HyperAPIClient:
                 **_error_fields(response),
             )
 
-        return self._job_from_envelope(response.json(), op=op_name)
+        return self._job_from_envelope(
+            self._submit_reply(response, request_id, error_cls, op_name), op=op_name
+        )
+
+    @staticmethod
+    def _submit_reply(
+        response: httpx.Response, request_id: str, error_cls: type, op_name: str
+    ) -> dict:
+        """The submit reply as a dict that carries a ``job_id``, or ``error_cls``."""
+        return _json_object(
+            response,
+            request_id=_request_id_of(response, request_id),
+            error_cls=error_cls,
+            required=("job_id",),
+            what=f"{op_name} submission",
+        )
 
     @staticmethod
     def _job_from_envelope(envelope: dict, *, op: str) -> Job:
@@ -1292,14 +1357,7 @@ class HyperAPIClient:
         # Defend against a 200 with malformed JSON — some misconfigured proxies will
         # return text/html bodies on 200. Without this guard, a JSONDecodeError
         # escapes to the caller as an un-typed exception.
-        try:
-            return resp.json()
-        except (json.JSONDecodeError, ValueError) as e:
-            raise HyperAPIError(
-                f"Malformed job-status response: {e}",
-                status_code=200,
-                request_id=rid,
-            ) from e
+        return _json_object(resp, request_id=rid, what="job-status")
 
     # ── Jobs management ──────────────────────────────────────────────────
 
@@ -2177,8 +2235,12 @@ class HyperAPIClient:
         json_body: dict | None = None,
         params: dict | None = None,
         extra_headers: dict[str, str] | None = None,
+        required: tuple[str, ...] = (),
     ) -> dict:
-        """Shared request+error handling for the /v1/batch endpoints."""
+        """Shared request+error handling for the /v1/batch endpoints.
+
+        Every batch reply must be a JSON object carrying the ``required`` keys.
+        """
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
         if extra_headers:
@@ -2213,14 +2275,7 @@ class HyperAPIClient:
                 status_code=resp.status_code,
                 request_id=rid,
             )
-        try:
-            return resp.json()
-        except (json.JSONDecodeError, ValueError) as e:
-            raise HyperAPIError(
-                f"Malformed batch response: {e}",
-                status_code=resp.status_code,
-                request_id=rid,
-            ) from e
+        return _json_object(resp, request_id=rid, required=required, what="batch")
 
     def create_batch(
         self,
@@ -2274,7 +2329,11 @@ class HyperAPIClient:
             body["metadata"] = metadata
         extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return self._batch_request(
-            "POST", "/v1/batch", json_body=body, extra_headers=extra
+            "POST",
+            "/v1/batch",
+            json_body=body,
+            extra_headers=extra,
+            required=("batch_id",),
         )
 
     def create_batch_from_files(

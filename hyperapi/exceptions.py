@@ -17,10 +17,18 @@ import re
 _API_KEY_PATTERN = re.compile(r"hk_(?:live|test|service)_[A-Za-z0-9_\-]+")
 
 
-def _strip_api_key(text: str | None) -> str | None:
+def _strip_api_key(text: object) -> str | None:
     """Scrub `hk_live_*` / `hk_test_*` / `hk_service_*` substrings from server
     messages before they end up in exception text. Defends against the rare
-    server response that echoes the request header into the error body."""
+    server response that echoes the request header into the error body.
+
+    Non-string input (a server that sends ``error`` as an object) is
+    converted with ``str()`` first, so it is scrubbed too instead of raising.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        text = str(text)
     if not text:
         return text
     return _API_KEY_PATTERN.sub("hk_***redacted", text)

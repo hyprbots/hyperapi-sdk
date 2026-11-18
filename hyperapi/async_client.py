@@ -86,6 +86,7 @@ from .client import (
     _edit_fill_body,
     _edit_unavailable_error,
     _error_fields,
+    _json_object,
     _load_schema,
     _page_targets,
     _parse_ocr_text,
@@ -289,7 +290,13 @@ class AsyncHyperAPIClient:
                 request_id=_request_id_of(resp, request_id),
             )
 
-        upload_data = resp.json()
+        upload_data = _json_object(
+            resp,
+            request_id=_request_id_of(resp, request_id),
+            error_cls=DocumentUploadError,
+            required=("document_key", "upload_url"),
+            what="upload-URL",
+        )
         document_key = upload_data["document_key"]
         upload_url = upload_data["upload_url"]
 
@@ -551,8 +558,9 @@ class AsyncHyperAPIClient:
                 **_error_fields(response),
             )
 
-        envelope = response.json()
-        return self._job_from_envelope(envelope, op=op_name)
+        return self._job_from_envelope(
+            self._submit_reply(response, request_id, error_cls, op_name), op=op_name
+        )
 
     async def _submit_via_doc_key(
         self,
@@ -601,7 +609,9 @@ class AsyncHyperAPIClient:
                 **_error_fields(response),
             )
 
-        return self._job_from_envelope(response.json(), op=op_name)
+        return self._job_from_envelope(
+            self._submit_reply(response, request_id, error_cls, op_name), op=op_name
+        )
 
     async def _submit_json(
         self,
@@ -652,7 +662,22 @@ class AsyncHyperAPIClient:
                 **_error_fields(response),
             )
 
-        return self._job_from_envelope(response.json(), op=op_name)
+        return self._job_from_envelope(
+            self._submit_reply(response, request_id, error_cls, op_name), op=op_name
+        )
+
+    @staticmethod
+    def _submit_reply(
+        response: httpx.Response, request_id: str, error_cls: type, op_name: str
+    ) -> dict:
+        """The submit reply as a dict that carries a ``job_id``, or ``error_cls``."""
+        return _json_object(
+            response,
+            request_id=_request_id_of(response, request_id),
+            error_cls=error_cls,
+            required=("job_id",),
+            what=f"{op_name} submission",
+        )
 
     @staticmethod
     def _job_from_envelope(envelope: dict, *, op: str) -> Job:
@@ -702,14 +727,7 @@ class AsyncHyperAPIClient:
                 request_id=rid,
                 **_error_fields(resp),
             )
-        try:
-            return resp.json()
-        except (json.JSONDecodeError, ValueError) as e:
-            raise HyperAPIError(
-                f"Malformed job-status response: {e}",
-                status_code=200,
-                request_id=rid,
-            ) from e
+        return _json_object(resp, request_id=rid, what="job-status")
 
     # ── Jobs management ──────────────────────────────────────────────────
 
@@ -1544,8 +1562,12 @@ class AsyncHyperAPIClient:
         json_body: dict | None = None,
         params: dict | None = None,
         extra_headers: dict[str, str] | None = None,
+        required: tuple[str, ...] = (),
     ) -> dict:
-        """Shared request+error handling for the /v1/batch endpoints."""
+        """Shared request+error handling for the /v1/batch endpoints.
+
+        Every batch reply must be a JSON object carrying the ``required`` keys.
+        """
         headers = self._get_headers()
         request_id = headers["X-Request-ID"]
         if extra_headers:
@@ -1580,14 +1602,7 @@ class AsyncHyperAPIClient:
                 status_code=resp.status_code,
                 request_id=rid,
             )
-        try:
-            return resp.json()
-        except (json.JSONDecodeError, ValueError) as e:
-            raise HyperAPIError(
-                f"Malformed batch response: {e}",
-                status_code=resp.status_code,
-                request_id=rid,
-            ) from e
+        return _json_object(resp, request_id=rid, required=required, what="batch")
 
     async def create_batch(
         self,
@@ -1641,7 +1656,11 @@ class AsyncHyperAPIClient:
             body["metadata"] = metadata
         extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return await self._batch_request(
-            "POST", "/v1/batch", json_body=body, extra_headers=extra
+            "POST",
+            "/v1/batch",
+            json_body=body,
+            extra_headers=extra,
+            required=("batch_id",),
         )
 
     async def create_batch_from_files(
