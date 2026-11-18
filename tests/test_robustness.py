@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import pickle
+import time
 
 import httpx
 import pytest
@@ -20,6 +21,7 @@ from hyperapi import (
     ExtractError,
     HyperAPIClient,
     HyperAPIError,
+    JobTimeoutError,
     ParseError,
 )
 from hyperapi.client import Job
@@ -288,3 +290,138 @@ async def test_async_batch_poll_list_body_raises(mock_api, async_client):
     mock_api.post("/v1/batch").mock(return_value=HTML_200)
     with pytest.raises(HyperAPIError, match="not JSON"):
         await async_client.create_batch(endpoint="/v1/parse", document_keys=["k"])
+
+
+# ── B12: wait_for_batch rides out a transient failure ───────────────────────
+
+BATCH_DONE = {"batch_id": "b1", "status": "completed", "counts": {"total": 1}, "items": []}
+
+
+@pytest.mark.parametrize("first", [
+    pytest.param(httpx.Response(502), id="502"),
+    pytest.param(httpx.ConnectError("reset"), id="network"),
+])
+def test_wait_for_batch_retries_transient_failure(mock_api, client, first):
+    route = mock_api.get("/v1/batch/b1").mock(
+        side_effect=[first, httpx.Response(200, json=BATCH_DONE)])
+    client._poll_transient_retry_delay = 0.0
+    assert client.wait_for_batch("b1", poll_interval=0)["status"] == "completed"
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize("first", [
+    pytest.param(httpx.Response(502), id="502"),
+    pytest.param(httpx.ConnectError("reset"), id="network"),
+])
+async def test_async_wait_for_batch_retries_transient_failure(mock_api, async_client, first):
+    route = mock_api.get("/v1/batch/b1").mock(
+        side_effect=[first, httpx.Response(200, json=BATCH_DONE)])
+    async_client._poll_transient_retry_delay = 0.0
+    result = await async_client.wait_for_batch("b1", poll_interval=0)
+    assert result["status"] == "completed"
+    assert route.call_count == 2
+
+
+def test_wait_for_batch_does_not_retry_4xx(mock_api, client):
+    route = mock_api.get("/v1/batch/b1").mock(return_value=httpx.Response(400))
+    with pytest.raises(HyperAPIError) as ei:
+        client.wait_for_batch("b1", poll_interval=0)
+    assert ei.value.status_code == 400
+    assert route.call_count == 1
+
+
+# ── B13: poll retry policy — 4xx fail fast, deadline respected ──────────────
+
+JOB_DONE = {"status": "completed", "result": {"ok": True}}
+
+
+@pytest.mark.parametrize("status", [400, 403, 409, 422])
+def test_poll_4xx_is_not_retried(mock_api, client, status):
+    route = mock_api.get("/v1/jobs/j1").mock(return_value=httpx.Response(status))
+    with pytest.raises(HyperAPIError) as ei:
+        client.wait_for_job("j1")
+    assert ei.value.status_code == status
+    assert route.call_count == 1
+
+
+@pytest.mark.parametrize("status", [400, 403, 422])
+async def test_async_poll_4xx_is_not_retried(mock_api, async_client, status):
+    route = mock_api.get("/v1/jobs/j1").mock(return_value=httpx.Response(status))
+    with pytest.raises(HyperAPIError) as ei:
+        await async_client.wait_for_job("j1")
+    assert ei.value.status_code == status
+    assert route.call_count == 1
+
+
+def test_poll_malformed_200_is_not_retried(mock_api, client):
+    route = mock_api.get("/v1/jobs/j1").mock(return_value=HTML_200)
+    with pytest.raises(HyperAPIError, match="Malformed"):
+        client.wait_for_job("j1")
+    assert route.call_count == 1
+
+
+def _slow_retry_client(cls):
+    return cls(api_key=KEY, base_url=TEST_BASE_URL, poll_interval=0.0,
+               poll_max_transient_retries=3, poll_transient_retry_delay=0.5)
+
+
+def test_poll_503_past_deadline_raises_job_timeout_quickly(mock_api):
+    mock_api.get("/v1/jobs/j1").mock(return_value=httpx.Response(503))
+    c = _slow_retry_client(HyperAPIClient)
+    t0 = time.monotonic()
+    with pytest.raises(JobTimeoutError) as ei:
+        c.wait_for_job("j1", timeout=0.2)
+    elapsed = time.monotonic() - t0
+    c.close()
+    assert elapsed < 0.6  # was 1.5 s (3 retries x 0.5 s) and a plain HyperAPIError
+    assert ei.value.job_id == "j1"
+    assert "HTTP 503" in str(ei.value)
+
+
+async def test_async_poll_503_past_deadline_raises_job_timeout_quickly(mock_api):
+    mock_api.get("/v1/jobs/j1").mock(return_value=httpx.Response(503))
+    c = _slow_retry_client(AsyncHyperAPIClient)
+    t0 = time.monotonic()
+    with pytest.raises(JobTimeoutError):
+        await c.wait_for_job("j1", timeout=0.2)
+    elapsed = time.monotonic() - t0
+    await c.aclose()
+    assert elapsed < 0.6
+
+
+def test_wait_for_batch_503_past_deadline_raises_job_timeout(mock_api):
+    mock_api.get("/v1/batch/b1").mock(return_value=httpx.Response(503))
+    c = _slow_retry_client(HyperAPIClient)
+    t0 = time.monotonic()
+    with pytest.raises(JobTimeoutError) as ei:
+        c.wait_for_batch("b1", timeout=0.2, poll_interval=0)
+    c.close()
+    assert time.monotonic() - t0 < 0.6
+    assert ei.value.job_id == "b1"
+
+
+def test_wait_for_jobs_503_past_deadline_raises_job_timeout(mock_api):
+    mock_api.get("/v1/jobs/A").mock(return_value=httpx.Response(503))
+    c = _slow_retry_client(HyperAPIClient)
+    job = Job(job_id="A", status="pending", poll_url="/v1/jobs/A", op="parse")
+    t0 = time.monotonic()
+    with pytest.raises(JobTimeoutError):
+        c.wait_for_jobs([job], timeout=0.2)
+    c.close()
+    assert time.monotonic() - t0 < 0.6
+
+
+def test_poll_503_then_200_succeeds(mock_api, client):
+    route = mock_api.get("/v1/jobs/j1").mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, json=JOB_DONE)])
+    client._poll_transient_retry_delay = 0.0
+    assert client.wait_for_job("j1") == {"ok": True}
+    assert route.call_count == 2
+
+
+async def test_async_poll_503_then_200_succeeds(mock_api, async_client):
+    route = mock_api.get("/v1/jobs/j1").mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, json=JOB_DONE)])
+    async_client._poll_transient_retry_delay = 0.0
+    assert await async_client.wait_for_job("j1") == {"ok": True}
+    assert route.call_count == 2

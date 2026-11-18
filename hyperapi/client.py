@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from urllib.parse import quote
 
 import httpx
@@ -680,6 +680,65 @@ def _rate_limit_error_from(resp: httpx.Response, rid: str | None) -> RateLimitEr
     )
 
 
+def _is_transient(err: HyperAPIError) -> bool:
+    """Whether a failed poll is worth retrying: no HTTP reply at all (network
+    error, timeout) or a 5xx. Every 4xx — and a malformed 2xx — fails fast:
+    asking again returns the same answer."""
+    return err.status_code is None or err.status_code >= 500
+
+
+def _poll_deadline_error(
+    kind: str, ident: str, last: HyperAPIError, start: float | None
+) -> JobTimeoutError:
+    """The error for a poll that is still failing transiently when the caller's
+    deadline passes: the wait is over, so report a timeout (with the cause)."""
+    return JobTimeoutError(
+        f"{kind} {ident} did not complete in the time allowed; "
+        f"the last status poll failed: {last.message}",
+        job_id=ident,
+        elapsed_s=time.monotonic() - start if start is not None else 0.0,
+        request_id=last.request_id,
+    )
+
+
+def _transient_delay(
+    err: HyperAPIError,
+    *,
+    attempt: int,
+    max_retries: int,
+    delay: float,
+    deadline: float | None,
+    kind: str,
+    ident: str,
+    start: float | None,
+) -> float:
+    """Seconds to sleep before retrying a failed poll, or raise.
+
+    Shared by both clients' retry loops. Raises ``err`` itself when it is not
+    transient or the retries are used up, and :class:`JobTimeoutError` when
+    the caller's ``deadline`` has passed. The sleep never runs past the
+    deadline.
+    """
+    if not _is_transient(err):
+        raise err
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0:
+        raise _poll_deadline_error(kind, ident, err, start) from None
+    if attempt >= max_retries:
+        raise err
+    wait = delay if remaining is None else min(delay, remaining)
+    logger.info(
+        "poll_transient_retry",
+        extra={
+            f"{kind.lower()}_id": ident,
+            "attempt": attempt + 1,
+            "delay_s": wait,
+            "error": str(err)[:200],
+        },
+    )
+    return wait
+
+
 def _rate_limit_wait(err: RateLimitError, remaining: float) -> float | None:
     """Decide how to handle a 429 raised *during a poll loop*.
 
@@ -781,8 +840,9 @@ class HyperAPIClient:
                 async job budget. The dashboard playground deliberately
                 stays at 30 min; see the module-level note.
             poll_max_transient_retries: How many times to retry a single
-                ``/v1/jobs/{id}`` GET if it returns 5xx or has a connection
-                error. Default 3. Fast-fails on 401/404.
+                ``/v1/jobs/{id}`` (or batch status) GET if it returns 5xx or
+                has a connection error. Default 3. Every 4xx fails fast, and
+                retries stop once the wait's own timeout has passed.
             poll_transient_retry_delay: Seconds to sleep between transient-retry
                 attempts on a single poll. Default 0.5; bump this if your
                 network is bursty enough that 3 retries in 1.5 s isn't enough
@@ -1499,44 +1559,54 @@ class HyperAPIClient:
             request_id=rid,
         )
 
-    def _poll_with_retry(self, job_id: str) -> dict:
-        """Poll one time, retrying on transient failures (5xx, connection errors).
+    def _retry_transient(
+        self,
+        fetch: Callable[[], dict],
+        *,
+        kind: str,
+        ident: str,
+        deadline: float | None = None,
+        start: float | None = None,
+    ) -> dict:
+        """Run one status poll, retrying transient failures (network errors, 5xx).
 
-        Fast-fails on 401 (bad key) and 404 (job missing / org mismatch). Bounds
-        the retry budget so a single poll attempt can't dominate poll_timeout.
+        Every 4xx fails fast (401, 403, 404, 400, 422, ...), as does a 429 —
+        the wait loops handle rate limits themselves. Retries stop at
+        ``poll_max_transient_retries`` and never run past ``deadline``: once it
+        has passed, :class:`JobTimeoutError` is raised instead.
         """
-        last_err: Exception | None = None
-        for attempt in range(self._poll_max_transient_retries + 1):
+        attempt = 0
+        while True:
             try:
-                envelope = self.get_job(job_id)
-                return envelope
+                return fetch()
             except (AuthenticationError, RateLimitError):
-                # Don't retry — caller's key/credit problem.
                 raise
             except HyperAPIError as e:
-                if e.status_code == 404:
-                    # Job genuinely doesn't exist — no point retrying.
-                    raise
-                last_err = e
-                if attempt < self._poll_max_transient_retries:
-                    logger.info(
-                        "poll_transient_retry",
-                        extra={
-                            "job_id": job_id,
-                            "attempt": attempt + 1,
-                            "delay_s": self._poll_transient_retry_delay,
-                            "error": str(e)[:200],
-                        },
+                time.sleep(
+                    _transient_delay(
+                        e,
+                        attempt=attempt,
+                        max_retries=self._poll_max_transient_retries,
+                        delay=self._poll_transient_retry_delay,
+                        deadline=deadline,
+                        kind=kind,
+                        ident=ident,
+                        start=start,
                     )
-                    time.sleep(self._poll_transient_retry_delay)
-                    continue
-                raise
-        # Unreachable in practice: the loop either returns, raises, or re-raises last_err on the final attempt.
-        if last_err:  # pragma: no cover
-            raise last_err
-        raise HyperAPIError(
-            "Poll exhausted retries with no response"
-        )  # pragma: no cover
+                )
+                attempt += 1
+
+    def _poll_with_retry(
+        self, job_id: str, *, deadline: float | None = None, start: float | None = None
+    ) -> dict:
+        """One job poll with the transient-retry policy of :meth:`_retry_transient`."""
+        return self._retry_transient(
+            lambda: self.get_job(job_id),
+            kind="Job",
+            ident=job_id,
+            deadline=deadline,
+            start=start,
+        )
 
     def wait_for_job(
         self,
@@ -1595,7 +1665,9 @@ class HyperAPIClient:
 
         while True:
             try:
-                envelope = self._poll_with_retry(job_id)
+                envelope = self._poll_with_retry(
+                    job_id, deadline=deadline, start=start
+                )
             except RateLimitError as e:
                 # The API rate-limits polls and submits together; on the free
                 # tier the submit spent the allowance so the poll 429s. Back off and
@@ -1682,7 +1754,9 @@ class HyperAPIClient:
             rate_limited = False
             for pos, idx in enumerate(pending):
                 try:
-                    envelope = self._poll_with_retry(jobs_list[idx].job_id)
+                    envelope = self._poll_with_retry(
+                        jobs_list[idx].job_id, deadline=deadline, start=start
+                    )
                 except RateLimitError as e:
                     # Polls and submits share one rate limit: one 429 means the
                     # window is spent for everyone this pass. Sleep Retry-After once, keep
@@ -2385,7 +2459,13 @@ class HyperAPIClient:
         deadline = start + timeout
         while True:
             try:
-                status = self.get_batch(batch_id)
+                status = self._retry_transient(
+                    lambda: self.get_batch(batch_id),
+                    kind="Batch",
+                    ident=batch_id,
+                    deadline=deadline,
+                    start=start,
+                )
             except RateLimitError as e:
                 wait = _rate_limit_wait(e, deadline - time.monotonic())
                 if wait is None:

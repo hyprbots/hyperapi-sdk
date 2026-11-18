@@ -62,7 +62,7 @@ import uuid
 import warnings
 from pathlib import Path
 from typing import Any
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 
 import httpx
 
@@ -96,6 +96,7 @@ from .client import (
     _rate_limit_wait,
     _request_id_of,
     _resolve_base_url,
+    _transient_delay,
     _server_message,
 )
 from .exceptions import (
@@ -867,43 +868,53 @@ class AsyncHyperAPIClient:
             request_id=rid,
         )
 
-    async def _poll_with_retry(self, job_id: str) -> dict:
-        """Poll one time, retrying on transient failures (5xx, connection errors).
+    async def _retry_transient(
+        self,
+        fetch: Callable[[], Awaitable[dict]],
+        *,
+        kind: str,
+        ident: str,
+        deadline: float | None = None,
+        start: float | None = None,
+    ) -> dict:
+        """Run one status poll, retrying transient failures (network errors, 5xx).
 
-        Fast-fails on 401 (bad key) and 404 (job missing). Bounds the retry
-        budget so a single poll attempt can't dominate poll_timeout.
+        Same policy as the sync client: every 4xx and 429 fails fast, retries
+        stop at ``poll_max_transient_retries`` and never run past ``deadline``
+        (then :class:`JobTimeoutError`).
         """
-        last_err: Exception | None = None
-        for attempt in range(self._poll_max_transient_retries + 1):
+        attempt = 0
+        while True:
             try:
-                envelope = await self.get_job(job_id)
-                return envelope
+                return await fetch()
             except (AuthenticationError, RateLimitError):
-                # Don't retry — caller's key/credit problem.
                 raise
             except HyperAPIError as e:
-                if e.status_code == 404:
-                    # Job genuinely doesn't exist — no point retrying.
-                    raise
-                last_err = e
-                if attempt < self._poll_max_transient_retries:
-                    logger.info(
-                        "poll_transient_retry",
-                        extra={
-                            "job_id": job_id,
-                            "attempt": attempt + 1,
-                            "delay_s": self._poll_transient_retry_delay,
-                            "error": str(e)[:200],
-                        },
+                await asyncio.sleep(
+                    _transient_delay(
+                        e,
+                        attempt=attempt,
+                        max_retries=self._poll_max_transient_retries,
+                        delay=self._poll_transient_retry_delay,
+                        deadline=deadline,
+                        kind=kind,
+                        ident=ident,
+                        start=start,
                     )
-                    await asyncio.sleep(self._poll_transient_retry_delay)
-                    continue
-                raise
-        if last_err:  # pragma: no cover
-            raise last_err
-        raise HyperAPIError(
-            "Poll exhausted retries with no response"
-        )  # pragma: no cover
+                )
+                attempt += 1
+
+    async def _poll_with_retry(
+        self, job_id: str, *, deadline: float | None = None, start: float | None = None
+    ) -> dict:
+        """One job poll with the transient-retry policy of :meth:`_retry_transient`."""
+        return await self._retry_transient(
+            lambda: self.get_job(job_id),
+            kind="Job",
+            ident=job_id,
+            deadline=deadline,
+            start=start,
+        )
 
     async def wait_for_job(
         self,
@@ -960,7 +971,9 @@ class AsyncHyperAPIClient:
 
         while True:
             try:
-                envelope = await self._poll_with_retry(job_id)
+                envelope = await self._poll_with_retry(
+                    job_id, deadline=deadline, start=start
+                )
             except RateLimitError as e:
                 # The API rate-limits polls and submits together; on the free
                 # tier the submit spent the allowance so the poll 429s. Back off and
@@ -1716,7 +1729,13 @@ class AsyncHyperAPIClient:
         deadline = start + timeout
         while True:
             try:
-                status = await self.get_batch(batch_id)
+                status = await self._retry_transient(
+                    lambda: self.get_batch(batch_id),
+                    kind="Batch",
+                    ident=batch_id,
+                    deadline=deadline,
+                    start=start,
+                )
             except RateLimitError as e:
                 wait = _rate_limit_wait(e, deadline - time.monotonic())
                 if wait is None:
