@@ -95,9 +95,11 @@ client = HyperAPIClient()
 # Process a financial document (parse + extract in one call)
 result = client.process("invoice.png")
 
-print(result["data"]["invoice_number"])  # "7816"
-print(result["data"]["line_items"])      # Validated line items
-print(result["data"]["total"])           # "$1,800.00"
+print(result["ocr"])                           # parsed text of the document
+fields = result["data"]["result"]              # extracted fields
+print(fields["entities"])                      # header and party fields
+print(fields["line_items"])                    # validated line items
+print(fields["summary"])                       # totals, tax and currency
 ```
 
 ## Two-Step Pipeline
@@ -326,6 +328,12 @@ fields = client.extract(
     schema=schema,
 )
 print(fields["result"]["data"])
+
+# The schema can also come from a JSON file: pass a Path.
+# A plain str is always read as JSON text, never as a file name.
+from pathlib import Path
+fields = client.extract("policy.pdf", category="non_financial",
+                        schema=Path("schema.json"))
 
 # Advanced — auto-detects the type, no category to pick
 fields = client.extract_advanced("mixed_document.pdf")
@@ -743,7 +751,7 @@ async with AsyncHyperAPIClient() as client:
 
 ### Notes on parity
 
-- **`wait_for_jobs([...])`** uses `asyncio.gather` under the hood — true concurrent polling. On timeout the first job to fail raises a `JobTimeoutError` and the rest are cancelled. (The sync client's "comma-joined `'A,B'` job_id" shape is async-specific divergence — see the CHANGELOG.)
+- **`wait_for_jobs([...])`** uses `asyncio.gather` under the hood — true concurrent polling, with each job given the full timeout. The first job to fail or time out raises, and the rest are cancelled; a timeout raises `JobTimeoutError` whose `job_id` is that one job's id. The sync client shares one deadline across all jobs instead, and on timeout raises a single `JobTimeoutError` whose `job_id` is the comma-joined ids of every job still pending (for example `"A,B"`).
 - **Submit-and-poll is identical** — `AsyncHyperAPIClient.submit_extract(...)` returns the same `Job` dataclass; `await client.wait_for_job(job)` blocks the coroutine without blocking the event loop.
 - **`User-Agent`** carries an `-async` suffix so server-side analytics can split traffic by client type.
 
@@ -851,7 +859,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `groups_profile` (parse) | `"A"` \| `"B"` \| `None` | `None` (API default: `"A"`) | parse — how `groups[]` is built; see the fast-mode response shape above |
 | `force_refresh` | `bool` | `False` | parse / extract / extract_advanced / classify / split / redact — re-run instead of returning the cached result (a forced run is billed) |
 | `category` (extract) | `"financial"` \| `"non_financial"` \| `None` | `None` (organization default; platform default `"financial"`; `"non_financial"` if `schema` is given) | extract — Basic extractor profile; `extract_advanced()` auto-detects instead (no `category`) |
-| `schema` (extract) | `dict \| str \| Path \| None` | `None` | Basic + Other only (`category="non_financial"`): blank JSON template that defines the output shape for this request |
+| `schema` (extract) | `dict \| str \| Path \| None` | `None` | Basic + Other only (`category="non_financial"`): blank JSON template that defines the output shape for this request. A `str` is parsed as JSON text; pass a `pathlib.Path` to load a JSON file |
 | `mode` (classify / split) | `str` | `"default"` | classify / split — task selector |
 | `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |
 | `output` (redact) | `"inline"` \| `"urls"` | `"inline"` | redact — `"urls"` returns masked pages as presigned `pages[*].image_url` links with a higher page cap, where offered; other values raise `ValueError` client-side |
@@ -877,7 +885,9 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `JobCancelledError` | The job being waited on was cancelled with `delete_job()` (reported by the API as `failed` with an error starting `cancelled:`); carries `job_id` |
 
 Every exception carries `status_code` (HTTP status if applicable), `request_id`
-(the `X-Request-ID` we sent — paste it into a support ticket) and `code`, the
+(the `X-Request-ID` the SDK sent — include it when you open a
+[GitHub issue](https://github.com/hyprbots/hyperapi-sdk/issues) or contact
+support at research@hyperbots.com) and `code`, the
 machine-readable error code from the API's error envelope when one was
 returned (for example `page_quota_exceeded`), otherwise `None`. A quota
 exhaustion (`code == "page_quota_exceeded"`) is not retried: the waiting
@@ -916,11 +926,11 @@ export SSL_CERT_FILE=/path/to/corporate-ca.pem
 If your environment routes through a SOCKS proxy, install the socks extra:
 
 ```bash
-pip install ".[socks]"
+pip install "hyperapi-sdk[socks]"
 ```
 
 ### Logging
-Customers opt into SDK logs at any level:
+You can turn on SDK logs at any level:
 
 ```python
 import logging
@@ -930,13 +940,14 @@ logging.getLogger("hyperapi").setLevel(logging.INFO)
 The SDK never logs API keys, file contents, or presigned-URL signatures.
 
 ### Idempotency
-The SDK does **not** auto-retry submit POSTs. Resubmitting after a transient failure would create a duplicate job and bill twice. Customers wrap their own retry logic if needed; the polling loop already retries transient failures during `GET /v1/jobs/{id}`.
+The SDK does **not** auto-retry submit POSTs. Resubmitting after a transient failure would create a duplicate job and bill twice. If you need retries on submit, wrap the call in your own retry logic; the polling loop already retries transient failures during `GET /v1/jobs/{id}`.
 
 ## Tutorials
 
 | Tutorial | Description |
 |----------|-------------|
 | [`tutorial/The_Billing_Typo.ipynb`](https://github.com/hyprbots/hyperapi-sdk/blob/main/tutorial/The_Billing_Typo.ipynb) | Compare HyperAPI vs GPT-4, Claude, Gemini on extraction task when typos are present|
+| [`tutorial/HyperAPI_SDK_Walkthrough.ipynb`](https://github.com/hyprbots/hyperapi-sdk/blob/main/tutorial/HyperAPI_SDK_Walkthrough.ipynb) | One sample document through parse, classify, split, redact, extract and batch, with the response shape printed at each step |
 
 ## Papers
 If you use **HyperAPI** or ideas related to its document intelligence and validation pipeline in your research, please cite the following papers:
