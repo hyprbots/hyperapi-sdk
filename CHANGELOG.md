@@ -11,6 +11,8 @@ First release on PyPI: `pip install hyperapi-sdk`.
 
 ### Changed
 
+- License changed from MIT to **Apache-2.0** (adds an explicit patent grant). Earlier GitHub-only versions remain MIT.
+
 - `schema` (on `extract` / `submit_extract`, both clients): a `str` is always
   parsed as JSON text and never read as a file name; to load a schema file, pass
   `pathlib.Path("template.json")`. A string that is not valid JSON raises

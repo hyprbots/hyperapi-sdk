@@ -5,7 +5,7 @@
 </p>
 <p align="center">
   <a href="https://github.com/hyprbots/hyperapi-sdk"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+"></a>
-  <a href="https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
+  <a href="https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
 </p>
 
 ---
@@ -101,6 +101,11 @@ print(fields["entities"])                      # header and party fields
 print(fields["line_items"])                    # validated line items
 print(fields["summary"])                       # totals, tax and currency
 ```
+
+These fields come from the financial extractor, which is the default. If your
+organization's default extract category is set to `non_financial`, the fields are
+under `result["data"]["result"]["data"]` instead; call `client.extract(...,
+category="financial")` to choose explicitly.
 
 ## Two-Step Pipeline
 
@@ -887,7 +892,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 Every exception carries `status_code` (HTTP status if applicable), `request_id`
 (the `X-Request-ID` the SDK sent — include it when you open a
 [GitHub issue](https://github.com/hyprbots/hyperapi-sdk/issues) or contact
-support at research@hyperbots.com) and `code`, the
+support at hyperapi-support@hyperbots.com) and `code`, the
 machine-readable error code from the API's error envelope when one was
 returned (for example `page_quota_exceeded`), otherwise `None`. A quota
 exhaustion (`code == "page_quota_exceeded"`) is not retried: the waiting
@@ -981,7 +986,7 @@ pytest tests/ -v
 
 ## License
 
-MIT License - see [LICENSE](https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE) for details.
+Apache License 2.0 - see [LICENSE](https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE) and [NOTICE](https://github.com/hyprbots/hyperapi-sdk/blob/main/NOTICE) for details.
 
 ## Links
 
