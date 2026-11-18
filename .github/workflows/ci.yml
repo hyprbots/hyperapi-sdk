@@ -9,17 +9,23 @@ on:
       - main
   workflow_dispatch:
 
+# Read-only token. Actions are pinned to full commit SHAs (tag in the comment).
+permissions:
+  contents: read
+
 jobs:
   lint-and-test:
     name: Lint and L1 contract tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         python: ["3.9", "3.10", "3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python }}
       - name: Install dependencies
@@ -33,7 +39,28 @@ jobs:
         run: pytest tests/ --cov=hyperapi --cov-fail-under=80 -q
       - name: Upload coverage
         if: matrix.python == '3.12'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: coverage-xml
           path: coverage.xml
+
+  dependency-audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Audit runtime dependencies
+        # Audit only what users get: the SDK's resolved runtime dependencies.
+        # `pip freeze` leaves out pip/setuptools of the throwaway venv itself.
+        run: |
+          python -m venv "$RUNNER_TEMP/audit"
+          "$RUNNER_TEMP/audit/bin/pip" install --quiet .
+          "$RUNNER_TEMP/audit/bin/pip" freeze --exclude hyperapi-sdk > "$RUNNER_TEMP/runtime-requirements.txt"
+          cat "$RUNNER_TEMP/runtime-requirements.txt"
+          pip install --quiet "pip-audit==2.10.1"
+          pip-audit --no-deps --disable-pip -r "$RUNNER_TEMP/runtime-requirements.txt"

@@ -2,34 +2,40 @@ name: Release
 
 # Builds and publishes the SDK to PyPI when a tag matching `v*` is pushed.
 #
-# This workflow uses **PyPI Trusted Publishers (OIDC)** — no API token in repo
-# secrets, no long-lived credentials anywhere. The maintainer must register the
-# binding once at https://pypi.org/manage/account/publishing/ for this repo +
-# the `release` environment configured below.
+# This workflow uses **PyPI Trusted Publishers (OIDC)**: no API token in repo
+# secrets, no long-lived credentials anywhere. The PyPI publisher entry names
+# this repo, this workflow file and the `release` environment.
 #
-# Tag protection on `v*` is recommended (Settings → Tags → Protected tags) so
-# only repo admins can cut releases.
+# Hardening:
+# - Workflow-level permissions are empty. Each job asks only for what it needs.
+# - Only the `publish` job can mint an OIDC token (`id-token: write`). It runs no
+#   repo code and installs nothing: it downloads the built files and uploads them.
+# - Every action is pinned to a full commit SHA (the tag is in the comment).
+# - No caches are used anywhere in this workflow.
+# - The `release` environment requires a reviewer and accepts only `v*` tags.
 
 on:
   push:
     tags:
       - "v*"
 
-permissions:
-  contents: read
-  id-token: write   # required for PyPI Trusted Publishers (OIDC)
+permissions: {}
 
 jobs:
   test:
     name: Test on Python ${{ matrix.python }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     strategy:
       fail-fast: true
       matrix:
         python: ["3.9", "3.10", "3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python }}
       - name: Install dependencies
@@ -39,21 +45,22 @@ jobs:
       - name: Test
         run: pytest tests/ -v --tb=short
 
-  build-and-publish:
-    name: Build wheel + sdist, publish via OIDC
-    runs-on: ubuntu-latest
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-24.04
     needs: test
-    environment:
-      name: release
-      url: https://pypi.org/project/hyperapi-sdk/
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
-      - name: Install build deps
-        run: pip install build twine
+      - name: Install build tools
+        run: pip install "build==1.6.1" "twine==7.0.0"
 
       - name: Verify tag matches package version
         run: |
@@ -73,13 +80,30 @@ jobs:
       - name: Validate metadata + README rendering
         run: twine check dist/*
 
-      - name: Publish to PyPI (OIDC)
-        uses: pypa/gh-action-pypi-publish@release/v1
-        # No `password:` — Trusted Publishers handle the auth via OIDC.
-
-      - name: Upload built artifacts
-        uses: actions/upload-artifact@v7
+      - name: Upload built files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dist
           path: dist/
           retention-days: 90
+
+  publish:
+    name: Publish to PyPI (OIDC)
+    runs-on: ubuntu-24.04
+    needs: build
+    environment:
+      name: release
+      url: https://pypi.org/project/hyperapi-sdk/
+    permissions:
+      id-token: write   # PyPI Trusted Publishers (OIDC); this job only
+    steps:
+      - name: Download built files
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        # No `password:`: Trusted Publishers handle auth via OIDC. PEP 740
+        # attestations are on by default and cover the exact files built above.

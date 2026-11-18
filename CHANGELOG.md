@@ -5,6 +5,25 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-17
+
+First release on PyPI: `pip install hyperapi-sdk`.
+
+### Security
+
+- `base_url` (and `HYPERAPI_URL`) must be an absolute `http(s)` URL with a host;
+  anything else raises `ValueError`. Plain `http` to a non-loopback host warns,
+  because the API key would travel unencrypted.
+  URLs with a username or password (`user@host`), a query string or a fragment
+  are rejected.
+- Minimum `httpx` raised to 0.28.1, which pulls in an `h11` without the
+  chunked-encoding request-smuggling flaw (CVE-2025-43859).
+- Release pipeline: build and publish run as separate jobs; only the publish job
+  can request a PyPI token, and it runs no repository code. All GitHub Actions
+  are pinned to commit SHAs, checkouts do not keep credentials, and CI runs
+  `pip-audit` on every change. Dependabot keeps actions and dependencies current.
+- README warns that the `hyperapi` name on PyPI is not ours.
+
 ## [0.7.0] - 2026-11-04
 
 The distribution is now named `hyperapi-sdk` (import name `hyperapi`). Install specs that name

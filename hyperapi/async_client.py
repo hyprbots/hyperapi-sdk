@@ -91,6 +91,7 @@ from .client import (
     _rate_limit_error_from,
     _rate_limit_wait,
     _request_id_of,
+    _resolve_base_url,
     _server_message,
 )
 from .exceptions import (
@@ -159,9 +160,7 @@ class AsyncHyperAPIClient:
                 "API key required. Pass api_key or set HYPERAPI_KEY environment variable."
             )
 
-        self.base_url = (
-            base_url or os.environ.get("HYPERAPI_URL") or "https://apis.hyperbots.com"
-        ).rstrip("/")
+        self.base_url = _resolve_base_url(base_url)
         self.timeout = timeout
         self._poll_interval = poll_interval
         self._poll_timeout = poll_timeout

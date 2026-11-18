@@ -1,0 +1,6 @@
+# Changes to release, CI, packaging and runtime code need review from a maintainer.
+# Enforced when branch protection on `main` requires code-owner review.
+*                       @damandeep-hyprbots @niyatic @saifulhaq-hyprbots
+/.github/               @damandeep-hyprbots @niyatic @saifulhaq-hyprbots
+/pyproject.toml         @damandeep-hyprbots @niyatic @saifulhaq-hyprbots
+/hyperapi/              @damandeep-hyprbots @niyatic @saifulhaq-hyprbots
