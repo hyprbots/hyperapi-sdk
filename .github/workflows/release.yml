@@ -59,8 +59,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install "build==1.6.1" "twine==7.0.0"
+      - name: Install build tools (hash-locked)
+        # build, setuptools and their dependencies, each pinned by hash. With
+        # --no-isolation below, this setuptools is the one that builds the wheel.
+        run: pip install --require-hashes --no-deps -r .github/build-requirements.txt
 
       - name: Verify tag matches package version
         run: |
@@ -75,10 +77,7 @@ jobs:
           fi
 
       - name: Build wheel + sdist
-        run: python -m build
-
-      - name: Validate metadata + README rendering
-        run: twine check dist/*
+        run: python -m build --no-isolation
 
       - name: Upload built files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

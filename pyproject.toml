@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=77.0", "wheel"]
+# Exact pin: the release job builds with --no-isolation from the hash-locked
+# .github/build-requirements.txt, so this must equal the setuptools locked there.
+# setuptools builds wheels itself; the separate `wheel` package is not needed.
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
