@@ -7,12 +7,17 @@ retry for batch polls, the poll retry policy, and safe page downloads/uploads.
 
 from __future__ import annotations
 
+import asyncio
+import gzip
 import inspect
+import os
 import pickle
+import sys
 import time
 
 import httpx
 import pytest
+import respx
 
 import hyperapi.exceptions as exc_mod
 from hyperapi import (
@@ -425,3 +430,312 @@ async def test_async_poll_503_then_200_succeeds(mock_api, async_client):
     async_client._poll_transient_retry_delay = 0.0
     assert await async_client.wait_for_job("j1") == {"ok": True}
     assert route.call_count == 2
+
+
+# ── B14: page downloads and presigned uploads ───────────────────────────────
+
+HTTPS_BASE = "https://api.test"
+PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 100
+
+
+def _pages(*urls):
+    return {"result": {"pages": [{"page": i + 1, "image_url": u} for i, u in enumerate(urls)]}}
+
+
+async def _invoke(fn, *args, **kwargs):
+    """Call a sync or async client method the same way."""
+    result = fn(*args, **kwargs)
+    return await result if asyncio.iscoroutine(result) else result
+
+
+def _leftovers(dest):
+    return sorted(p.name for p in dest.iterdir()) if dest.exists() else []
+
+
+def _gzip_bomb():
+    body = gzip.compress(b"\0" * (5 * 1024 * 1024))
+    assert len(body) < 10_000
+    return httpx.Response(200, content=body, headers={"Content-Encoding": "gzip"})
+
+
+def test_download_gzip_bomb_stops_at_cap_and_leaves_nothing(mock_api, client, tmp_path):
+    mock_api.get("https://s3.local/1.png").mock(return_value=_gzip_bomb())
+    with pytest.raises(HyperAPIError, match="max_page_bytes"):
+        client.download_pages(_pages("https://s3.local/1.png"), tmp_path / "out",
+                              max_page_bytes=10_000)
+    assert _leftovers(tmp_path / "out") == []
+
+
+async def test_async_download_gzip_bomb_stops_at_cap_and_leaves_nothing(
+    mock_api, async_client, tmp_path
+):
+    mock_api.get("https://s3.local/1.png").mock(return_value=_gzip_bomb())
+    with pytest.raises(HyperAPIError, match="max_page_bytes"):
+        await async_client.download_pages(_pages("https://s3.local/1.png"), tmp_path,
+                                          max_page_bytes=10_000)
+    assert _leftovers(tmp_path) == []
+
+
+def test_download_declared_length_over_cap_is_refused(mock_api, client, tmp_path):
+    mock_api.get("https://s3.local/1.png").mock(return_value=httpx.Response(200, content=PNG))
+    with pytest.raises(HyperAPIError, match="max_page_bytes"):
+        client.download_pages(_pages("https://s3.local/1.png"), tmp_path, max_page_bytes=10)
+    assert _leftovers(tmp_path) == []
+
+
+def test_download_within_cap_writes_exact_bytes(mock_api, client, tmp_path):
+    mock_api.get("https://s3.local/1.png").mock(return_value=httpx.Response(200, content=PNG))
+    [path] = client.download_pages(_pages("https://s3.local/1.png"), tmp_path,
+                                   max_page_bytes=len(PNG))
+    assert path.read_bytes() == PNG
+    assert _leftovers(tmp_path) == ["page-1.png"]
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True])
+def test_download_rejects_bad_cap(client, tmp_path, bad):
+    with pytest.raises(ValueError, match="max_page_bytes"):
+        client.download_pages(_pages("https://s3.local/1.png"), tmp_path, max_page_bytes=bad)
+
+
+def test_download_follows_redirect_without_api_key(mock_api, client, tmp_path):
+    mock_api.get("https://s3.local/1.png").mock(return_value=httpx.Response(
+        307, headers={"Location": "https://s3.us-west-2.local/1.png"}))
+    final = mock_api.get("https://s3.us-west-2.local/1.png").mock(
+        return_value=httpx.Response(200, content=PNG))
+    [path] = client.download_pages(_pages("https://s3.local/1.png"), tmp_path)
+    assert path.read_bytes() == PNG
+    assert "x-api-key" not in final.calls.last.request.headers
+
+
+async def test_async_download_follows_redirect_without_api_key(mock_api, async_client, tmp_path):
+    mock_api.get("https://s3.local/1.png").mock(return_value=httpx.Response(
+        307, headers={"Location": "https://s3.us-west-2.local/1.png"}))
+    final = mock_api.get("https://s3.us-west-2.local/1.png").mock(
+        return_value=httpx.Response(200, content=PNG))
+    [path] = await async_client.download_pages(_pages("https://s3.local/1.png"), tmp_path)
+    assert path.read_bytes() == PNG
+    assert "x-api-key" not in final.calls.last.request.headers
+
+
+def test_download_transport_error_is_typed_and_leaves_nothing(mock_api, client, tmp_path):
+    mock_api.get("https://s3.local/1.png").mock(side_effect=httpx.ConnectError("reset"))
+    with pytest.raises(HyperAPIError, match="Could not download page-1.png") as ei:
+        client.download_pages(_pages("https://s3.local/1.png"), tmp_path)
+    assert ei.value.__cause__ is None and ei.value.__suppress_context__
+    assert _leftovers(tmp_path) == []
+
+
+async def test_async_download_transport_error_is_typed(mock_api, async_client, tmp_path):
+    mock_api.get("https://s3.local/1.png").mock(side_effect=httpx.ReadTimeout("slow"))
+    with pytest.raises(HyperAPIError, match="Could not download page-1.png"):
+        await async_client.download_pages(_pages("https://s3.local/1.png"), tmp_path)
+    assert _leftovers(tmp_path) == []
+
+
+def test_failed_page_does_not_leave_earlier_partial(mock_api, client, tmp_path):
+    """Page 1 succeeds, page 2 fails mid-way: page 2 has no file of any name."""
+    mock_api.get("https://s3.local/1.png").mock(return_value=httpx.Response(200, content=PNG))
+    mock_api.get("https://s3.local/2.png").mock(return_value=_gzip_bomb())
+    with pytest.raises(HyperAPIError):
+        client.download_pages(_pages("https://s3.local/1.png", "https://s3.local/2.png"),
+                              tmp_path, max_page_bytes=10_000)
+    assert _leftovers(tmp_path) == ["page-1.png"]
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+async def test_http_image_url_refused_when_base_url_is_https(cls, tmp_path):
+    c = cls(api_key=KEY, base_url=HTTPS_BASE)
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get("http://s3.local/1.png").mock(
+            return_value=httpx.Response(200, content=PNG))
+        with pytest.raises(HyperAPIError, match="https"):
+            await _invoke(c.download_pages,
+                          _pages("https://s3.local/0.png", "http://s3.local/1.png"),
+                          tmp_path / "out")
+        assert route.call_count == 0
+    assert not (tmp_path / "out").exists()
+
+
+def test_https_to_http_redirect_refused_when_base_url_is_https(tmp_path):
+    c = HyperAPIClient(api_key=KEY, base_url=HTTPS_BASE)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://s3.local/1.png").mock(return_value=httpx.Response(
+            302, headers={"Location": "http://evil.local/1.png"}))
+        router.get("http://evil.local/1.png").mock(return_value=httpx.Response(200, content=PNG))
+        with pytest.raises(HyperAPIError, match="redirect"):
+            c.download_pages(_pages("https://s3.local/1.png"), tmp_path)
+    assert _leftovers(tmp_path) == []
+
+
+def test_http_image_url_allowed_when_base_url_is_http(mock_api, client, tmp_path):
+    mock_api.get("http://s3.local/1.png").mock(return_value=httpx.Response(200, content=PNG))
+    [path] = client.download_pages(_pages("http://s3.local/1.png"), tmp_path)
+    assert path.read_bytes() == PNG
+
+
+async def test_async_http_image_url_allowed_when_base_url_is_http(
+    mock_api, async_client, tmp_path
+):
+    mock_api.get("http://s3.local/1.png").mock(return_value=httpx.Response(200, content=PNG))
+    [path] = await async_client.download_pages(_pages("http://s3.local/1.png"), tmp_path)
+    assert path.read_bytes() == PNG
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+@pytest.mark.parametrize("upload_url", ["http://s3.local/k?sig=x", "ftp://s3.local/k", 42])
+async def test_non_https_upload_url_refused_when_base_url_is_https(cls, tiny_pdf, upload_url):
+    c = cls(api_key=KEY, base_url=HTTPS_BASE)
+    with respx.mock(assert_all_called=False) as router:
+        router.post(f"{HTTPS_BASE}/v1/documents/upload").mock(return_value=httpx.Response(
+            200, json={"document_key": "k", "upload_url": upload_url}))
+        put = router.put(url__regex=r".*").mock(return_value=httpx.Response(200))
+        with pytest.raises(DocumentUploadError, match="https"):
+            await _invoke(c.upload_document, tiny_pdf)
+        assert put.call_count == 0
+
+
+def test_http_upload_url_allowed_when_base_url_is_http(mock_api, client, tiny_pdf):
+    mock_api.post("/v1/documents/upload").mock(return_value=httpx.Response(
+        200, json={"document_key": "k", "upload_url": "http://s3.local/k"}))
+    put = mock_api.put("http://s3.local/k").mock(return_value=httpx.Response(200))
+    assert client.upload_document(tiny_pdf) == "k"
+    assert "x-api-key" not in put.calls.last.request.headers
+
+
+async def test_async_https_upload_carries_no_api_key(mock_api, async_client, tiny_pdf):
+    _seed_upload(mock_api)
+    assert await async_client.upload_document(tiny_pdf) == "k"
+    put = [c for c in mock_api.calls if c.request.method == "PUT"][-1]
+    assert "x-api-key" not in put.request.headers
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+async def test_upload_refuses_directory(cls, mock_api, tmp_path):
+    c = cls(api_key=KEY, base_url=TEST_BASE_URL)
+    route = mock_api.route().mock(return_value=httpx.Response(200, json=UPLOAD_OK))
+    with pytest.raises(ValueError, match="Not a regular file"):
+        await _invoke(c.upload_document, tmp_path)
+    assert route.call_count == 0
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+async def test_upload_refuses_fifo(cls, mock_api, tmp_path):
+    fifo = tmp_path / "pipe.pdf"
+    os.mkfifo(fifo)
+    c = cls(api_key=KEY, base_url=TEST_BASE_URL)
+    with pytest.raises(ValueError, match="Not a regular file"):
+        await _invoke(c.upload_document, fifo)
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+async def test_upload_missing_file_still_file_not_found(cls, tmp_path):
+    c = cls(api_key=KEY, base_url=TEST_BASE_URL)
+    with pytest.raises(FileNotFoundError):
+        await _invoke(c.upload_document, tmp_path / "nope.pdf")
+
+
+class _ConcurrencyProbe:
+    def __init__(self):
+        self.now = 0
+        self.peak = 0
+
+    async def run(self, value):
+        self.now += 1
+        self.peak = max(self.peak, self.now)
+        await asyncio.sleep(0.01)
+        self.now -= 1
+        return value
+
+
+async def test_async_download_pages_runs_at_most_8_at_once(async_client, tmp_path, monkeypatch):
+    probe = _ConcurrencyProbe()
+
+    async def fake_download(url, path, cap):
+        await probe.run(path)
+
+    monkeypatch.setattr(async_client, "_download_page", fake_download)
+    urls = [f"https://s3.local/{i}.png" for i in range(20)]
+    paths = await async_client.download_pages(_pages(*urls), tmp_path)
+    assert len(paths) == 20 and probe.peak == 8
+
+
+async def test_async_create_batch_from_files_runs_at_most_8_uploads(
+    mock_api, async_client, monkeypatch
+):
+    probe = _ConcurrencyProbe()
+    monkeypatch.setattr(async_client, "upload_document", probe.run)
+    route = mock_api.post("/v1/batch").mock(return_value=httpx.Response(
+        202, json={"batch_id": "b1", "status": "queued"}))
+    files = [f"f{i}.pdf" for i in range(20)]
+    await async_client.create_batch_from_files(endpoint="/v1/parse", file_paths=files)
+    assert probe.peak == 8
+    import json as _json
+    assert _json.loads(route.calls.last.request.content)["document_keys"] == files
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+async def test_async_create_batch_from_files_cancels_rest_on_failure(async_client, monkeypatch):
+    started = []
+
+    async def upload(p):
+        started.append(p)
+        if p == "f0.pdf":
+            raise DocumentUploadError("nope")
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(async_client, "upload_document", upload)
+    t0 = time.monotonic()
+    with pytest.raises(DocumentUploadError):
+        await async_client.create_batch_from_files(
+            endpoint="/v1/parse", file_paths=[f"f{i}.pdf" for i in range(20)])
+    assert time.monotonic() - t0 < 2
+    # 8 start; f0's failure frees one slot that may start a 9th before the
+    # cancel lands. The other 11 never start.
+    assert len(started) <= 9
+
+
+async def test_async_upload_reads_file_off_the_event_loop(mock_api, async_client, tiny_pdf,
+                                                          monkeypatch):
+    seen = []
+    real = asyncio.to_thread
+
+    async def spy(fn, *a, **kw):
+        seen.append(getattr(fn, "__name__", fn))
+        return await real(fn, *a, **kw)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    _seed_upload(mock_api)
+    await async_client.upload_document(tiny_pdf)
+    assert "read_bytes" in seen
+
+
+async def test_async_download_writes_off_the_event_loop(mock_api, async_client, tmp_path,
+                                                        monkeypatch):
+    seen = []
+    real = asyncio.to_thread
+
+    async def spy(fn, *a, **kw):
+        seen.append(getattr(fn, "__name__", str(fn)))
+        return await real(fn, *a, **kw)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    mock_api.get("https://s3.local/1.png").mock(return_value=httpx.Response(200, content=PNG))
+    await async_client.download_pages(_pages("https://s3.local/1.png"), tmp_path)
+    assert {"open", "write", "replace"} <= set(seen)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_download_writes_atomically_via_rename(mock_api, client, tmp_path, monkeypatch):
+    calls = []
+    real = os.replace
+
+    def spy(src, dst):
+        calls.append((os.path.basename(src), os.path.basename(dst)))
+        return real(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
+    mock_api.get("https://s3.local/1.png").mock(return_value=httpx.Response(200, content=PNG))
+    client.download_pages(_pages("https://s3.local/1.png"), tmp_path)
+    [(src, dst)] = calls
+    assert dst == "page-1.png" and src.startswith(".page-1.png.") and src.endswith(".part")

@@ -840,7 +840,7 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `edit_detect(file)` | form-field detection | Detect blank fillable fields → `form_schema` + page images. Submit + poll. |
 | `edit_fill(detect_job_id, *, values=… \| content=…)` | form fill | Draw values onto a detected form → rendered pages. Submit + poll. |
 | `edit(file, *, content=…)` | detect → fill | Both legs in one call. Content-only — no `values`, since this call is detecting the schema for the first time. |
-| `download_pages(result, dir)` | — | Write any result's page images to a folder (edit legs, or `parse(include_image=True)`). |
+| `download_pages(result, dir, *, max_page_bytes=200 MiB)` | — | Write any result's page images to a folder (edit legs, or `parse(include_image=True)`). A page larger than `max_page_bytes` raises `HyperAPIError` and leaves no file. |
 | `process(file)` | OCR → parse + extract | Combined parse + extract sharing one upload. Submit + poll on both legs. |
 | `submit_parse / submit_extract / submit_extract_advanced / submit_classify / submit_split / submit_redact / submit_edit_detect / submit_edit_fill` | OCR (+ task) | Submit asynchronously, return a `Job` immediately. |
 | `get_job(job_id)` | — | One-shot status poll. No waiting, no retry. |

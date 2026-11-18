@@ -78,11 +78,16 @@ from .client import (
     _DEFAULT_POLL_MAX_TRANSIENT_RETRIES,
     _DEFAULT_POLL_TIMEOUT_S,
     _DEFAULT_POLL_TRANSIENT_RETRY_DELAY_S,
+    _DEFAULT_MAX_PAGE_BYTES,
     _DEFAULT_TIMEOUT,
     _OP_TO_ERROR,
+    _TRANSFER_CONCURRENCY,
     _cancelled_job_error,
+    _check_download_reply,
+    _check_page_cap,
+    _check_server_url,
     _clean_api_key,
-    _download_error,
+    _download_transport_error,
     _edit_fill_body,
     _edit_unavailable_error,
     _error_fields,
@@ -90,10 +95,13 @@ from .client import (
     _load_schema,
     _page_targets,
     _parse_ocr_text,
+    _page_too_large,
     _parse_params,
+    _partial_path,
     _path_id,
     _rate_limit_error_from,
     _rate_limit_wait,
+    _regular_file,
     _request_id_of,
     _resolve_base_url,
     _transient_delay,
@@ -110,6 +118,32 @@ from .exceptions import (
 
 
 logger = logging.getLogger("hyperapi")
+
+
+async def _bounded_map(
+    fn: Callable[..., Awaitable[Any]], items: Iterable[Any], limit: int
+) -> list[Any]:
+    """``await fn(item)`` for every item, at most ``limit`` at once, in input order.
+
+    Each coroutine is created only once a slot is free, so nothing is left
+    un-awaited when the rest are cancelled. On the first failure the remaining
+    tasks are cancelled (and drained), so a failed batch upload or page
+    download does not keep transferring after the caller has its exception.
+    """
+    sem = asyncio.Semaphore(limit)
+
+    async def _run(item: Any) -> Any:
+        async with sem:
+            return await fn(item)
+
+    tasks = [asyncio.ensure_future(_run(item)) for item in items]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 class AsyncHyperAPIClient:
@@ -242,12 +276,12 @@ class AsyncHyperAPIClient:
 
         Raises:
             FileNotFoundError: If the file does not exist.
+            ValueError: If the path is not a regular file (a directory, pipe or device).
             AuthenticationError: 401 from the server.
-            DocumentUploadError: Any other failure on the presigned fetch or S3 PUT.
+            DocumentUploadError: Any other failure on the presigned fetch or S3 PUT,
+                including a presigned URL that is not https.
         """
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
+        path = _regular_file(file_path)
 
         if content_type is None:
             content_type = CONTENT_TYPES.get(
@@ -300,11 +334,17 @@ class AsyncHyperAPIClient:
         )
         document_key = upload_data["document_key"]
         upload_url = upload_data["upload_url"]
+        _check_server_url(
+            upload_url,
+            base_url=self.base_url,
+            what="presigned upload URL",
+            error_cls=DocumentUploadError,
+        )
 
         # Step 2 — upload bytes directly to object storage using the signed URL.
+        # The file is read in a worker thread so the event loop keeps running.
+        file_bytes = await asyncio.to_thread(path.read_bytes)
         try:
-            with open(path, "rb") as f:
-                file_bytes = f.read()
             s3_resp = await self._client.put(
                 upload_url,
                 content=file_bytes,
@@ -1683,12 +1723,15 @@ class AsyncHyperAPIClient:
         file_paths: list[str | Path],
         **kwargs,
     ) -> dict:
-        """Upload each file concurrently (presigned flow) then :meth:`create_batch`."""
-        document_keys = await asyncio.gather(
-            *(self.upload_document(p) for p in file_paths)
+        """Upload the files concurrently (presigned flow) then :meth:`create_batch`.
+
+        At most 8 uploads run at once; if one fails the others are cancelled.
+        """
+        document_keys = await _bounded_map(
+            self.upload_document, file_paths, _TRANSFER_CONCURRENCY
         )
         return await self.create_batch(
-            endpoint=endpoint, document_keys=list(document_keys), **kwargs
+            endpoint=endpoint, document_keys=document_keys, **kwargs
         )
 
     async def get_batch(
@@ -2211,6 +2254,7 @@ class AsyncHyperAPIClient:
         dest_dir: str | Path,
         *,
         prefix: str = "page",
+        max_page_bytes: int = _DEFAULT_MAX_PAGE_BYTES,
     ) -> list[Path]:
         """Download a result's page images to a folder.
 
@@ -2219,7 +2263,7 @@ class AsyncHyperAPIClient:
         :py:meth:`parse` with page images on (the API default; do not pass
         ``include_image=False``). Files are written as
         ``<dest_dir>/<prefix>-<page number>.png``; the directory is created if needed.
-        Pages are downloaded concurrently.
+        Pages are downloaded concurrently, at most 8 at a time.
 
         Page images are served as **short-lived presigned URLs** (~15 min), so download
         promptly. If they have expired, re-poll with :py:meth:`get_job` — the server mints
@@ -2229,28 +2273,67 @@ class AsyncHyperAPIClient:
             result: The dict returned by an op that produced page images.
             dest_dir: Folder to write into. Created if it does not exist.
             prefix: Filename stem; defaults to ``page`` → ``page-1.png``.
+            max_page_bytes: Largest page image accepted, in bytes (after any
+                content decoding). Default 200 MiB. A larger page stops the
+                download and raises ``HyperAPIError``.
+
+        Each page is streamed to a temporary file in ``dest_dir`` and renamed
+        into place when complete, so a failure never leaves a partial page.
+        Image URLs must be https (plain http only when ``base_url`` is http).
 
         Returns:
             The written paths, in page order.
 
         Raises:
             ValueError: If the result carries no pages, or a page has no ``image_url``.
-            HyperAPIError: If a download fails — an expired URL reports as such.
+            HyperAPIError: If a download fails — an expired URL reports as such — or a
+                page exceeds ``max_page_bytes``, or an image URL is not https.
         """
+        _check_page_cap(max_page_bytes)
         targets = _page_targets(result, dest_dir, prefix)
-        Path(dest_dir).mkdir(parents=True, exist_ok=True)
+        for url, _ in targets:
+            _check_server_url(url, base_url=self.base_url, what="page image URL")
+        await asyncio.to_thread(Path(dest_dir).mkdir, parents=True, exist_ok=True)
 
-        async def _one(url: str, path: Path) -> Path:
+        async def _one(target: tuple[str, Path]) -> Path:
+            url, path = target
+            await self._download_page(url, path, max_page_bytes)
+            return path
+
+        return await _bounded_map(_one, targets, _TRANSFER_CONCURRENCY)
+
+    async def _download_page(self, url: str, path: Path, max_page_bytes: int) -> None:
+        """Stream one presigned page image to ``path`` (atomically, size-capped).
+
+        File writes run in a worker thread so the event loop is never blocked.
+        """
+        partial = _partial_path(path)
+        try:
             # Presigned URLs carry their own SigV4 signature — send no API-key headers.
             # follow_redirects: S3 answers a cross-region GET with a 307 to the regional
             # endpoint, which would otherwise surface as a baffling "HTTP 307".
-            resp = await self._client.get(url, follow_redirects=True)
-            if resp.status_code >= 400:
-                raise _download_error(path, resp.status_code)
-            path.write_bytes(resp.content)
-            return path
-
-        return list(await asyncio.gather(*(_one(u, p) for u, p in targets)))
+            async with self._client.stream("GET", url, follow_redirects=True) as resp:
+                _check_download_reply(
+                    resp, path, base_url=self.base_url, max_page_bytes=max_page_bytes
+                )
+                f = await asyncio.to_thread(open, partial, "wb")
+                try:
+                    received = 0
+                    async for chunk in resp.aiter_bytes():
+                        received += len(chunk)
+                        if received > max_page_bytes:
+                            raise _page_too_large(path, max_page_bytes)
+                        await asyncio.to_thread(f.write, chunk)
+                finally:
+                    f.close()
+            await asyncio.to_thread(os.replace, partial, path)
+        except httpx.RequestError as e:
+            raise _download_transport_error(path, e) from None
+        finally:
+            try:
+                partial.unlink()
+            except FileNotFoundError:
+                pass
 
     async def process(
         self,

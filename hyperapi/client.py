@@ -626,6 +626,97 @@ def _page_targets(
     return out
 
 
+# Downloads and uploads of presigned URLs.
+_DEFAULT_MAX_PAGE_BYTES = 200 * 1024 * 1024
+# The async client runs at most this many presigned transfers at once.
+_TRANSFER_CONCURRENCY = 8
+
+
+def _check_server_url(
+    url: Any,
+    *,
+    base_url: str,
+    what: str,
+    error_cls: type[HyperAPIError] = HyperAPIError,
+) -> None:
+    """Refuse a server-supplied URL (presigned upload/download) that is not https.
+
+    Plain ``http`` is accepted only when the client itself talks to a plain
+    ``http`` base URL (a local or test server). The URL is never echoed in
+    the error: presigned URLs carry a signature.
+    """
+    scheme = ""
+    if isinstance(url, str) and url:
+        try:
+            scheme = httpx.URL(url).scheme
+        except Exception:  # noqa: BLE001  # httpx raises InvalidURL or ValueError
+            scheme = ""
+    if scheme == "https":
+        return
+    if scheme == "http" and httpx.URL(base_url).scheme == "http":
+        return
+    raise error_cls(
+        f"Refusing a {what} that does not use https (scheme {scheme or 'missing'!r}). "
+        "Presigned URLs from the API are always https; plain http is accepted only "
+        "when base_url itself is http (local testing)."
+    )
+
+
+def _regular_file(file_path: str | Path) -> Path:
+    """The upload path, which must be an existing regular file.
+
+    A directory, FIFO or device would hang or fail obscurely on read.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    if not path.is_file():
+        raise ValueError(
+            f"Not a regular file: {path}. Directories, pipes and devices cannot be uploaded."
+        )
+    return path
+
+
+def _check_page_cap(max_page_bytes: int) -> None:
+    if (
+        isinstance(max_page_bytes, bool)
+        or not isinstance(max_page_bytes, int)
+        or max_page_bytes <= 0
+    ):
+        raise ValueError("max_page_bytes must be a positive int")
+
+
+def _partial_path(path: Path) -> Path:
+    """A unique temporary name next to ``path``; renamed over it once complete."""
+    return path.with_name(f".{path.name}.{uuid.uuid4().hex[:12]}.part")
+
+
+def _page_too_large(path: Path, max_page_bytes: int) -> HyperAPIError:
+    return HyperAPIError(
+        f"Could not download {path.name}: the image is larger than "
+        f"max_page_bytes ({max_page_bytes} bytes). Nothing was written; "
+        "raise max_page_bytes if this page is expected to be this large."
+    )
+
+
+def _check_download_reply(
+    resp: httpx.Response, path: Path, *, base_url: str, max_page_bytes: int
+) -> None:
+    """Status, final-URL and declared-size checks before a page body is read."""
+    if resp.status_code >= 400:
+        raise _download_error(path, resp.status_code)
+    # Redirects are followed (S3 sends a 307 to the regional endpoint); the
+    # final hop must meet the same https rule as the URL the API handed out.
+    _check_server_url(str(resp.url), base_url=base_url, what="page image redirect")
+    declared = resp.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > max_page_bytes:
+        raise _page_too_large(path, max_page_bytes)
+
+
+def _download_transport_error(path: Path, exc: Exception) -> HyperAPIError:
+    return HyperAPIError(f"Could not download {path.name}: {exc}")
+
+
 def _download_error(page_path: Path, status: int) -> HyperAPIError:
     hint = ""
     if status in (403, 401):
@@ -935,12 +1026,12 @@ class HyperAPIClient:
 
         Raises:
             FileNotFoundError: If the file does not exist.
+            ValueError: If the path is not a regular file (a directory, pipe or device).
             AuthenticationError: 401 from the server.
-            DocumentUploadError: Any other failure on the presigned fetch or S3 PUT.
+            DocumentUploadError: Any other failure on the presigned fetch or S3 PUT,
+                including a presigned URL that is not https.
         """
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
+        path = _regular_file(file_path)
 
         if content_type is None:
             content_type = CONTENT_TYPES.get(
@@ -993,6 +1084,12 @@ class HyperAPIClient:
         )
         document_key = upload_data["document_key"]
         upload_url = upload_data["upload_url"]
+        _check_server_url(
+            upload_url,
+            base_url=self.base_url,
+            what="presigned upload URL",
+            error_cls=DocumentUploadError,
+        )
 
         # Step 2 — upload bytes directly to object storage using the signed URL.
         try:
@@ -2928,6 +3025,7 @@ class HyperAPIClient:
         dest_dir: str | Path,
         *,
         prefix: str = "page",
+        max_page_bytes: int = _DEFAULT_MAX_PAGE_BYTES,
     ) -> list[Path]:
         """Download a result's page images to a folder.
 
@@ -2945,28 +3043,60 @@ class HyperAPIClient:
             result: The dict returned by an op that produced page images.
             dest_dir: Folder to write into. Created if it does not exist.
             prefix: Filename stem; defaults to ``page`` → ``page-1.png``.
+            max_page_bytes: Largest page image accepted, in bytes (after any
+                content decoding). Default 200 MiB. A larger page stops the
+                download and raises ``HyperAPIError``.
+
+        Each page is streamed to a temporary file in ``dest_dir`` and renamed
+        into place when complete, so a failure never leaves a partial page.
+        Image URLs must be https (plain http only when ``base_url`` is http).
 
         Returns:
             The written paths, in page order.
 
         Raises:
             ValueError: If the result carries no pages, or a page has no ``image_url``.
-            HyperAPIError: If a download fails — an expired URL reports as such.
+            HyperAPIError: If a download fails — an expired URL reports as such — or a
+                page exceeds ``max_page_bytes``, or an image URL is not https.
         """
+        _check_page_cap(max_page_bytes)
         targets = _page_targets(result, dest_dir, prefix)
+        for url, _ in targets:
+            _check_server_url(url, base_url=self.base_url, what="page image URL")
         Path(dest_dir).mkdir(parents=True, exist_ok=True)
 
         written: list[Path] = []
         for url, path in targets:
+            self._download_page(url, path, max_page_bytes)
+            written.append(path)
+        return written
+
+    def _download_page(self, url: str, path: Path, max_page_bytes: int) -> None:
+        """Stream one presigned page image to ``path`` (atomically, size-capped)."""
+        partial = _partial_path(path)
+        try:
             # Presigned URLs carry their own SigV4 signature — send no API-key headers.
             # follow_redirects: S3 answers a cross-region GET with a 307 to the regional
             # endpoint, which would otherwise surface as a baffling "HTTP 307".
-            resp = self._client.get(url, follow_redirects=True)
-            if resp.status_code >= 400:
-                raise _download_error(path, resp.status_code)
-            path.write_bytes(resp.content)
-            written.append(path)
-        return written
+            with self._client.stream("GET", url, follow_redirects=True) as resp:
+                _check_download_reply(
+                    resp, path, base_url=self.base_url, max_page_bytes=max_page_bytes
+                )
+                received = 0
+                with open(partial, "wb") as f:
+                    for chunk in resp.iter_bytes():
+                        received += len(chunk)
+                        if received > max_page_bytes:
+                            raise _page_too_large(path, max_page_bytes)
+                        f.write(chunk)
+            os.replace(partial, path)
+        except httpx.RequestError as e:
+            raise _download_transport_error(path, e) from None
+        finally:
+            try:
+                partial.unlink()
+            except FileNotFoundError:
+                pass
 
     def process(
         self,
