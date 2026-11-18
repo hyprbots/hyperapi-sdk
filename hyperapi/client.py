@@ -122,13 +122,16 @@ _DEFAULT_BASE_URL = "https://apis.hyperbots.com"
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
-def _resolve_base_url(base_url: str | None) -> str:
+def _resolve_base_url(base_url: str | httpx.URL | None) -> str:
     """Pick the API base URL and check that it is safe to send the API key to.
 
     The API key travels in a header on every request, so the URL must be an
     absolute ``http(s)`` URL with a host. Plain ``http`` is accepted (local and
     test servers need it) but warns unless the host is a loopback address.
+    Non-string values such as ``httpx.URL`` are converted with ``str()``.
     """
+    if base_url is not None and not isinstance(base_url, str):
+        base_url = str(base_url)
     raw = (base_url or os.environ.get("HYPERAPI_URL") or _DEFAULT_BASE_URL).strip()
     try:
         url = httpx.URL(raw)
@@ -146,7 +149,9 @@ def _resolve_base_url(base_url: str | None) -> str:
             f"Invalid base_url for host {url.host!r}: it must not contain "
             "a username or password ('user@host')."
         )
-    if url.query or url.fragment or any(c.isspace() for c in raw):
+    # An empty "?" or "#" parses as no query/fragment but would still be glued
+    # in front of every request path ("https://host?/v1/parse").
+    if url.query or url.fragment or "?" in raw or "#" in raw or any(c.isspace() for c in raw):
         raise ValueError(
             f"Invalid base_url {raw!r}: it must not contain a query string, "
             "a fragment or whitespace."

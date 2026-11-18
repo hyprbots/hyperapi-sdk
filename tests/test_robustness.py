@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 import hyperapi.exceptions as exc_mod
+from hyperapi import AsyncHyperAPIClient, HyperAPIClient
 
 
 TEST_BASE_URL = "http://test.local"
@@ -130,3 +131,26 @@ def test_exception_pickle_round_trip(err):
     assert clone.__dict__ == err.__dict__
     assert str(clone) == str(err)
     assert clone.args == err.args
+
+
+# ── B10: base_url edge cases ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+@pytest.mark.parametrize("bad", ["https://example.com?", "https://example.com#",
+                                 "https://example.com/?", "https://example.com/api#"])
+def test_base_url_with_empty_query_or_fragment_is_refused(cls, bad):
+    with pytest.raises(ValueError, match="query string"):
+        cls(api_key=KEY, base_url=bad)
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+def test_base_url_accepts_httpx_url(cls):
+    c = cls(api_key=KEY, base_url=httpx.URL("https://example.com/"))
+    assert c.base_url == "https://example.com"
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+def test_base_url_httpx_url_is_still_validated(cls):
+    with pytest.raises(ValueError, match="Invalid base_url"):
+        cls(api_key=KEY, base_url=httpx.URL("ftp://example.com"))
