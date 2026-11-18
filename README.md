@@ -64,13 +64,15 @@ Invoice Line Item:
 ## Installation
 
 ```bash
-pip install "hyperapi-sdk @ git+https://github.com/hyprbots/hyperapi-sdk.git"
+pip install hyperapi-sdk
 ```
 
 The package installs as `hyperapi-sdk` and imports as `hyperapi`. Python 3.9 or later.
 
-The SDK is not on PyPI yet. The `hyperapi` name there belongs to a third party, so
-never `pip install hyperapi`. Once published, the package name will be `hyperapi-sdk`.
+> **Install `hyperapi-sdk`, never `hyperapi`.** The `hyperapi` name on PyPI does not
+> belong to us. The only official package is
+> [`hyperapi-sdk`](https://pypi.org/project/hyperapi-sdk/), published from this repository
+> with PyPI Trusted Publishing and signed attestations.
 
 To install from a local clone instead:
 

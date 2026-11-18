@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperapi-sdk"
-version = "0.7.0"
+version = "0.7.1"
 description = "HyperAPI Python SDK - Document intelligence APIs (parse, extract, classify, split, redact)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,7 +26,7 @@ classifiers = [
 ]
 keywords = ["ocr", "document-processing", "invoice", "financial", "api"]
 dependencies = [
-    "httpx>=0.25.0,<1.0",
+    "httpx>=0.28.1,<1.0",
 ]
 
 [project.optional-dependencies]
@@ -39,7 +39,7 @@ dev = [
     "pre-commit>=4.0.0",
 ]
 socks = [
-    "httpx[socks]>=0.25.0,<1.0",
+    "httpx[socks]>=0.28.1,<1.0",
 ]
 
 [tool.ruff]
@@ -54,6 +54,9 @@ ignore = ["E501"]
 # asyncio_mode = "auto" lets async test functions run without per-test
 # @pytest.mark.asyncio decorators — every `async def test_*` is collected.
 asyncio_mode = "auto"
+# The contract tests talk to a mocked http://test.local; the plain-http warning
+# is covered by tests/test_base_url.py (pytest.warns still sees it).
+filterwarnings = ["ignore:base_url .* uses plain http:UserWarning"]
 
 [project.urls]
 Homepage = "https://apis.hyperbots.com"
