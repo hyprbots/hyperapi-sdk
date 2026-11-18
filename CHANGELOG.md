@@ -22,6 +22,33 @@ First release on PyPI: `pip install hyperapi-sdk`.
   over ~255 characters.
 - `process()` docstring: `data` is the extract job's envelope; fields are at
   `result["data"]["result"]["entities"]` / `["line_items"]` / `["summary"]`.
+- Status polls retry only network errors and 5xx. Every 4xx (400, 403, 422, …)
+  now fails on the first answer instead of being retried, and retries stop when
+  the wait's own timeout passes: `wait_for_job` / `wait_for_jobs` /
+  `wait_for_batch` then raise `JobTimeoutError` rather than sleeping past it.
+- `download_pages` takes `max_page_bytes` (default 200 MiB). Pages are streamed
+  to a temporary file and renamed into place, so a failed download never
+  leaves a partial page. On the async client at most 8 pages download at once.
+- Async `create_batch_from_files` uploads at most 8 files at once and cancels
+  the remaining uploads when one fails.
+- Python 3.13 is supported and tested.
+
+### Fixed
+
+- `wait_for_batch` retries a transient 5xx or network error during a poll
+  instead of aborting the whole wait.
+- Malformed server replies raise the SDK's own errors (with `status_code` and
+  `request_id`) instead of `JSONDecodeError`, `KeyError` or `AttributeError`:
+  a non-JSON or non-object body on upload, submit, job poll or batch calls, or
+  a reply without `document_key` / `upload_url` / `job_id` / `batch_id`. A
+  failed job whose `error` is an object no longer raises `TypeError`.
+- `download_pages` network errors raise `HyperAPIError` instead of raw `httpx`
+  exceptions.
+- `JobTimeoutError` and `JobCancelledError` (and every other SDK exception)
+  survive `pickle`, so they can be returned from `multiprocessing` and
+  `concurrent.futures` workers.
+- `base_url` accepts an `httpx.URL` (and other non-string values) by converting
+  it with `str()`.
 
 ### Security
 
@@ -50,6 +77,19 @@ First release on PyPI: `pip install hyperapi-sdk`.
   are pinned to commit SHAs, checkouts do not keep credentials, and CI runs
   `pip-audit` on every change. Dependabot keeps actions and dependencies current.
 - README warns that the `hyperapi` name on PyPI is not ours.
+- Job and batch ids are percent-encoded in URL paths, so an id such as
+  `"../limits?x="` cannot reach another endpoint or add a query string; empty
+  ids raise `ValueError`.
+- `base_url` with an empty query or fragment (`https://host?`, `https://host#`)
+  is rejected.
+- Presigned URLs from the server (`upload_url`, page `image_url`, and the final
+  hop of a download redirect) must be `https`; plain `http` is accepted only
+  when `base_url` itself is `http` (local testing). Presigned requests still
+  carry no API key.
+- `upload_document` refuses directories, pipes and devices before reading.
+- Release build: the build tools and setuptools are installed from a
+  hash-locked requirements file and the wheel is built without isolation, so
+  the release is built by exactly the pinned, hash-checked setuptools.
 
 ## [0.7.0] - 2026-11-04
 
