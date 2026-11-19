@@ -1,7 +1,7 @@
 # Tools the release job uses to build the wheel and sdist. setuptools is the
 # build backend and runs under `python -m build --no-isolation`, so the
-# hash-pinned version below is exactly what builds the release; keep it equal
-# to the pin in pyproject.toml [build-system] requires.
+# hash-pinned version below is exactly what builds the release. It must
+# satisfy the range in pyproject.toml [build-system] requires.
 #
 # Regenerate with Python 3.12 (the release job's Python):
 #   pip-compile --generate-hashes --allow-unsafe \

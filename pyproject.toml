@@ -1,8 +1,10 @@
 [build-system]
-# Exact pin: the release job builds with --no-isolation from the hash-locked
-# .github/build-requirements.txt, so this must equal the setuptools locked there.
-# setuptools builds wheels itself; the separate `wheel` package is not needed.
-requires = ["setuptools==84.2.1"]
+# A range, not an exact pin: source installs (`pip install -e .`, building the
+# sdist) must work on every supported Python, and current setuptools needs 3.10+.
+# The release itself is built with --no-isolation from the hash-locked
+# .github/build-requirements.txt, so that file decides which setuptools builds
+# the published wheel. setuptools builds wheels itself; `wheel` is not needed.
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
