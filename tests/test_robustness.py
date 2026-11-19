@@ -127,7 +127,7 @@ def _exception_samples():
     yield exc_mod.JobTimeoutError("late", job_id="j1", elapsed_s=1.5, **common)
     yield exc_mod.JobCancelledError("gone", job_id="j2", **common)
     for name in ("AuthenticationError", "ParseError", "ExtractError", "ClassifyError",
-                 "SplitError", "RedactError", "EditError", "DocumentUploadError"):
+                 "SplitError", "RedactError", "DocumentUploadError"):
         yield getattr(exc_mod, name)("msg", 418, "req-1", code="c", details={"d": 2})
 
 
@@ -219,15 +219,6 @@ def test_process_submit_malformed_reply_raises(mock_api, client, tiny_pdf):
     mock_api.post("/v1/parse").mock(return_value=httpx.Response(202, json={}))
     with pytest.raises(ParseError, match="'job_id'"):
         client.process(tiny_pdf)
-
-
-async def test_async_edit_fill_malformed_reply_raises(mock_api, async_client):
-    """edit_fill submits a JSON body (_submit_json)."""
-    from hyperapi import EditError
-
-    mock_api.post("/v1/edit/fill").mock(return_value=HTML_200)
-    with pytest.raises(EditError, match="not JSON"):
-        await async_client.submit_edit_fill("d1", values={"0": "x"})
 
 
 @pytest.mark.parametrize("body", [{"document_key": "k"}, {"upload_url": "https://s3.local/k"}, ["k"]])
@@ -439,7 +430,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 100
 
 
 def _pages(*urls):
-    return {"result": {"pages": [{"page": i + 1, "image_url": u} for i, u in enumerate(urls)]}}
+    return {"result": {"pages": [{"page_number": i + 1, "image_url": u} for i, u in enumerate(urls)]}}
 
 
 async def _invoke(fn, *args, **kwargs):
