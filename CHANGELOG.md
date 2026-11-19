@@ -9,7 +9,98 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First release on PyPI: `pip install hyperapi-sdk`.
 
+### Changed
+
+- License changed from MIT to **Apache-2.0** (adds an explicit patent grant). Earlier GitHub-only versions remain MIT.
+
+- `schema` (on `extract` / `submit_extract`, both clients): a `str` is always
+  parsed as JSON text and never read as a file name; to load a schema file, pass
+  `pathlib.Path("template.json")`. A string that is not valid JSON raises
+  `ValueError` pointing at `pathlib.Path`. **Behaviour change for installs from
+  GitHub:** code that passed a file path as a plain string must wrap it in
+  `Path(...)`. This also fixes `OSError: File name too long` for JSON strings
+  over ~255 characters.
+- `process()` docstring: `data` is the extract job's envelope; fields are at
+  `result["data"]["result"]["entities"]` / `["line_items"]` / `["summary"]`.
+- Status polls retry only network errors and 5xx. Every 4xx (400, 403, 422, …)
+  now fails on the first answer instead of being retried, and retries stop when
+  the wait's own timeout passes: `wait_for_job` / `wait_for_jobs` /
+  `wait_for_batch` then raise `JobTimeoutError` rather than sleeping past it.
+- `download_pages` takes `max_page_bytes` (default 200 MiB). Pages are streamed
+  to a temporary file and renamed into place, so a failed download never
+  leaves a partial page. On the async client at most 8 pages download at once.
+- Async `create_batch_from_files` uploads at most 8 files at once and cancels
+  the remaining uploads when one fails.
+- Python 3.13 is supported and tested.
+- `schema` together with `category="financial"` is now sent instead of raising
+  `ValueError`: the API runs the invoice extractor and remaps its output into
+  your template. A `schema` with no `category` is still sent as
+  `"non_financial"` (the template is filled directly).
+- A `413` from an operation (`parse`, `extract`, `extract_advanced`, `classify`,
+  `split`, `redact`, and their `submit_*` twins) raises that operation's error
+  (`ParseError`, `ExtractError`, …) with `status_code == 413` — it is the
+  operation's page cap. Previously it raised `DocumentUploadError`, which is
+  now raised only by the upload step. **Behaviour change:** code that caught
+  `DocumentUploadError` to detect an over-cap document should catch the
+  operation's error (or `HyperAPIError`) and check `status_code == 413`.
+- Batch errors carry `code` and `details`. A `404` from `create_batch` reports
+  the server's message instead of "Batch not found."; `get_batch` and
+  `cancel_batch` are unchanged.
+- `download_pages` documents `parse` and `redact(output="urls")` results; a
+  page is numbered by its `page_number`.
+
+### Removed
+
+- The Edit methods — `edit`, `edit_detect`, `edit_fill`, `submit_edit_detect`,
+  `submit_edit_fill` — and `EditError` are held back until the Edit API is
+  generally available. They were present in GitHub-only 0.7.0 installs and
+  have never been on PyPI. The Edit notes under 0.7.0 below describe that
+  earlier version.
+
+### Fixed
+
+- An error whose message is a JSON object (for example the quota answer on
+  `create_batch`) is shown as a readable line instead of a Python dict
+  representation; the object is available as `e.details`.
+- `wait_for_batch` retries a transient 5xx or network error during a poll
+  instead of aborting the whole wait.
+- Malformed server replies raise the SDK's own errors (with `status_code` and
+  `request_id`) instead of `JSONDecodeError`, `KeyError` or `AttributeError`:
+  a non-JSON or non-object body on upload, submit, job poll or batch calls, or
+  a reply without `document_key` / `upload_url` / `job_id` / `batch_id`. A
+  failed job whose `error` is an object no longer raises `TypeError`.
+- `download_pages` network errors raise `HyperAPIError` instead of raw `httpx`
+  exceptions.
+- `JobTimeoutError` and `JobCancelledError` (and every other SDK exception)
+  survive `pickle`, so they can be returned from `multiprocessing` and
+  `concurrent.futures` workers.
+- `base_url` accepts an `httpx.URL` (and other non-string values) by converting
+  it with `str()`.
+
+### Documentation
+
+- Job-status polls have their own per-organization rate limit and do not use up
+  the plan's request limit; the README and docstrings no longer say they share
+  it.
+- `get_job()` returns a dict (`["status"]`); redact results are read from
+  `result["result"]["pages"]` / `["images"]`; redact's page cap is read with
+  `get_limits()`; advanced parse needs the Plus plan or higher; batches accept
+  `/v1/extract-omni` (advanced extract).
+
 ### Security
+
+- A `str` schema can no longer make the SDK read and upload a local file, so an
+  application forwarding user-supplied schema text cannot be steered into
+  sending files from its host.
+- The API key (argument or `HYPERAPI_KEY`) is stripped of surrounding whitespace,
+  so a trailing newline from a file or secret mount no longer breaks requests. A
+  key containing inner whitespace, control or non-ASCII characters raises
+  `AuthenticationError` whose message does not include the key. `client.api_key`
+  is now read-only.
+- Transport errors (connection failures, timeouts) raise the SDK exception
+  without chaining the underlying `httpx` exception (`__cause__` is `None`).
+  The chained exception carried the request headers, including `X-API-Key` in
+  clear, and could print the full key in tracebacks and error reporters.
 
 - `base_url` (and `HYPERAPI_URL`) must be an absolute `http(s)` URL with a host;
   anything else raises `ValueError`. Plain `http` to a non-loopback host warns,
@@ -23,6 +114,19 @@ First release on PyPI: `pip install hyperapi-sdk`.
   are pinned to commit SHAs, checkouts do not keep credentials, and CI runs
   `pip-audit` on every change. Dependabot keeps actions and dependencies current.
 - README warns that the `hyperapi` name on PyPI is not ours.
+- Job and batch ids are percent-encoded in URL paths, so an id such as
+  `"../limits?x="` cannot reach another endpoint or add a query string; empty
+  ids raise `ValueError`.
+- `base_url` with an empty query or fragment (`https://host?`, `https://host#`)
+  is rejected.
+- Presigned URLs from the server (`upload_url`, page `image_url`, and the final
+  hop of a download redirect) must be `https`; plain `http` is accepted only
+  when `base_url` itself is `http` (local testing). Presigned requests still
+  carry no API key.
+- `upload_document` refuses directories, pipes and devices before reading.
+- Release build: the build tools and setuptools are installed from a
+  hash-locked requirements file and the wheel is built without isolation, so
+  the release is built by exactly the pinned, hash-checked setuptools.
 
 ## [0.7.0] - 2026-11-04
 

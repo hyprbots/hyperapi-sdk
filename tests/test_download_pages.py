@@ -1,13 +1,13 @@
 """Contract: download_pages() — write a result's page images to a folder.
 
-One helper serves every op that returns presigned page images, but their page shapes differ:
+One helper serves every op that returns presigned page images:
 
-  edit_detect/edit_fill : {"page": 1,        "image_url": ".../1.png",  "size": {...}}
-  edit (composite)      : same, but flattened to result["pages"] instead of result["result"]["pages"]
-  parse(include_image)  : {"page_number": 1, "image_url": ".../0.webp", "dimensions": {...}}
+  parse (page images on)  : {"page_number": 1, "image_url": ".../0.webp", "dimensions": {...}}
+  redact(output="urls")   : {"page_number": 1, "image_url": ".../0.png"}
 
-So the tests below pin page numbering (`page` vs `page_number`) and the file extension
-(.png vs .webp) rather than assuming edit's shape everywhere.
+Both arrive nested under result["result"]["pages"]; a caller who unwrapped the
+envelope holds them at result["pages"]. The tests pin page numbering and the
+file extension (.png vs .webp) the server actually served.
 """
 
 import httpx
@@ -19,13 +19,13 @@ PNG = b"\x89PNG\r\n\x1a\nfake"
 WEBP = b"RIFF\x00\x00\x00\x00WEBPfake"
 
 
-def _edit_result(nested=True):
+def _redact_result(nested=True):
     pages = [
-        {"page": 1, "image_url": "https://s3.local/edit/1.png?sig=a", "size": {"w": 10, "h": 20}},
-        {"page": 2, "image_url": "https://s3.local/edit/2.png?sig=b", "size": {"w": 10, "h": 20}},
+        {"page_number": 1, "image_url": "https://s3.local/redacted/1.png?sig=a"},
+        {"page_number": 2, "image_url": "https://s3.local/redacted/2.png?sig=b"},
     ]
-    return {"status": "success", "result": {"phase": "fill", "pages": pages}} if nested \
-        else {"detect_job_id": "j1", "pages": pages}
+    return {"status": "success", "result": {"output": "urls", "pages": pages}} if nested \
+        else {"output": "urls", "pages": pages}
 
 
 def _parse_result():
@@ -40,29 +40,29 @@ def _parse_result():
 
 
 def _seed_images(mock_api):
-    mock_api.get("https://s3.local/edit/1.png?sig=a").mock(
+    mock_api.get("https://s3.local/redacted/1.png?sig=a").mock(
         return_value=httpx.Response(200, content=PNG))
-    mock_api.get("https://s3.local/edit/2.png?sig=b").mock(
+    mock_api.get("https://s3.local/redacted/2.png?sig=b").mock(
         return_value=httpx.Response(200, content=PNG))
     mock_api.get("https://s3.local/deskewed/org/hash/0.webp?sig=x").mock(
         return_value=httpx.Response(200, content=WEBP))
 
 
-def test_downloads_edit_pages(mock_api, client, tmp_path):
+def test_downloads_redact_pages(mock_api, client, tmp_path):
     _seed_images(mock_api)
 
-    paths = client.download_pages(_edit_result(), tmp_path)
+    paths = client.download_pages(_redact_result(), tmp_path)
 
     assert [p.name for p in paths] == ["page-1.png", "page-2.png"]
     assert paths[0].read_bytes() == PNG
     assert all(p.parent == tmp_path for p in paths)
 
 
-def test_downloads_flattened_edit_result(mock_api, client, tmp_path):
-    """edit() flattens pages to the top level; edit_detect/edit_fill nest them under `result`."""
+def test_downloads_flattened_redact_result(mock_api, client, tmp_path):
+    """The inner payload (envelope already unwrapped) is accepted as well."""
     _seed_images(mock_api)
 
-    paths = client.download_pages(_edit_result(nested=False), tmp_path)
+    paths = client.download_pages(_redact_result(nested=False), tmp_path)
 
     assert [p.name for p in paths] == ["page-1.png", "page-2.png"]
 
@@ -80,7 +80,7 @@ def test_parse_pages_keep_their_own_numbering_and_extension(mock_api, client, tm
 def test_prefix_is_configurable(mock_api, client, tmp_path):
     _seed_images(mock_api)
 
-    paths = client.download_pages(_edit_result(), tmp_path, prefix="filled")
+    paths = client.download_pages(_redact_result(), tmp_path, prefix="filled")
 
     assert [p.name for p in paths] == ["filled-1.png", "filled-2.png"]
 
@@ -89,17 +89,17 @@ def test_creates_the_destination_folder(mock_api, client, tmp_path):
     _seed_images(mock_api)
     dest = tmp_path / "nested" / "out"
 
-    client.download_pages(_edit_result(), dest)
+    client.download_pages(_redact_result(), dest)
 
     assert dest.is_dir()
 
 
 def test_expired_url_reports_as_expired(mock_api, client, tmp_path):
-    mock_api.get("https://s3.local/edit/1.png?sig=a").mock(
+    mock_api.get("https://s3.local/redacted/1.png?sig=a").mock(
         return_value=httpx.Response(403, content=b"<Error>Request has expired</Error>"))
 
     with pytest.raises(HyperAPIError, match="expired"):
-        client.download_pages(_edit_result(), tmp_path)
+        client.download_pages(_redact_result(), tmp_path)
 
 
 def test_result_without_pages_is_rejected(client, tmp_path):
@@ -109,14 +109,14 @@ def test_result_without_pages_is_rejected(client, tmp_path):
 
 
 def test_page_without_image_url_is_rejected(client, tmp_path):
-    result = {"result": {"pages": [{"page": 1, "text": "no image"}]}}
+    result = {"result": {"pages": [{"page_number": 1, "text": "no image"}]}}
 
     with pytest.raises(ValueError, match="include_image"):
         client.download_pages(result, tmp_path)
 
 
 def test_redact_images_are_not_downloadable(client, tmp_path):
-    """redact returns `images` as inline base64 strings — a different shape with nothing to
+    """Inline redact returns `images` as inline base64 strings — a different shape with nothing to
     fetch. It must fail loudly rather than silently write nothing."""
     with pytest.raises(ValueError, match="No 'pages'"):
         client.download_pages({"result": {"images": ["UkVEQUNURUQ="]}}, tmp_path)
@@ -125,18 +125,18 @@ def test_redact_images_are_not_downloadable(client, tmp_path):
 async def test_async_downloads_pages(mock_api, async_client, tmp_path):
     _seed_images(mock_api)
 
-    paths = await async_client.download_pages(_edit_result(), tmp_path)
+    paths = await async_client.download_pages(_redact_result(), tmp_path)
 
     assert [p.name for p in paths] == ["page-1.png", "page-2.png"]
     assert paths[0].read_bytes() == PNG
 
 
 async def test_async_expired_url_reports_as_expired(mock_api, async_client, tmp_path):
-    mock_api.get("https://s3.local/edit/1.png?sig=a").mock(
+    mock_api.get("https://s3.local/redacted/1.png?sig=a").mock(
         return_value=httpx.Response(403, content=b"<Error>Request has expired</Error>"))
 
     with pytest.raises(HyperAPIError, match="expired"):
-        await async_client.download_pages(_edit_result(), tmp_path)
+        await async_client.download_pages(_redact_result(), tmp_path)
 
 
 def _redact_urls_result():

@@ -255,3 +255,117 @@ async def test_async_wait_for_job_still_backs_off_on_rate_window_429(mock_api, a
 
     assert await async_client.wait_for_job(job) == {"ok": 1}
     assert any(2.0 <= s < 3.0 for s in slept), slept
+
+
+# ── 413: upload-size ceiling vs. an operation's page cap ────────────────────
+
+PAGE_CAP_BODY = {
+    "error": {
+        "code": "PAYLOAD_TOO_LARGE",
+        "message": "Document has 80 pages; advanced parse supports at most 60 pages. "
+        "Use mode=fast or split the document.",
+        "details": {"page_count": 80},
+    }
+}
+
+OP_413_CASES = [
+    ("/v1/parse", "submit_parse", "ParseError"),
+    ("/v1/extract", "submit_extract", "ExtractError"),
+    ("/v1/extract-omni", "submit_extract_advanced", "ExtractError"),
+    ("/v1/classify", "submit_classify", "ClassifyError"),
+    ("/v1/split", "submit_split", "SplitError"),
+    ("/v1/redact", "submit_redact", "RedactError"),
+]
+
+
+def _seed_upload_ok(mock_api):
+    mock_api.post("/v1/documents/upload").mock(
+        return_value=_resp(200, {"document_key": "k", "upload_url": "https://s3.local/k", "expires_in": 60})
+    )
+    mock_api.put("https://s3.local/k").mock(return_value=httpx.Response(200))
+
+
+def _assert_page_cap_error(exc, error_name):
+    import hyperapi
+
+    assert type(exc) is getattr(hyperapi, error_name)
+    assert not isinstance(exc, hyperapi.DocumentUploadError)
+    assert exc.status_code == 413
+    assert "at most 60 pages" in str(exc)
+    assert exc.code == "PAYLOAD_TOO_LARGE"
+    assert exc.details == {"page_count": 80}
+
+
+@pytest.mark.parametrize(("endpoint", "method", "error_name"), OP_413_CASES)
+def test_operation_413_raises_the_operation_error(
+    mock_api, client, tiny_pdf, endpoint, method, error_name
+):
+    """A 413 from an operation endpoint is its page cap, not an upload failure."""
+    _seed_upload_ok(mock_api)
+    mock_api.post(endpoint).mock(return_value=_resp(413, PAGE_CAP_BODY))
+
+    with pytest.raises(HyperAPIError) as ei:
+        getattr(client, method)(tiny_pdf)
+
+    _assert_page_cap_error(ei.value, error_name)
+
+
+@pytest.mark.parametrize(("endpoint", "method", "error_name"), OP_413_CASES)
+async def test_async_operation_413_raises_the_operation_error(
+    mock_api, async_client, tiny_pdf, endpoint, method, error_name
+):
+    _seed_upload_ok(mock_api)
+    mock_api.post(endpoint).mock(return_value=_resp(413, PAGE_CAP_BODY))
+
+    with pytest.raises(HyperAPIError) as ei:
+        await getattr(async_client, method)(tiny_pdf)
+
+    _assert_page_cap_error(ei.value, error_name)
+
+
+def test_operation_413_without_a_body_still_names_the_operation(mock_api, client, tiny_pdf):
+    from hyperapi import ParseError
+
+    _seed_upload_ok(mock_api)
+    mock_api.post("/v1/parse").mock(return_value=httpx.Response(413))
+
+    with pytest.raises(ParseError, match="page or size limit for parse") as ei:
+        client.submit_parse(tiny_pdf)
+    assert ei.value.status_code == 413
+
+
+def test_process_413_on_the_shared_upload_path_raises_parse_error(mock_api, client, tiny_pdf):
+    """process() submits with an existing document_key; same rule applies."""
+    from hyperapi import ParseError
+
+    _seed_upload_ok(mock_api)
+    mock_api.post("/v1/parse").mock(return_value=_resp(413, PAGE_CAP_BODY))
+
+    with pytest.raises(ParseError) as ei:
+        client.process(tiny_pdf)
+    assert ei.value.status_code == 413
+
+
+def test_upload_413_stays_a_document_upload_error(mock_api, client, tiny_pdf):
+    from hyperapi import DocumentUploadError
+
+    mock_api.post("/v1/documents/upload").mock(
+        return_value=_resp(413, {"error": {"code": "PAYLOAD_TOO_LARGE", "message": "File exceeds 50 MB limit"}})
+    )
+
+    with pytest.raises(DocumentUploadError, match="50 MB") as ei:
+        client.submit_parse(tiny_pdf)
+    assert ei.value.status_code == 413
+    assert ei.value.code == "PAYLOAD_TOO_LARGE"
+
+
+async def test_async_upload_413_stays_a_document_upload_error(mock_api, async_client, tiny_pdf):
+    from hyperapi import DocumentUploadError
+
+    mock_api.post("/v1/documents/upload").mock(
+        return_value=_resp(413, {"error": {"code": "PAYLOAD_TOO_LARGE", "message": "File exceeds 50 MB limit"}})
+    )
+
+    with pytest.raises(DocumentUploadError, match="50 MB") as ei:
+        await async_client.submit_parse(tiny_pdf)
+    assert ei.value.status_code == 413
