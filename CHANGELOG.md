@@ -32,9 +32,36 @@ First release on PyPI: `pip install hyperapi-sdk`.
 - Async `create_batch_from_files` uploads at most 8 files at once and cancels
   the remaining uploads when one fails.
 - Python 3.13 is supported and tested.
+- `schema` together with `category="financial"` is now sent instead of raising
+  `ValueError`: the API runs the invoice extractor and remaps its output into
+  your template. A `schema` with no `category` is still sent as
+  `"non_financial"` (the template is filled directly).
+- A `413` from an operation (`parse`, `extract`, `extract_advanced`, `classify`,
+  `split`, `redact`, and their `submit_*` twins) raises that operation's error
+  (`ParseError`, `ExtractError`, …) with `status_code == 413` — it is the
+  operation's page cap. Previously it raised `DocumentUploadError`, which is
+  now raised only by the upload step. **Behaviour change:** code that caught
+  `DocumentUploadError` to detect an over-cap document should catch the
+  operation's error (or `HyperAPIError`) and check `status_code == 413`.
+- Batch errors carry `code` and `details`. A `404` from `create_batch` reports
+  the server's message instead of "Batch not found."; `get_batch` and
+  `cancel_batch` are unchanged.
+- `download_pages` documents `parse` and `redact(output="urls")` results; a
+  page is numbered by its `page_number`.
+
+### Removed
+
+- The Edit methods — `edit`, `edit_detect`, `edit_fill`, `submit_edit_detect`,
+  `submit_edit_fill` — and `EditError` are held back until the Edit API is
+  generally available. They were present in GitHub-only 0.7.0 installs and
+  have never been on PyPI. The Edit notes under 0.7.0 below describe that
+  earlier version.
 
 ### Fixed
 
+- An error whose message is a JSON object (for example the quota answer on
+  `create_batch`) is shown as a readable line instead of a Python dict
+  representation; the object is available as `e.details`.
 - `wait_for_batch` retries a transient 5xx or network error during a poll
   instead of aborting the whole wait.
 - Malformed server replies raise the SDK's own errors (with `status_code` and
@@ -49,6 +76,16 @@ First release on PyPI: `pip install hyperapi-sdk`.
   `concurrent.futures` workers.
 - `base_url` accepts an `httpx.URL` (and other non-string values) by converting
   it with `str()`.
+
+### Documentation
+
+- Job-status polls have their own per-organization rate limit and do not use up
+  the plan's request limit; the README and docstrings no longer say they share
+  it.
+- `get_job()` returns a dict (`["status"]`); redact results are read from
+  `result["result"]["pages"]` / `["images"]`; redact's page cap is read with
+  `get_limits()`; advanced parse needs the Plus plan or higher; batches accept
+  `/v1/extract-omni` (advanced extract).
 
 ### Security
 
