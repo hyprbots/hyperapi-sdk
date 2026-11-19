@@ -481,8 +481,17 @@ class AsyncHyperAPIClient:
         if sc == 429:
             raise _rate_limit_error_from(resp, rid)
         if sc == 413:
-            raise DocumentUploadError(
-                _server_message(resp, "File exceeds upload size limit"),
+            # Two different refusals share this status. On the upload endpoint
+            # it is the file-size ceiling (error_cls is DocumentUploadError
+            # there). On an operation endpoint it is that operation's page
+            # cap, so it is raised as the operation's own error class.
+            fallback = (
+                "File exceeds upload size limit"
+                if error_cls is DocumentUploadError
+                else f"Document exceeds the page or size limit for {op_name}"
+            )
+            raise error_cls(
+                _server_message(resp, fallback),
                 status_code=413,
                 request_id=rid,
                 **_error_fields(resp),

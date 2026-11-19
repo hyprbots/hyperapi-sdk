@@ -312,6 +312,12 @@ The same `limits` object rides on every `/v1/documents/upload` response.
 Asynchronous submissions return `200` when the job is *accepted* — the final
 verdict, including a limit rejection, lands on the job record you poll.
 
+A submission the server refuses outright with `413` (a document over the
+operation's page cap) raises that operation's error — `ParseError`,
+`ExtractError`, `ClassifyError`, `SplitError` or `RedactError` — with
+`status_code == 413` and the server's message. `DocumentUploadError` is raised
+only by the upload step, for example a file over `max_upload_bytes`.
+
 ## Extract: Basic vs Advanced
 
 Basic `extract()` runs the tier you select with `category`; **Advanced**
@@ -747,8 +753,8 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `HyperAPIError` | Base — anything not specifically classified |
 | `AuthenticationError` | 401 from server, missing API key |
 | `RateLimitError` | 429 from server (carries `retry_after`, `tier`, `limit`) |
-| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` / `RedactError` | The corresponding op fails |
-| `DocumentUploadError` | Presigned-URL flow or S3 PUT fails |
+| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` / `RedactError` | The corresponding op fails — including a `413` when the document is over that operation's page cap (`status_code == 413`; the message says which limit) |
+| `DocumentUploadError` | The upload step fails: the upload-URL request or the file upload itself, including a file over the upload size limit (`413`) or of an unsupported type (`415`) |
 | `JobTimeoutError` | `wait_for_job` exceeded its timeout (job still running on server) |
 | `JobCancelledError` | The job being waited on was cancelled with `delete_job()` (reported by the API as `failed` with an error starting `cancelled:`); carries `job_id` |
 
