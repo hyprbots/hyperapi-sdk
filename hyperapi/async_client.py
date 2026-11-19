@@ -959,9 +959,10 @@ class AsyncHyperAPIClient:
                     job_id, deadline=deadline, start=start
                 )
             except RateLimitError as e:
-                # The API rate-limits polls and submits together; on the free
-                # tier the submit spent the allowance so the poll 429s. Back off and
-                # resume within the deadline instead of failing the wait.
+                # Status polls have their own per-organization limit, but a
+                # very large number of concurrently polled jobs can still be
+                # throttled. Back off and resume within the deadline instead
+                # of failing the wait.
                 wait = _rate_limit_wait(e, deadline - time.monotonic())
                 if wait is None:
                     raise
@@ -1257,7 +1258,7 @@ class AsyncHyperAPIClient:
         ``parse_mode`` explicitly selects the OCR engine, independent of
         ``category``: ``"fast"`` (fast text extraction) or
         ``"advanced"`` (advanced layout-aware parsing for dense tables/forms —
-        higher accuracy, slower, costs more; available on paid tiers). Omit it
+        higher accuracy, slower, costs more; Plus plan or higher). Omit it
         to use the organization default (platform default: ``"fast"``).
 
         ``schema``: a blank template — the exact shape you want back, with
@@ -1441,17 +1442,18 @@ class AsyncHyperAPIClient:
         """Submit a redact/deidentify job asynchronously and return immediately.
 
 
-        Inline output has a page cap; ``output="urls"`` raises it where your
-        account offers that mode. Both figures vary by plan and are returned
-        by :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
+        A page cap applies to inline output; ``output="urls"`` raises it where
+        your account offers that mode. Read the current values with
+        :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
         and ``limits["redact"]["urls_max_pages"]`` for URL output (absent
         means URL output is not offered — feature-detect on that key).
         ``output="urls"`` returns masked pages as short-lived presigned links
-        in ``result["pages"]`` (``{page_number, image_url}``) instead of inline
-        base64 ``result["images"]`` — ``download_pages()`` accepts that shape
-        directly. An over-cap document returns ``413`` up front, before any
-        OCR is billed; ``output="urls"`` cannot be combined with
-        ``include_logos`` (``400``).
+        in ``result["result"]["pages"]`` (``{page_number, image_url}``)
+        instead of inline base64 ``result["result"]["images"]`` —
+        ``download_pages()`` accepts that result directly. An over-cap
+        document is refused with ``413`` up front, before any OCR is billed,
+        and raises ``RedactError`` (``status_code == 413``);
+        ``output="urls"`` cannot be combined with ``include_logos`` (``400``).
 
         ``mode="redact"`` applies black boxes; ``mode="deidentify"`` overlays
         synthetic values. ``pii_config`` (``{"mode": "extend"|"replace",
@@ -1976,17 +1978,18 @@ class AsyncHyperAPIClient:
         """Redact or deidentify PII in a document. Submits async + polls until done.
 
 
-        Inline output has a page cap; ``output="urls"`` raises it where your
-        account offers that mode. Both figures vary by plan and are returned
-        by :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
+        A page cap applies to inline output; ``output="urls"`` raises it where
+        your account offers that mode. Read the current values with
+        :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
         and ``limits["redact"]["urls_max_pages"]`` for URL output (absent
         means URL output is not offered — feature-detect on that key).
         ``output="urls"`` returns masked pages as short-lived presigned links
-        in ``result["pages"]`` (``{page_number, image_url}``) instead of inline
-        base64 ``result["images"]`` — ``download_pages()`` accepts that shape
-        directly. An over-cap document returns ``413`` up front, before any
-        OCR is billed; ``output="urls"`` cannot be combined with
-        ``include_logos`` (``400``).
+        in ``result["result"]["pages"]`` (``{page_number, image_url}``)
+        instead of inline base64 ``result["result"]["images"]`` —
+        ``download_pages()`` accepts that result directly. An over-cap
+        document is refused with ``413`` up front, before any OCR is billed,
+        and raises ``RedactError`` (``status_code == 413``);
+        ``output="urls"`` cannot be combined with ``include_logos`` (``400``).
 
         ``mode="redact"`` masks PII with black boxes; ``mode="deidentify"``
         overlays synthetic replacements. ``include_logos=True`` also masks logos.

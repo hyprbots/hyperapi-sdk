@@ -285,8 +285,8 @@ while (envelope := client.get_job(job.job_id))["status"] == "pending":
 
 Upload accepts any supported file up to your byte ceiling, but each operation
 enforces its own page ceiling when the document is submitted — **before** any
-billable processing runs. The ceilings depend on your plan, so read them from
-the API instead of hard-coding them:
+billable processing runs. The ceilings can differ by plan and change over time,
+so read them from the API instead of hard-coding them:
 
 ```python
 limits = client.get_limits()
@@ -353,7 +353,7 @@ print(fields["result"]["entities"])
 
 Both also accept `parse_mode` to pick the parse mode — `"fast"`
 (default, quick text extraction) or `"advanced"` (structured output with markdown,
-suited to dense tables and forms; slower, costs more, paid tiers).
+suited to dense tables and forms; slower, costs more, Plus plan or higher).
 It's independent of `category` and of the Basic/Advanced split:
 
 ```python
@@ -394,8 +394,9 @@ of the request.
 
 ## Redact / Deidentify
 
-> Redact has a plan-dependent page cap — over-cap files return `413` before any
-> processing is billed. Read it from `client.get_limits()["redact"]`; see
+> A page cap applies to redact — an over-cap file is refused with `413` (raised
+> as `RedactError`) before any processing is billed. Read the current values
+> with `client.get_limits()["redact"]`; see
 > [Limits by operation](#limits-by-operation).
 
 
@@ -491,7 +492,7 @@ for path in paths:
     submitted[job.job_id] = path        # your own record
 
 for job_id, path in submitted.items():
-    print(path, client.get_job(job_id).status)
+    print(path, client.get_job(job_id)["status"])
 ```
 
 > **Note.** `submit_*` performs the upload internally and does not surface the
@@ -560,7 +561,7 @@ client.extract(file)
 
 This is the pattern used by [LlamaParse](https://docs.llamaindex.ai/en/stable/llama_cloud/llama_parse/) and [Reducto](https://docs.reducto.ai/) for the same reason.
 
-> **Rate limits and polling.** The API rate-limits requests **per organization**, and job-status polls (`GET /v1/jobs/{id}`) count against the same limit as the submit — the window is a rolling 60 seconds. The **free tier allows 1 request per 60 s**, so a submit immediately followed by a poll would otherwise trip a `429`. The SDK handles this for you: when a poll is rate-limited, `wait_for_job` / `wait_for_jobs` / `wait_for_batch` **sleep for the server's `Retry-After` and resume**, rather than failing the call. If the job's remaining `poll_timeout` is shorter than the rate window the call raises `RateLimitError` (with `retry_after` set) so you can wait and resume via `submit_<op>` + `wait_for_job`. A single-shot `get_job()` still raises `RateLimitError` immediately — only the *waiting* helpers back off. On the free tier, prefer one blocking convenience call at a time over manual tight-loop polling.
+> **Rate limits and polling.** The API rate-limits requests **per organization** over a rolling 60-second window; the **free tier allows 1 request per 60 s**. Job-status polls (`GET /v1/jobs/{id}`) have their own generous per-organization limit and do not use up your plan's request limit, so a submit followed by polling does not trip a `429` on its own. Polling a very large number of jobs at the same time can still be throttled; when that happens, `wait_for_job` / `wait_for_jobs` / `wait_for_batch` **sleep for the server's `Retry-After` and resume**, rather than failing the call. If the remaining `poll_timeout` is shorter than that wait, the call raises `RateLimitError` (with `retry_after` set) so you can wait and resume with `wait_for_job`. A single-shot `get_job()` still raises `RateLimitError` immediately — only the *waiting* helpers back off. Submissions are what your plan limits: a rate-limited `submit_<op>` (or convenience call) raises `RateLimitError`, so on the free tier run one operation at a time.
 
 ## Async client
 
@@ -621,12 +622,16 @@ A runnable version (standalone CLI + FastAPI snippet) lives at [`examples/async_
 
 ### Concurrent fan-out
 
-`asyncio.gather` fans out hundreds of in-flight ops on one event loop — no thread pool, no GIL contention:
+`asyncio.gather` runs many operations concurrently on one event loop — no thread pool, no GIL contention:
 
 ```python
 async with AsyncHyperAPIClient() as client:
     results = await asyncio.gather(*(client.extract(p) for p in paths))
 ```
+
+Each submission counts against your plan's request limit, so size the fan-out to
+it: a submission over the limit raises `RateLimitError` (with `retry_after`).
+The status polls behind each call have their own limit and do not add to it.
 
 ### Notes on parity
 

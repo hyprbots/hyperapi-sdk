@@ -109,8 +109,8 @@ ExtractCategory = Literal["financial", "non_financial"]
 # Per-HTTP-call defaults — single submit / single poll, NOT total job time.
 _DEFAULT_TIMEOUT = 120.0
 
-# Polling defaults. Long-running document jobs can take up to an hour, so the
-# SDK deadline is deliberately longer than a typical interactive request.
+# Polling defaults. Document jobs can run for many minutes, so the SDK
+# deadline is deliberately longer than a typical interactive request.
 _DEFAULT_POLL_INTERVAL_S = 3.0
 _DEFAULT_POLL_TIMEOUT_S = 3600.0
 _DEFAULT_POLL_MAX_TRANSIENT_RETRIES = 3
@@ -809,9 +809,11 @@ def _transient_delay(
 def _rate_limit_wait(err: RateLimitError, remaining: float) -> float | None:
     """Decide how to handle a 429 raised *during a poll loop*.
 
-    The API rate-limits polls and submits together — so on the free tier
-    (1 req / 60 s) the submit spends the allowance and the first poll(s) 429. That's transient: the window clears, so the poll
-    loop should sleep ``Retry-After`` and resume rather than fail the whole wait.
+    Job-status polls have their own per-organization limit, separate from
+    the plan's request limit, but a very large number of concurrently polled
+    jobs can still be throttled. That's transient: the window clears, so the
+    poll loop should sleep ``Retry-After`` and resume rather than fail the
+    whole wait.
 
     Returns the seconds to sleep before re-polling, or ``None`` when the caller
     should re-raise the ``RateLimitError`` instead: either the job's remaining
@@ -903,9 +905,9 @@ class HyperAPIClient:
                 playground).
             poll_timeout: Total wall-clock seconds the SDK will wait for a
                 single job to complete. Raises ``JobTimeoutError`` past this.
-                Default 3600.0 (60 min) — covers the maximum server-side
-                async job budget. The dashboard playground deliberately
-                stays at 30 min; see the module-level note.
+                Default 3600.0 (60 min) — longer than the server-side
+                job budget, so an ordinary job finishes or fails before
+                the SDK stops waiting.
             poll_max_transient_retries: How many times to retry a single
                 ``/v1/jobs/{id}`` (or batch status) GET if it returns 5xx or
                 has a connection error. Default 3. Every 4xx fails fast, and
@@ -1688,9 +1690,10 @@ class HyperAPIClient:
                     job_id, deadline=deadline, start=start
                 )
             except RateLimitError as e:
-                # The API rate-limits polls and submits together; on the free
-                # tier the submit spent the allowance so the poll 429s. Back off and
-                # resume within the deadline instead of failing the wait.
+                # Status polls have their own per-organization limit, but a
+                # very large number of concurrently polled jobs can still be
+                # throttled. Back off and resume within the deadline instead
+                # of failing the wait.
                 wait = _rate_limit_wait(e, deadline - time.monotonic())
                 if wait is None:
                     raise
@@ -1777,9 +1780,10 @@ class HyperAPIClient:
                         jobs_list[idx].job_id, deadline=deadline, start=start
                     )
                 except RateLimitError as e:
-                    # Polls and submits share one rate limit: one 429 means the
-                    # window is spent for everyone this pass. Sleep Retry-After once, keep
-                    # this and all not-yet-polled jobs pending, and retry.
+                    # Every poll here draws on the same per-organization poll
+                    # limit: one 429 means the window is spent for all of them
+                    # this pass. Sleep Retry-After once, keep this and all
+                    # not-yet-polled jobs pending, and retry.
                     wait = _rate_limit_wait(e, deadline - time.monotonic())
                     if wait is None:
                         raise
@@ -2026,7 +2030,7 @@ class HyperAPIClient:
         ``parse_mode`` explicitly selects the OCR engine, independent of
         ``category``: ``"fast"`` (fast text extraction) or
         ``"advanced"`` (advanced layout-aware parsing for dense tables/forms —
-        higher accuracy, slower, costs more; available on paid tiers). Omit it
+        higher accuracy, slower, costs more; Plus plan or higher). Omit it
         to use the organization default (platform default: ``"fast"``).
 
         ``schema``: a blank template — the exact shape you want back, with
@@ -2210,17 +2214,18 @@ class HyperAPIClient:
         """Submit a redact/deidentify job asynchronously and return immediately.
 
 
-        Inline output has a page cap; ``output="urls"`` raises it where your
-        account offers that mode. Both figures vary by plan and are returned
-        by :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
+        A page cap applies to inline output; ``output="urls"`` raises it where
+        your account offers that mode. Read the current values with
+        :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
         and ``limits["redact"]["urls_max_pages"]`` for URL output (absent
         means URL output is not offered — feature-detect on that key).
         ``output="urls"`` returns masked pages as short-lived presigned links
-        in ``result["pages"]`` (``{page_number, image_url}``) instead of inline
-        base64 ``result["images"]`` — ``download_pages()`` accepts that shape
-        directly. An over-cap document returns ``413`` up front, before any
-        OCR is billed; ``output="urls"`` cannot be combined with
-        ``include_logos`` (``400``).
+        in ``result["result"]["pages"]`` (``{page_number, image_url}``)
+        instead of inline base64 ``result["result"]["images"]`` —
+        ``download_pages()`` accepts that result directly. An over-cap
+        document is refused with ``413`` up front, before any OCR is billed,
+        and raises ``RedactError`` (``status_code == 413``);
+        ``output="urls"`` cannot be combined with ``include_logos`` (``400``).
 
         ``mode="redact"`` applies black boxes; ``mode="deidentify"`` overlays
         synthetic values. ``pii_config`` (``{"mode": "extend"|"replace",
@@ -2726,17 +2731,18 @@ class HyperAPIClient:
         """Redact or deidentify PII in a document. Submits async + polls until done.
 
 
-        Inline output has a page cap; ``output="urls"`` raises it where your
-        account offers that mode. Both figures vary by plan and are returned
-        by :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
+        A page cap applies to inline output; ``output="urls"`` raises it where
+        your account offers that mode. Read the current values with
+        :py:meth:`get_limits`: ``limits["redact"]["max_pages"]`` for inline
         and ``limits["redact"]["urls_max_pages"]`` for URL output (absent
         means URL output is not offered — feature-detect on that key).
         ``output="urls"`` returns masked pages as short-lived presigned links
-        in ``result["pages"]`` (``{page_number, image_url}``) instead of inline
-        base64 ``result["images"]`` — ``download_pages()`` accepts that shape
-        directly. An over-cap document returns ``413`` up front, before any
-        OCR is billed; ``output="urls"`` cannot be combined with
-        ``include_logos`` (``400``).
+        in ``result["result"]["pages"]`` (``{page_number, image_url}``)
+        instead of inline base64 ``result["result"]["images"]`` —
+        ``download_pages()`` accepts that result directly. An over-cap
+        document is refused with ``413`` up front, before any OCR is billed,
+        and raises ``RedactError`` (``status_code == 413``);
+        ``output="urls"`` cannot be combined with ``include_logos`` (``400``).
 
         ``mode="redact"`` masks PII with black boxes; ``mode="deidentify"``
         overlays synthetic replacements. ``include_logos=True`` also detects and
