@@ -1242,7 +1242,7 @@ class AsyncHyperAPIClient:
         ``category`` selects the Basic extractor. Omit it to use the organization
         default (platform default: ``"financial"``). ``"financial"`` (
         the built-in invoice and receipt fields) or ``"non_financial"``
-        (extract-fast — see ``schema`` below). For auto-detecting Advanced
+        (template-driven — see ``schema`` below). For auto-detecting Advanced
         extraction, use :py:meth:`submit_extract_advanced`.
 
         ``parse_mode`` explicitly selects the OCR engine, independent of
@@ -1251,37 +1251,34 @@ class AsyncHyperAPIClient:
         higher accuracy, slower, costs more; available on paid tiers). Omit it
         to use the organization default (platform default: ``"fast"``).
 
-        ``schema`` (``category="non_financial"`` only): a blank template —
-        the exact shape you want back, with ``None``/``False``/``"unselected"``
-        as placeholders, e.g. ``{"patient_name": None, "insurance":
-        {"Medicare": "unselected", "Self-Pay": "unselected"}}``. Pass it as an
-        already-loaded dict, a ``str`` of JSON text, or a ``pathlib.Path``
-        to a JSON file. A ``str`` is always parsed as JSON and never read as a
-        file name — to load a file, pass ``pathlib.Path("template.json")``.
-        The response fills in that SAME structure from the document.
-        Ephemeral — used for this call only, nothing is stored server-side;
-        pass a different ``schema`` next call for a different shape, no
-        merge/versioning to reason about. Omit to use this org's stored
-        default template instead (set up separately, offline).
+        ``schema``: a blank template — the exact shape you want back, with
+        ``None``/``False``/``"unselected"`` as placeholders, e.g.
+        ``{"patient_name": None, "insurance": {"Medicare": "unselected",
+        "Self-Pay": "unselected"}}``. Pass it as an already-loaded dict, a
+        ``str`` of JSON text, or a ``pathlib.Path`` to a JSON file. A ``str``
+        is always parsed as JSON and never read as a file name — to load a
+        file, pass ``pathlib.Path("template.json")``. With
+        ``category="non_financial"`` the template is filled directly from the
+        document. With ``category="financial"`` the invoice extractor runs and
+        its output is remapped into your template. A ``schema`` with no
+        ``category`` is sent as ``"non_financial"``. Ephemeral — used for this
+        call only, nothing is stored server-side; pass a different ``schema``
+        next call for a different shape, no merge/versioning to reason about.
+        Omit entirely to use this org's stored default template instead (set
+        up separately, offline).
         """
         path = self._resolve_path(file_path)
         resolved_schema = _load_schema(schema)
-        # The API applies `schema` to non_financial only; on financial it is
-        # ignored server-side. Silently dropping it would return plausible
-        # output shaped by a different extractor, with nothing to tell the
-        # caller their template never applied — so this fails loudly instead.
-        if resolved_schema is not None and category == "financial":
-            raise ValueError(
-                'schema applies to category="non_financial" only '
-                f'(got category="{category}")'
-            )
-        # A schema with no declared category: send non_financial explicitly rather
-        # than deferring. The SDK cannot read the organization default (that endpoint is
-        # dashboard-only, unreachable with an API key), so deferring would risk resolving
-        # to financial — where the server ignores `schema` silently and the caller
-        # gets invoice-shaped output with no indication their template was dropped.
-        # Passing a schema is only meaningful on non_financial, so inferring it is
-        # faithful to the caller's intent and closes the one undetectable failure.
+        # `schema` is honoured on both categories: non_financial fills the
+        # template directly, financial runs the invoice extractor and remaps
+        # its output into the template. An explicit category is sent as given.
+        #
+        # A schema with no declared category: send non_financial explicitly
+        # rather than deferring. The two categories treat a template
+        # differently, and the SDK cannot read the organization default, so
+        # deferring would make the same call behave differently per account.
+        # Filling the template directly is the plain reading of "here is the
+        # shape I want"; callers who want the invoice extractor say so.
         effective_category = (
             "non_financial" if category is None and resolved_schema is not None else category
         )
@@ -1797,7 +1794,7 @@ class AsyncHyperAPIClient:
         built-in invoice and receipt fields. Omit ``category`` to use the
         organization default (platform default: ``"financial"``; a ``schema``
         with no ``category`` is sent as ``"non_financial"``). ``category="non_financial"``
-        is extract-fast: no document-type detection; pass ``schema`` to
+        does no document-type detection; pass ``schema`` to
         describe the documents — a blank
         template with ``None``/``False``/``"unselected"`` as placeholders
         (e.g. ``{"patient_name": None, "insurance": {"Medicare":
@@ -1810,8 +1807,10 @@ class AsyncHyperAPIClient:
         stored default template instead (set up separately, offline — not
         through this SDK); with no schema and no stored default, this
         currently falls back to a generic extraction (a known gap, not yet
-        unified with this flow). For auto-detecting Advanced extraction (no
-        ``category`` needed), use :py:meth:`extract_advanced`.
+        unified with this flow). ``schema`` also works with
+        ``category="financial"``: the invoice extractor runs and its output
+        is remapped into your template. For auto-detecting Advanced
+        extraction (no ``category`` needed), use :py:meth:`extract_advanced`.
 
         Returns:
             Response envelope. For ``category="financial"``: the structured
@@ -1820,7 +1819,7 @@ class AsyncHyperAPIClient:
             ``result["result"]["line_items"]`` (per-line rows), and
             ``result["result"]["summary"]`` (document-level totals/tax/currency —
             e.g. the grand total lives here, ``summary["total_amount"]``, NOT in
-            entities). For ``category="non_financial"`` (extract-fast): the
+            entities). For ``category="non_financial"``: the
             filled-in template is at ``result["result"]["data"]`` (same shape
             as ``schema``, or the org's stored default). Raw OCR is at the
             envelope top level, ``result["ocr_text"]``, in both cases.

@@ -9,10 +9,10 @@ Omission is the mechanism — the same one `parse_mode` already uses two lines d
 `process()` has always omitted it, so before this change the SDK's two extract
 paths disagreed with each other for the same document.
 
-The guard is the subtle part. It used to raise whenever `category != "non_financial"`,
-which under a None default would reject the exact call this change exists to enable:
-a template with no declared category. It now fires only on an explicitly-financial
-call — a self-contradiction the SDK can prove without knowing anything about the org.
+A template with no declared category is sent as "non_financial" (filled
+directly). An explicit category is always sent as given, template or not: the
+API applies a template on "financial" too, by remapping the invoice extractor's
+output into it.
 """
 
 import json
@@ -63,25 +63,26 @@ class TestSchemaWithoutACategory:
         assert json.dumps(TEMPLATE) in body or "listings" in body
 
     def test_it_is_inferred_rather_than_deferred(self, mock_api, client, tiny_pdf):
-        """non_financial is sent EXPLICITLY, not omitted. Deferring would risk an
-        org whose default is financial, where the server ignores `schema` silently
-        — invoice-shaped output with nothing to tell the caller their template was
-        dropped. The SDK cannot detect that (the organization default is dashboard-only), so it
-        infers from the one signal it has: a schema is meaningful on non_financial
-        alone."""
+        """non_financial is sent EXPLICITLY, not omitted. The two categories treat
+        a template differently (filled directly vs. invoice output remapped into
+        it), and the SDK cannot read the organization default, so deferring would
+        make the same call behave differently per account."""
         _seed_presigned(mock_api)
         submit, _ = _seed_completed(mock_api, job_id="j_sch3", path="/v1/extract")
         client.extract(tiny_pdf, schema=TEMPLATE)
         assert "category" in submit.calls[0].request.url.params
 
 
-class TestTheGuardStillCatchesTheContradiction:
-    def test_schema_with_explicit_financial_raises(self, client, tiny_pdf):
-        """The caller wrote category="financial" AND passed a template. That is
-        self-contradictory regardless of org state, so it stays a loud failure."""
-        try:
-            client.extract(tiny_pdf, category="financial", schema=TEMPLATE)
-        except ValueError as exc:
-            assert "non_financial" in str(exc)
-        else:
-            raise AssertionError("expected ValueError for schema + category='financial'")
+class TestAnExplicitCategoryIsRespected:
+    def test_schema_with_explicit_financial_is_sent_as_financial(
+        self, mock_api, client, tiny_pdf
+    ):
+        """The caller wrote category="financial" AND passed a template. The API
+        runs the invoice extractor and remaps its output into the template, so
+        the SDK sends both as given — no inference, no refusal."""
+        _seed_presigned(mock_api)
+        submit, _ = _seed_completed(mock_api, job_id="j_fin_sch", path="/v1/extract")
+        client.extract(tiny_pdf, category="financial", schema=TEMPLATE)
+        request = submit.calls[0].request
+        assert request.url.params["category"] == "financial"
+        assert "schema=" in request.content.decode()
