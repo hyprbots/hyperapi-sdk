@@ -1521,8 +1521,16 @@ class AsyncHyperAPIClient:
             raise AuthenticationError(
                 "Invalid API key.", status_code=401, request_id=rid
             )
-        if resp.status_code == 404:
-            raise HyperAPIError("Batch not found.", status_code=404, request_id=rid)
+        if resp.status_code == 404 and path != "/v1/batch":
+            # Only an id-addressed call (GET/DELETE /v1/batch/{id}) can mean
+            # "no such batch". A 404 on the collection itself falls through
+            # and reports what the server said.
+            raise HyperAPIError(
+                "Batch not found.",
+                status_code=404,
+                request_id=rid,
+                **_error_fields(resp),
+            )
         if resp.status_code == 429:
             raise _rate_limit_error_from(resp, rid)
         if resp.status_code >= 400:
@@ -1532,6 +1540,7 @@ class AsyncHyperAPIClient:
                 ),
                 status_code=resp.status_code,
                 request_id=rid,
+                **_error_fields(resp),
             )
         return _json_object(resp, request_id=rid, required=required, what="batch")
 
@@ -1554,8 +1563,10 @@ class AsyncHyperAPIClient:
         for per-document results (each result lands in S3, keyed by ``doc_index``).
 
         Args:
-            endpoint: One of ``/v1/parse``, ``/v1/extract``, ``/v1/classify``,
-                ``/v1/split``, ``/v1/redact``.
+            endpoint: One of ``/v1/parse``, ``/v1/extract``,
+                ``/v1/extract-omni`` (advanced extract), ``/v1/classify``,
+                ``/v1/split``, ``/v1/redact``. The API rejects any other
+                value with a ``400``.
             document_keys: Keys from :meth:`upload_document`, one per document.
             options: Task-specific options, forwarded to each document's run.
             parse_mode: ``fast`` (default) or ``advanced``, for ``/v1/parse`` only.

@@ -302,6 +302,27 @@ def _safe_text(response: httpx.Response) -> str:
         return ""
 
 
+def _dict_message(body: dict) -> str:
+    """One readable line for an error body that is itself a JSON object.
+
+    Prefers a human string under ``message`` / ``detail`` / ``error``; with
+    none, summarises the object as ``key=value`` pairs so an exception never
+    shows a Python dict repr.
+    """
+    for key in ("message", "detail", "error"):
+        text = body.get(key)
+        if isinstance(text, str) and text.strip():
+            return text
+    parts = []
+    for key, value in body.items():
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, separators=(",", ":"), default=str)
+        parts.append(f"{key}={value}")
+    return ", ".join(parts)
+
+
 def _server_error(response: httpx.Response) -> tuple[str | None, str | None, dict | None]:
     """Decode the API's error envelope into ``(message, code, details)``.
 
@@ -312,6 +333,9 @@ def _server_error(response: httpx.Response) -> tuple[str | None, str | None, dic
     behind a refusal. Parsing stays tolerant of other shapes — a bare
     ``{"message": ...}`` or ``{"detail": ...}`` from an intermediary, or a
     non-JSON body — so a proxy error page never turns into a parse failure.
+    Where the human text is itself an object (a structured refusal such as a
+    quota answer), the message is a readable line built from it and the
+    object is returned as ``details``.
     Every field returned is API-key-scrubbed; each is ``None`` when absent.
     """
     body = _safe_text(response)
@@ -339,7 +363,22 @@ def _server_error(response: httpx.Response) -> tuple[str | None, str | None, dic
             # Prefer the nested human text over stringifying the whole dict
             # (which would surface a Python dict repr like "{'code': ...}").
             text = val.get("message") or val.get("detail") or val.get("error")
-            val = text if text else str(val)
+            if isinstance(text, dict):
+                # The text slot holds a structured refusal, e.g.
+                # {"error": {"code": ..., "message": {"error": "quota_exceeded", ...}}}.
+                nested_code = text.get("code")
+                if isinstance(nested_code, str) and code is None:
+                    code = nested_code
+                if details is None:
+                    details = text
+                text = _dict_message(text)
+            elif details is None and inner_code is None and not isinstance(
+                val.get("message"), str
+            ):
+                # A bare object that is not the standard envelope, e.g.
+                # {"detail": {"error": "quota_exceeded", "list_price_cents": 5}}.
+                details = val
+            val = text if text else _dict_message(val)
         if message is None:
             message = _strip_api_key(str(val))
     if code is None:
@@ -2251,8 +2290,16 @@ class HyperAPIClient:
             raise AuthenticationError(
                 "Invalid API key.", status_code=401, request_id=rid
             )
-        if resp.status_code == 404:
-            raise HyperAPIError("Batch not found.", status_code=404, request_id=rid)
+        if resp.status_code == 404 and path != "/v1/batch":
+            # Only an id-addressed call (GET/DELETE /v1/batch/{id}) can mean
+            # "no such batch". A 404 on the collection itself falls through
+            # and reports what the server said.
+            raise HyperAPIError(
+                "Batch not found.",
+                status_code=404,
+                request_id=rid,
+                **_error_fields(resp),
+            )
         if resp.status_code == 429:
             raise _rate_limit_error_from(resp, rid)
         if resp.status_code >= 400:
@@ -2262,6 +2309,7 @@ class HyperAPIClient:
                 ),
                 status_code=resp.status_code,
                 request_id=rid,
+                **_error_fields(resp),
             )
         return _json_object(resp, request_id=rid, required=required, what="batch")
 
@@ -2284,8 +2332,10 @@ class HyperAPIClient:
         for per-document results (each result lands in S3, keyed by ``doc_index``).
 
         Args:
-            endpoint: One of ``/v1/parse``, ``/v1/extract``, ``/v1/classify``,
-                ``/v1/split``, ``/v1/redact``.
+            endpoint: One of ``/v1/parse``, ``/v1/extract``,
+                ``/v1/extract-omni`` (advanced extract), ``/v1/classify``,
+                ``/v1/split``, ``/v1/redact``. The API rejects any other
+                value with a ``400``.
             document_keys: Keys from :meth:`upload_document`, one per document.
             options: Task-specific options, forwarded to each document's run.
             parse_mode: ``fast`` (default) or ``advanced``, for ``/v1/parse`` only.

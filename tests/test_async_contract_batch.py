@@ -62,3 +62,31 @@ async def test_get_batch_404_raises(async_client, mock_api):
     )
     with pytest.raises(HyperAPIError):
         await async_client.get_batch("missing")
+
+
+async def test_create_batch_402_object_body_is_readable(async_client, mock_api):
+    from tests.test_contract_batch import QUOTA_402, _assert_readable_quota_error
+
+    mock_api.post("/v1/batch").mock(return_value=httpx.Response(402, json=QUOTA_402))
+    with pytest.raises(HyperAPIError) as ei:
+        await async_client.create_batch(endpoint="/v1/parse", document_keys=["k1"])
+    _assert_readable_quota_error(ei.value)
+
+
+async def test_create_batch_404_is_not_reported_as_batch_not_found(async_client, mock_api):
+    mock_api.post("/v1/batch").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Document not found: k1"}})
+    )
+    with pytest.raises(HyperAPIError) as ei:
+        await async_client.create_batch(endpoint="/v1/parse", document_keys=["k1"])
+    assert "Batch not found" not in str(ei.value)
+    assert "Document not found: k1" in str(ei.value)
+
+
+async def test_id_addressed_404_is_still_batch_not_found(async_client, mock_api):
+    mock_api.get("/v1/batch/missing").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Batch not found"}})
+    )
+    with pytest.raises(HyperAPIError, match="Batch not found") as ei:
+        await async_client.get_batch("missing")
+    assert ei.value.code == "NOT_FOUND"

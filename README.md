@@ -506,7 +506,7 @@ for job_id, path in submitted.items():
 Process many documents in one async job. You submit already-uploaded documents,
 get a `batch_id` back immediately, and poll (or wait) for per-document results —
 the work runs on spare capacity, so it never competes with your interactive
-calls. Supported endpoints: `/v1/parse`, `/v1/extract`, `/v1/classify`, `/v1/split`, `/v1/redact`.
+calls. Supported endpoints: `/v1/parse`, `/v1/extract`, `/v1/extract-omni` (advanced extract), `/v1/classify`, `/v1/split`, `/v1/redact`.
 
 For `/v1/parse` batches, `parse_mode="advanced"` requests advanced parsing.
 Advanced parse in a batch is plan-dependent: a batch that asks for it may be
