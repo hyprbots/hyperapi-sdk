@@ -53,6 +53,7 @@ Inside FastAPI::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -86,6 +87,7 @@ from .client import (
     _check_download_reply,
     _check_page_cap,
     _check_server_url,
+    _next_presigned_hop,
     _clean_api_key,
     _download_transport_error,
     _error_fields,
@@ -143,6 +145,24 @@ async def _bounded_map(
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
 
+
+@contextlib.asynccontextmanager
+async def _stream_presigned_get(client: httpx.AsyncClient, url: str, *, base_url: str):
+    """Async twin of ``client._stream_presigned_get``: every redirect hop is
+    checked for https before it is requested."""
+    resp = await client.send(
+        client.build_request("GET", url), stream=True, follow_redirects=False
+    )
+    try:
+        hops = 0
+        while resp.next_request is not None:
+            hops += 1
+            nxt = _next_presigned_hop(resp, hops, base_url=base_url)
+            await resp.aclose()
+            resp = await client.send(nxt, stream=True, follow_redirects=False)
+        yield resp
+    finally:
+        await resp.aclose()
 
 class AsyncHyperAPIClient:
     """Async client for the HyperAPI document intelligence platform.
@@ -2072,9 +2092,9 @@ class AsyncHyperAPIClient:
         partial = _partial_path(path)
         try:
             # Presigned URLs carry their own SigV4 signature — send no API-key headers.
-            # follow_redirects: S3 answers a cross-region GET with a 307 to the regional
-            # endpoint, which would otherwise surface as a baffling "HTTP 307".
-            async with self._client.stream("GET", url, follow_redirects=True) as resp:
+            # Redirects are followed (S3 answers a cross-region GET with a 307 to the
+            # regional endpoint), each hop checked for https before it is requested.
+            async with _stream_presigned_get(self._client, url, base_url=self.base_url) as resp:
                 _check_download_reply(
                     resp, path, base_url=self.base_url, max_page_bytes=max_page_bytes
                 )

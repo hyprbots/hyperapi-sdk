@@ -29,6 +29,7 @@ Pipeline (server-side, transparent to callers):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -636,6 +637,44 @@ def _check_server_url(
         "Presigned URLs from the API are always https; plain http is accepted only "
         "when base_url itself is http (local testing)."
     )
+
+
+# Redirects a presigned GET may follow (S3 sends one 307 to the regional endpoint).
+_MAX_PRESIGNED_REDIRECTS = 5
+
+
+def _next_presigned_hop(resp: httpx.Response, hops: int, *, base_url: str) -> httpx.Request:
+    """The redirect target of ``resp``, checked BEFORE it is requested.
+
+    Redirects are followed by hand rather than with ``follow_redirects=True``,
+    so the https rule applies to every hop: an https -> http -> https chain is
+    refused before the plain-http request is sent, not only judged by its
+    final URL.
+    """
+    if hops > _MAX_PRESIGNED_REDIRECTS:
+        raise HyperAPIError(
+            f"Refusing a page image download: more than {_MAX_PRESIGNED_REDIRECTS} redirects."
+        )
+    nxt = resp.next_request
+    assert nxt is not None  # the caller loops only while there is one
+    _check_server_url(str(nxt.url), base_url=base_url, what="page image redirect")
+    return nxt
+
+
+@contextlib.contextmanager
+def _stream_presigned_get(client: httpx.Client, url: str, *, base_url: str):
+    """Stream a presigned GET, following redirects hop by hop (see above)."""
+    resp = client.send(client.build_request("GET", url), stream=True, follow_redirects=False)
+    try:
+        hops = 0
+        while resp.next_request is not None:
+            hops += 1
+            nxt = _next_presigned_hop(resp, hops, base_url=base_url)
+            resp.close()
+            resp = client.send(nxt, stream=True, follow_redirects=False)
+        yield resp
+    finally:
+        resp.close()
 
 
 def _regular_file(file_path: str | Path) -> Path:
@@ -2823,9 +2862,9 @@ class HyperAPIClient:
         partial = _partial_path(path)
         try:
             # Presigned URLs carry their own SigV4 signature — send no API-key headers.
-            # follow_redirects: S3 answers a cross-region GET with a 307 to the regional
-            # endpoint, which would otherwise surface as a baffling "HTTP 307".
-            with self._client.stream("GET", url, follow_redirects=True) as resp:
+            # Redirects are followed (S3 answers a cross-region GET with a 307 to the
+            # regional endpoint), each hop checked for https before it is requested.
+            with _stream_presigned_get(self._client, url, base_url=self.base_url) as resp:
                 _check_download_reply(
                     resp, path, base_url=self.base_url, max_page_bytes=max_page_bytes
                 )

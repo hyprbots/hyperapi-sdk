@@ -730,3 +730,51 @@ def test_download_writes_atomically_via_rename(mock_api, client, tmp_path, monke
     client.download_pages(_pages("https://s3.local/1.png"), tmp_path)
     [(src, dst)] = calls
     assert dst == "page-1.png" and src.startswith(".page-1.png.") and src.endswith(".part")
+
+
+# ── Presigned redirects: every hop is checked before it is requested ─────────
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+async def test_https_http_https_redirect_chain_never_sends_the_http_hop(cls, tmp_path):
+    """https -> http -> https: the plain-http request is refused BEFORE it is sent,
+    not judged by the (https) final URL after the fact."""
+    c = cls(api_key=KEY, base_url=HTTPS_BASE)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://s3.local/1.png").mock(return_value=httpx.Response(
+            302, headers={"Location": "http://mid.local/1.png"}))
+        mid = router.get("http://mid.local/1.png").mock(return_value=httpx.Response(
+            302, headers={"Location": "https://s3.local/final.png"}))
+        final = router.get("https://s3.local/final.png").mock(
+            return_value=httpx.Response(200, content=PNG))
+        with pytest.raises(HyperAPIError, match="redirect"):
+            await _invoke(c.download_pages, _pages("https://s3.local/1.png"), tmp_path)
+        assert mid.call_count == 0
+        assert final.call_count == 0
+    assert _leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("cls", [HyperAPIClient, AsyncHyperAPIClient])
+async def test_presigned_redirect_loop_is_capped(cls, tmp_path):
+    c = cls(api_key=KEY, base_url=HTTPS_BASE)
+    with respx.mock(assert_all_called=False) as router:
+        loop = router.get("https://s3.local/1.png").mock(return_value=httpx.Response(
+            307, headers={"Location": "https://s3.local/1.png"}))
+        with pytest.raises(HyperAPIError, match="redirects"):
+            await _invoke(c.download_pages, _pages("https://s3.local/1.png"), tmp_path)
+        assert loop.call_count == 6  # the first request + 5 followed hops
+    assert _leftovers(tmp_path) == []
+
+
+async def test_async_https_to_http_redirect_refused(tmp_path):
+    c = AsyncHyperAPIClient(api_key=KEY, base_url=HTTPS_BASE)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://s3.local/1.png").mock(return_value=httpx.Response(
+            302, headers={"Location": "http://evil.local/1.png"}))
+        evil = router.get("http://evil.local/1.png").mock(
+            return_value=httpx.Response(200, content=PNG))
+        with pytest.raises(HyperAPIError, match="redirect"):
+            await c.download_pages(_pages("https://s3.local/1.png"), tmp_path)
+        assert evil.call_count == 0
+    assert _leftovers(tmp_path) == []
+
