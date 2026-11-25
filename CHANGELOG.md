@@ -89,6 +89,13 @@ First release on PyPI: `pip install hyperapi-sdk`.
 
 ### Security
 
+- `download_pages` follows redirects of a presigned image URL one hop at a time and
+  checks each hop for https before it is requested (at most 5 hops). Before, only the
+  final URL was checked, so an https → http → https chain sent one plain-http request.
+- API keys are now scrubbed from every string inside an exception's `details`, as they
+  already were from its message.
+- The release job runs `twine check --strict` on the built files and refuses a `v*` tag
+  whose commit is not on `main`.
 - A `str` schema can no longer make the SDK read and upload a local file, so an
   application forwarding user-supplied schema text cannot be steered into
   sending files from its host.

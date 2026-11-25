@@ -3,8 +3,14 @@
 # hash-pinned version below is exactly what builds the release. It must
 # satisfy the range in pyproject.toml [build-system] requires.
 #
-# Regenerate with Python 3.12 (the release job's Python):
-#   pip-compile --generate-hashes --allow-unsafe \
+# twine runs `twine check --strict` on the built files before they are uploaded.
+#
+# Regenerate for the release job's platform (Linux, Python 3.12). The job
+# installs with --no-deps, so the lock must hold the full Linux closure;
+# resolving on macOS would drop Linux-only dependencies:
+#   uv pip compile --generate-hashes --python-version 3.12 \
+#     --python-platform x86_64-unknown-linux-gnu --exclude-newer <date 2+ weeks ago> \
 #     --output-file .github/build-requirements.txt .github/build-requirements.in
 build
 setuptools
+twine
