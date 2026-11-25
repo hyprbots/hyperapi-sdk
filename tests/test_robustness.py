@@ -778,3 +778,35 @@ async def test_async_https_to_http_redirect_refused(tmp_path):
         assert evil.call_count == 0
     assert _leftovers(tmp_path) == []
 
+
+# ── error.details is scrubbed of API keys like the message ───────────────────
+
+
+def test_details_are_scrubbed_of_api_keys():
+    err = HyperAPIError(
+        "boom",
+        details={
+            "echo": "header was hk_live_abcDEF123_secret",
+            "nested": {"keys": ["hk_test_zzz999", 7, None]},
+            "pages_used": 12,
+        },
+    )
+    assert err.details == {
+        "echo": "header was hk_***redacted",
+        "nested": {"keys": ["hk_***redacted", 7, None]},
+        "pages_used": 12,
+    }
+    assert "hk_live_" not in repr(pickle.loads(pickle.dumps(err)).details)
+
+
+def test_details_none_stays_none():
+    assert HyperAPIError("boom").details is None
+
+
+def test_error_envelope_details_from_server_are_scrubbed(mock_api, client):
+    mock_api.get(url__regex=r".*/v1/jobs/.*").mock(return_value=httpx.Response(
+        400, json={"error": {"code": "bad", "message": "no",
+                             "details": {"sent": "hk_live_" + "Q" * 30}}}))
+    with pytest.raises(HyperAPIError) as ei:
+        client.get_job("job-1")
+    assert ei.value.details == {"sent": "hk_***redacted"}

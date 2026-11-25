@@ -34,6 +34,18 @@ def _strip_api_key(text: object) -> str | None:
     return _API_KEY_PATTERN.sub("hk_***redacted", text)
 
 
+def _scrub_details(value: object) -> object:
+    """Scrub API keys from every string inside ``error.details`` (nested dicts
+    and lists included). Non-string leaves are kept as they are."""
+    if isinstance(value, str):
+        return _strip_api_key(value)
+    if isinstance(value, dict):
+        return {k: _scrub_details(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub_details(v) for v in value]
+    return value
+
+
 def _rebuild_error(cls: type, message: str) -> HyperAPIError:
     """Unpickle helper: recreate ``cls`` without running its ``__init__``.
 
@@ -79,7 +91,8 @@ class HyperAPIError(Exception):
         self.status_code = status_code
         self.request_id = request_id
         self.code = code
-        self.details = details
+        # A server that echoes the request header inside details must not leak the key.
+        self.details = _scrub_details(details) if details is not None else None
         super().__init__(self.message)
 
     def __reduce__(self):
