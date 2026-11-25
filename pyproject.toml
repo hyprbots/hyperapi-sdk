@@ -1,5 +1,10 @@
 [build-system]
-requires = ["setuptools>=77.0", "wheel"]
+# A range, not an exact pin: source installs (`pip install -e .`, building the
+# sdist) must work on every supported Python, and current setuptools needs 3.10+.
+# The release itself is built with --no-isolation from the hash-locked
+# .github/build-requirements.txt, so that file decides which setuptools builds
+# the published wheel. setuptools builds wheels itself; `wheel` is not needed.
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,7 +16,8 @@ requires-python = ">=3.9"
 authors = [
     {name = "HyperAPI", email = "research@hyperbots.com"}
 ]
-license = "MIT"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -21,6 +27,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]

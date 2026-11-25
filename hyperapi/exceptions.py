@@ -17,13 +17,45 @@ import re
 _API_KEY_PATTERN = re.compile(r"hk_(?:live|test|service)_[A-Za-z0-9_\-]+")
 
 
-def _strip_api_key(text: str | None) -> str | None:
+def _strip_api_key(text: object) -> str | None:
     """Scrub `hk_live_*` / `hk_test_*` / `hk_service_*` substrings from server
     messages before they end up in exception text. Defends against the rare
-    server response that echoes the request header into the error body."""
+    server response that echoes the request header into the error body.
+
+    Non-string input (a server that sends ``error`` as an object) is
+    converted with ``str()`` first, so it is scrubbed too instead of raising.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        text = str(text)
     if not text:
         return text
     return _API_KEY_PATTERN.sub("hk_***redacted", text)
+
+
+def _scrub_details(value: object) -> object:
+    """Scrub API keys from every string inside ``error.details`` (nested dicts
+    and lists included). Non-string leaves are kept as they are."""
+    if isinstance(value, str):
+        return _strip_api_key(value)
+    if isinstance(value, dict):
+        return {k: _scrub_details(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub_details(v) for v in value]
+    return value
+
+
+def _rebuild_error(cls: type, message: str) -> HyperAPIError:
+    """Unpickle helper: recreate ``cls`` without running its ``__init__``.
+
+    Subclasses take keyword-only arguments (``job_id``, ``elapsed_s``, ...),
+    so the default ``cls(*args)`` unpickling would fail. The instance
+    attributes are restored from the pickled ``__dict__`` afterwards.
+    """
+    err = cls.__new__(cls)
+    Exception.__init__(err, message)
+    return err
 
 
 class HyperAPIError(Exception):
@@ -59,8 +91,14 @@ class HyperAPIError(Exception):
         self.status_code = status_code
         self.request_id = request_id
         self.code = code
-        self.details = details
+        # A server that echoes the request header inside details must not leak the key.
+        self.details = _scrub_details(details) if details is not None else None
         super().__init__(self.message)
+
+    def __reduce__(self):
+        # Exceptions cross process boundaries (multiprocessing, concurrent.futures,
+        # Celery); every attribute must survive the round trip.
+        return (_rebuild_error, (type(self), self.message), self.__dict__.copy())
 
 
 class AuthenticationError(HyperAPIError):
@@ -204,15 +242,6 @@ class SplitError(HyperAPIError):
 
 class RedactError(HyperAPIError):
     """Raised when redaction/deidentification fails (sync HTTP error or job status=failed)."""
-    pass
-
-
-class EditError(HyperAPIError):
-    """Raised when form detect/fill fails (sync HTTP error or job status=failed).
-
-    Covers both legs of the two-call edit flow — `/v1/edit/detect` and
-    `/v1/edit/fill` — since they share one job taxonomy server-side.
-    """
     pass
 
 

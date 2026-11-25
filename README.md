@@ -5,12 +5,12 @@
 </p>
 <p align="center">
   <a href="https://github.com/hyprbots/hyperapi-sdk"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+"></a>
-  <a href="https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a>
+  <a href="https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
 </p>
 
 ---
 
-**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Classify, Split, Redact, Edit, and more APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
+**HyperAPI-SDK** is a document intelligence framework composed of Parse, Extract, Classify, Split, Redact, and more APIs. Whether you are dealing with low-quality scans or complex multi-document binders, HyperAPI is engineered for production-grade reliability.
 
 ## Architecture
 
@@ -95,10 +95,17 @@ client = HyperAPIClient()
 # Process a financial document (parse + extract in one call)
 result = client.process("invoice.png")
 
-print(result["data"]["invoice_number"])  # "7816"
-print(result["data"]["line_items"])      # Validated line items
-print(result["data"]["total"])           # "$1,800.00"
+print(result["ocr"])                           # parsed text of the document
+fields = result["data"]["result"]              # extracted fields
+print(fields["entities"])                      # header and party fields
+print(fields["line_items"])                    # validated line items
+print(fields["summary"])                       # totals, tax and currency
 ```
+
+These fields come from the financial extractor, which is the default. If your
+organization's default extract category is set to `non_financial`, the fields are
+under `result["data"]["result"]["data"]` instead; call `client.extract(...,
+category="financial")` to choose explicitly.
 
 ## Two-Step Pipeline
 
@@ -278,8 +285,8 @@ while (envelope := client.get_job(job.job_id))["status"] == "pending":
 
 Upload accepts any supported file up to your byte ceiling, but each operation
 enforces its own page ceiling when the document is submitted — **before** any
-billable processing runs. The ceilings depend on your plan, so read them from
-the API instead of hard-coding them:
+billable processing runs. The ceilings can differ by plan and change over time,
+so read them from the API instead of hard-coding them:
 
 ```python
 limits = client.get_limits()
@@ -305,6 +312,12 @@ The same `limits` object rides on every `/v1/documents/upload` response.
 Asynchronous submissions return `200` when the job is *accepted* — the final
 verdict, including a limit rejection, lands on the job record you poll.
 
+A submission the server refuses outright with `413` (a document over the
+operation's page cap) raises that operation's error — `ParseError`,
+`ExtractError`, `ClassifyError`, `SplitError` or `RedactError` — with
+`status_code == 413` and the server's message. `DocumentUploadError` is raised
+only by the upload step, for example a file over `max_upload_bytes`.
+
 ## Extract: Basic vs Advanced
 
 Basic `extract()` runs the tier you select with `category`; **Advanced**
@@ -327,6 +340,12 @@ fields = client.extract(
 )
 print(fields["result"]["data"])
 
+# The schema can also come from a JSON file: pass a Path.
+# A plain str is always read as JSON text, never as a file name.
+from pathlib import Path
+fields = client.extract("policy.pdf", category="non_financial",
+                        schema=Path("schema.json"))
+
 # Advanced — auto-detects the type, no category to pick
 fields = client.extract_advanced("mixed_document.pdf")
 print(fields["result"]["entities"])
@@ -334,7 +353,7 @@ print(fields["result"]["entities"])
 
 Both also accept `parse_mode` to pick the parse mode — `"fast"`
 (default, quick text extraction) or `"advanced"` (structured output with markdown,
-suited to dense tables and forms; slower, costs more, paid tiers).
+suited to dense tables and forms; slower, costs more, Plus plan or higher).
 It's independent of `category` and of the Basic/Advanced split:
 
 ```python
@@ -375,8 +394,9 @@ of the request.
 
 ## Redact / Deidentify
 
-> Redact has a plan-dependent page cap — over-cap files return `413` before any
-> processing is billed. Read it from `client.get_limits()["redact"]`; see
+> A page cap applies to redact — an over-cap file is refused with `413` (raised
+> as `RedactError`) before any processing is billed. Read the current values
+> with `client.get_limits()["redact"]`; see
 > [Limits by operation](#limits-by-operation).
 
 
@@ -405,155 +425,23 @@ client.redact(
 )
 ```
 
-## Edit (form detect + fill)
-
-The edit API is not enabled for every account: where it is off, `edit_detect()`,
-`edit_fill()` and `edit()` raise `EditError("The edit API is not available for
-this account.")`.
-
-Detect every blank fillable field on a form, then draw values onto it and get
-back rendered page images. A two-call flow: `edit_detect()` returns the schema,
-`edit_fill()` renders — the schema and page images stay server-side, so you only
-ever carry the field list and your values.
-
-```python
-# One call — detect + natural-language fill. `content` only: this call is detecting
-# the schema for the first time, so there are no field indices for you to key
-# `values` by yet. Use the two legs below to fill by index.
-result = client.edit("intake_form.pdf", content="Patient is Jane Doe, DOB 1985-04-02")
-print(result["form_schema"])        # every detected field, in fill-index order
-print(result["fills"])              # what the model mapped onto each field
-print(result["pages"][0]["image_url"])
-print(result["detect_job_id"])      # reuse it to correct values — no re-detect, no re-charge
-```
-
-The two legs separately, for the human-in-the-loop flow — show the user what was
-detected, let them correct the mapped values, re-render:
-
-```python
-detected = client.edit_detect("intake_form.pdf", markdown_assist=True)
-schema = detected["result"]["form_schema"]
-job_id = detected["detect_job_id"]
-
-# 1. Model maps free text onto the schema — returns `fills` for review
-proposed = client.edit_fill(job_id, content="Jane Doe, female, +1 302 405 1234",
-                            natural_language=True)
-
-# 2. User edits a value → resubmit ALL values deterministically (no model call)
-final = client.edit_fill(job_id, values={"0": "Jane A. Doe", "3": "X"})
-for page in final["result"]["pages"]:
-    print(page["page"], page["image_url"])
-```
-
-A field's **position in `form_schema` is its fill index**. `values` accepts either
-`{"0": "Jane"}` or `[{"index": 0, "value": "Jane"}]`. `markdown_assist=True` uses
-advanced parsing for detection — more precise on dense forms, slower.
-
-### `edit_detect` — input / output
-
-| Argument | Type | Default | |
-|---|---|---|---|
-| `file_path` | `str \| Path` | *required* | PDF or image to detect on |
-| `markdown_assist` | `bool` | `False` | More precise detection on dense forms. Also changes the returned image: `True` on a scan yields the **straightened** page, so pixel dimensions differ from `False` |
-| `use_presigned` | `bool` | `True` | Upload via presigned URL rather than multipart |
-| `poll_timeout` / `poll_interval` | `float \| None` | `None` | Override the client's polling defaults |
-
-```jsonc
-{
-  "status": "success", "task": "edit", "request_id": "req-…",
-  "detect_job_id": "job_…",              // added by the SDK — pass to edit_fill
-  "result": {
-    "phase": "detect",                   // "detect" | "fill"
-    "page_count": 2,
-    "pages": [
-      { "page": 1,
-        "image_url": "https://s3…?sig=…", // presigned, ~15 min
-        "size": { "w": 1195, "h": 1536 } }
-    ],
-    "form_schema": [
-      { "field_name": "PATIENT INTAKE FORM:First Name",
-        "description": "Enter the patient's first name.",
-        "type": "text",                  // text|checkbox|radio|dropdown|signature
-        "bbox": { "left": 0.35, "top": 0.12, "width": 0.55,
-                  "height": 0.03, "page": 1 } }
-    ]
-  }
-}
-```
-
-`bbox` is **normalized 0..1**, origin top-left, relative to `pages[bbox.page - 1]` — so it
-scales to whatever size you display the image at. There is **no `fills`** on this leg;
-nothing has been drawn yet. The envelope also carries the usual `model_used`, `duration_ms`
-and `metadata`, plus a legacy `mode` that is now always `null`.
-
-### `edit_fill` — input / output
-
-| Argument | Type | Default | |
-|---|---|---|---|
-| `detect_job_id` | `str` | *required* | From `edit_detect`; valid **24 h** |
-| `values` | `dict \| list \| None` | `None` | Required when `natural_language=False`. `{"0": "Jane"}` or `[{"index": 0, "value": "Jane"}]` |
-| `content` | `str \| None` | `None` | Required when `natural_language=True` — and it must be passed **with** that flag, or the call raises |
-| `natural_language` | `bool` | `False` | `False` draws `values` verbatim (no model call); `True` maps `content` onto the schema (one model call) |
-
-```jsonc
-{
-  "status": "success", "task": "edit", "request_id": "req-…",
-  "result": {
-    "phase": "fill",
-    "pages": [ { "page": 1, "image_url": "https://s3…?sig=…",
-                 "size": { "w": 1195, "h": 1536 } } ],
-    "fills": [ { "index": 0, "value": "Jane" } ]
-  }
-}
-```
-
-Note the differences from the detect leg: `fills` **is** present (it's the only place you
-see what was actually drawn, including the model's mapping in `natural_language` mode),
-and `form_schema` is **not** echoed back — you already hold it.
-
-`edit()` flattens both legs into one flat dict instead of the envelope:
-`{"detect_job_id", "form_schema", "fills", "pages"}`, where `pages` are the **filled** ones.
-
-> Page images come back as **short-lived presigned `image_url`s**, not bytes.
-> Download them promptly; re-polling the job with `get_job()` mints fresh URLs.
-
-Billing: charged once at **detect** (by page count). The fill leg is included, so
-re-rendering after a user correction costs nothing.
-
 ## Saving page images
 
-`download_pages()` writes any result's page images into a folder, so you don't have
-to chase presigned URLs before they expire. It works with the blank pages from
-`edit_detect()`, the rendered ones from `edit_fill()` / `edit()`, and with
-`parse(include_image=True)`.
+`download_pages()` writes a result's page images into a folder, so you don't have
+to chase presigned URLs before they expire. It works with `parse()` results that
+carry page images (on by default) and with `redact(output="urls")`.
 
 ```python
-detected = client.edit_detect("intake_form.pdf")
-client.download_pages(detected, "out/blank")                    # out/blank/page-1.png …
+parsed = client.parse("contract.pdf")
+paths = client.download_pages(parsed, "out/pages")
+print(paths)                                             # [PosixPath('out/pages/page-1.webp'), …]
 
-# Deterministic fill — you supply the values (no model call)
-filled = client.edit_fill(detected["detect_job_id"], values={"0": "Jane"})
-paths = client.download_pages(filled, "out/filled", prefix="filled")
-print(paths)                                                    # [PosixPath('out/filled/filled-1.png'), …]
-
-# Natural-language fill — one model call maps the text onto the schema.
-# `content` needs natural_language=True; on its own it raises (the default mode expects `values`).
-described = client.edit_fill(
-    detected["detect_job_id"],
-    content="Patient is Jane Doe, DOB 1985-04-02, phone +1 302 405 1234",
-    natural_language=True,
-)
-print(described["result"]["fills"])                             # what the model mapped, for review
-client.download_pages(described, "out/described", prefix="nl")  # out/described/nl-1.png …
-
-# One-shot detect + fill. Its pages sit at the top level, not under "result" —
-# download_pages() accepts either nesting.
-result = client.edit("intake_form.pdf", content="Patient is Jane Doe, DOB 1985-04-02")
-client.download_pages(result, "out/oneshot")                    # out/oneshot/page-1.png …
+masked = client.redact("contract.pdf", output="urls")
+client.download_pages(masked, "out/masked", prefix="masked")   # out/masked/masked-1.png …
 ```
 
 The folder is created if missing, files are named `<prefix>-<page number>.<ext>`, and the
-extension follows what the server actually served — `.png` for edit, `.webp` for parse.
+extension follows what the server actually served — `.webp` for parse, `.png` for redact.
 On the async client it's the same call with `await`, and pages download concurrently.
 
 If the URLs have already expired you get a clear error rather than a bare 403 — re-poll
@@ -604,7 +492,7 @@ for path in paths:
     submitted[job.job_id] = path        # your own record
 
 for job_id, path in submitted.items():
-    print(path, client.get_job(job_id).status)
+    print(path, client.get_job(job_id)["status"])
 ```
 
 > **Note.** `submit_*` performs the upload internally and does not surface the
@@ -619,7 +507,7 @@ for job_id, path in submitted.items():
 Process many documents in one async job. You submit already-uploaded documents,
 get a `batch_id` back immediately, and poll (or wait) for per-document results —
 the work runs on spare capacity, so it never competes with your interactive
-calls. Supported endpoints: `/v1/parse`, `/v1/extract`, `/v1/classify`, `/v1/split`, `/v1/redact`.
+calls. Supported endpoints: `/v1/parse`, `/v1/extract`, `/v1/extract-omni` (advanced extract), `/v1/classify`, `/v1/split`, `/v1/redact`.
 
 For `/v1/parse` batches, `parse_mode="advanced"` requests advanced parsing.
 Advanced parse in a batch is plan-dependent: a batch that asks for it may be
@@ -673,7 +561,7 @@ client.extract(file)
 
 This is the pattern used by [LlamaParse](https://docs.llamaindex.ai/en/stable/llama_cloud/llama_parse/) and [Reducto](https://docs.reducto.ai/) for the same reason.
 
-> **Rate limits and polling.** The API rate-limits requests **per organization**, and job-status polls (`GET /v1/jobs/{id}`) count against the same limit as the submit — the window is a rolling 60 seconds. The **free tier allows 1 request per 60 s**, so a submit immediately followed by a poll would otherwise trip a `429`. The SDK handles this for you: when a poll is rate-limited, `wait_for_job` / `wait_for_jobs` / `wait_for_batch` **sleep for the server's `Retry-After` and resume**, rather than failing the call. If the job's remaining `poll_timeout` is shorter than the rate window the call raises `RateLimitError` (with `retry_after` set) so you can wait and resume via `submit_<op>` + `wait_for_job`. A single-shot `get_job()` still raises `RateLimitError` immediately — only the *waiting* helpers back off. On the free tier, prefer one blocking convenience call at a time over manual tight-loop polling.
+> **Rate limits and polling.** The API rate-limits requests **per organization** over a rolling 60-second window; the **free tier allows 1 request per 60 s**. Job-status polls (`GET /v1/jobs/{id}`) have their own generous per-organization limit and do not use up your plan's request limit, so a submit followed by polling does not trip a `429` on its own. Polling a very large number of jobs at the same time can still be throttled; when that happens, `wait_for_job` / `wait_for_jobs` / `wait_for_batch` **sleep for the server's `Retry-After` and resume**, rather than failing the call. If the remaining `poll_timeout` is shorter than that wait, the call raises `RateLimitError` (with `retry_after` set) so you can wait and resume with `wait_for_job`. A single-shot `get_job()` still raises `RateLimitError` immediately — only the *waiting* helpers back off. Submissions are what your plan limits: a rate-limited `submit_<op>` (or convenience call) raises `RateLimitError`, so on the free tier run one operation at a time.
 
 ## Async client
 
@@ -734,16 +622,20 @@ A runnable version (standalone CLI + FastAPI snippet) lives at [`examples/async_
 
 ### Concurrent fan-out
 
-`asyncio.gather` fans out hundreds of in-flight ops on one event loop — no thread pool, no GIL contention:
+`asyncio.gather` runs many operations concurrently on one event loop — no thread pool, no GIL contention:
 
 ```python
 async with AsyncHyperAPIClient() as client:
     results = await asyncio.gather(*(client.extract(p) for p in paths))
 ```
 
+Each submission counts against your plan's request limit, so size the fan-out to
+it: a submission over the limit raises `RateLimitError` (with `retry_after`).
+The status polls behind each call have their own limit and do not add to it.
+
 ### Notes on parity
 
-- **`wait_for_jobs([...])`** uses `asyncio.gather` under the hood — true concurrent polling. On timeout the first job to fail raises a `JobTimeoutError` and the rest are cancelled. (The sync client's "comma-joined `'A,B'` job_id" shape is async-specific divergence — see the CHANGELOG.)
+- **`wait_for_jobs([...])`** uses `asyncio.gather` under the hood — true concurrent polling, with each job given the full timeout. The first job to fail or time out raises, and the rest are cancelled; a timeout raises `JobTimeoutError` whose `job_id` is that one job's id. The sync client shares one deadline across all jobs instead, and on timeout raises a single `JobTimeoutError` whose `job_id` is the comma-joined ids of every job still pending (for example `"A,B"`).
 - **Submit-and-poll is identical** — `AsyncHyperAPIClient.submit_extract(...)` returns the same `Job` dataclass; `await client.wait_for_job(job)` blocks the coroutine without blocking the event loop.
 - **`User-Agent`** carries an `-async` suffix so server-side analytics can split traffic by client type.
 
@@ -824,12 +716,9 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `classify(file)` | OCR → classification | Classify document type. Submit + poll. |
 | `split(file)` | OCR → document splitting | Split multi-document binders. Submit + poll. |
 | `redact(file)` | OCR → redaction | Mask or deidentify PII (and optionally logos). Submit + poll. |
-| `edit_detect(file)` | form-field detection | Detect blank fillable fields → `form_schema` + page images. Submit + poll. |
-| `edit_fill(detect_job_id, *, values=… \| content=…)` | form fill | Draw values onto a detected form → rendered pages. Submit + poll. |
-| `edit(file, *, content=…)` | detect → fill | Both legs in one call. Content-only — no `values`, since this call is detecting the schema for the first time. |
-| `download_pages(result, dir)` | — | Write any result's page images to a folder (edit legs, or `parse(include_image=True)`). |
+| `download_pages(result, dir, *, max_page_bytes=200 MiB)` | — | Write a result's page images to a folder (`parse()` with page images, or `redact(output="urls")`). A page larger than `max_page_bytes` raises `HyperAPIError` and leaves no file. |
 | `process(file)` | OCR → parse + extract | Combined parse + extract sharing one upload. Submit + poll on both legs. |
-| `submit_parse / submit_extract / submit_extract_advanced / submit_classify / submit_split / submit_redact / submit_edit_detect / submit_edit_fill` | OCR (+ task) | Submit asynchronously, return a `Job` immediately. |
+| `submit_parse / submit_extract / submit_extract_advanced / submit_classify / submit_split / submit_redact` | OCR (+ task) | Submit asynchronously, return a `Job` immediately. |
 | `get_job(job_id)` | — | One-shot status poll. No waiting, no retry. |
 | `get_limits()` | — | Your account's effective upload and per-operation ceilings (`GET /v1/limits`). |
 | `list_recent_jobs(*, limit=20, source=None)` | — | List the org's recent jobs (summary rows, newest first). |
@@ -851,18 +740,16 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `groups_profile` (parse) | `"A"` \| `"B"` \| `None` | `None` (API default: `"A"`) | parse — how `groups[]` is built; see the fast-mode response shape above |
 | `force_refresh` | `bool` | `False` | parse / extract / extract_advanced / classify / split / redact — re-run instead of returning the cached result (a forced run is billed) |
 | `category` (extract) | `"financial"` \| `"non_financial"` \| `None` | `None` (organization default; platform default `"financial"`; `"non_financial"` if `schema` is given) | extract — Basic extractor profile; `extract_advanced()` auto-detects instead (no `category`) |
-| `schema` (extract) | `dict \| str \| Path \| None` | `None` | Basic + Other only (`category="non_financial"`): blank JSON template that defines the output shape for this request |
+| `schema` (extract) | `dict \| str \| Path \| None` | `None` | extract — blank JSON template that defines the output shape for this request. With `category="non_financial"` the template is filled directly; with `category="financial"` the invoice extractor runs and its output is remapped into your template. A `schema` with no `category` is sent as `"non_financial"`. A `str` is parsed as JSON text; pass a `pathlib.Path` to load a JSON file |
 | `mode` (classify / split) | `str` | `"default"` | classify / split — task selector |
 | `mode` (redact) | `"redact"` \| `"deidentify"` | `"redact"` | redact |
 | `output` (redact) | `"inline"` \| `"urls"` | `"inline"` | redact — `"urls"` returns masked pages as presigned `pages[*].image_url` links with a higher page cap, where offered; other values raise `ValueError` client-side |
 | `options` | `dict \| None` | `None` | classify / split — service knobs, sent as a JSON form field |
 | `pii_config` / `include_logos` | `dict \| None` / `bool` | `None` / `False` | redact |
 | `source` (list_recent_jobs) | `"api"` \| `"playground"` \| `None` | `None` | list_recent_jobs — channel filter; omitted returns all channels |
-| `markdown_assist` | `bool` | `False` | edit_detect / edit — more precise detection on dense forms (slower) |
-| `values` / `content` | `dict \| list \| None` / `str \| None` | `None` | edit_fill / edit — deterministic values vs. natural-language text (exactly one) |
-| `use_presigned` | `bool` | `True` | parse / extract / classify / split / redact / edit_detect |
-| `poll_timeout` | `float` | constructor's | parse / extract / classify / split / redact / process / edit* |
-| `poll_interval` | `float` | constructor's | parse / extract / classify / split / redact / process / edit* |
+| `use_presigned` | `bool` | `True` | parse / extract / classify / split / redact |
+| `poll_timeout` | `float` | constructor's | parse / extract / classify / split / redact / process |
+| `poll_interval` | `float` | constructor's | parse / extract / classify / split / redact / process |
 
 ### Exceptions
 
@@ -871,13 +758,15 @@ Every method below exists on both clients with identical signatures. On `AsyncHy
 | `HyperAPIError` | Base — anything not specifically classified |
 | `AuthenticationError` | 401 from server, missing API key |
 | `RateLimitError` | 429 from server (carries `retry_after`, `tier`, `limit`) |
-| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` / `RedactError` / `EditError` | The corresponding op fails. `EditError` is also raised with "not available for this account" where the edit API is not enabled |
-| `DocumentUploadError` | Presigned-URL flow or S3 PUT fails |
+| `ParseError` / `ExtractError` / `ClassifyError` / `SplitError` / `RedactError` | The corresponding op fails — including a `413` when the document is over that operation's page cap (`status_code == 413`; the message says which limit) |
+| `DocumentUploadError` | The upload step fails: the upload-URL request or the file upload itself, including a file over the upload size limit (`413`) or of an unsupported type (`415`) |
 | `JobTimeoutError` | `wait_for_job` exceeded its timeout (job still running on server) |
 | `JobCancelledError` | The job being waited on was cancelled with `delete_job()` (reported by the API as `failed` with an error starting `cancelled:`); carries `job_id` |
 
 Every exception carries `status_code` (HTTP status if applicable), `request_id`
-(the `X-Request-ID` we sent — paste it into a support ticket) and `code`, the
+(the `X-Request-ID` the SDK sent — include it when you open a
+[GitHub issue](https://github.com/hyprbots/hyperapi-sdk/issues) or contact
+support at hyperapi-support@hyperbots.com) and `code`, the
 machine-readable error code from the API's error envelope when one was
 returned (for example `page_quota_exceeded`), otherwise `None`. A quota
 exhaustion (`code == "page_quota_exceeded"`) is not retried: the waiting
@@ -916,11 +805,11 @@ export SSL_CERT_FILE=/path/to/corporate-ca.pem
 If your environment routes through a SOCKS proxy, install the socks extra:
 
 ```bash
-pip install ".[socks]"
+pip install "hyperapi-sdk[socks]"
 ```
 
 ### Logging
-Customers opt into SDK logs at any level:
+You can turn on SDK logs at any level:
 
 ```python
 import logging
@@ -930,13 +819,14 @@ logging.getLogger("hyperapi").setLevel(logging.INFO)
 The SDK never logs API keys, file contents, or presigned-URL signatures.
 
 ### Idempotency
-The SDK does **not** auto-retry submit POSTs. Resubmitting after a transient failure would create a duplicate job and bill twice. Customers wrap their own retry logic if needed; the polling loop already retries transient failures during `GET /v1/jobs/{id}`.
+The SDK does **not** auto-retry submit POSTs. Resubmitting after a transient failure would create a duplicate job and bill twice. If you need retries on submit, wrap the call in your own retry logic; the polling loop already retries transient failures during `GET /v1/jobs/{id}`.
 
 ## Tutorials
 
 | Tutorial | Description |
 |----------|-------------|
 | [`tutorial/The_Billing_Typo.ipynb`](https://github.com/hyprbots/hyperapi-sdk/blob/main/tutorial/The_Billing_Typo.ipynb) | Compare HyperAPI vs GPT-4, Claude, Gemini on extraction task when typos are present|
+| [`tutorial/HyperAPI_SDK_Walkthrough.ipynb`](https://github.com/hyprbots/hyperapi-sdk/blob/main/tutorial/HyperAPI_SDK_Walkthrough.ipynb) | One sample document through parse, classify, split, redact, extract and batch, with the response shape printed at each step |
 
 ## Papers
 If you use **HyperAPI** or ideas related to its document intelligence and validation pipeline in your research, please cite the following papers:
@@ -970,7 +860,7 @@ pytest tests/ -v
 
 ## License
 
-MIT License - see [LICENSE](https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE) for details.
+Apache License 2.0 - see [LICENSE](https://github.com/hyprbots/hyperapi-sdk/blob/main/LICENSE) and [NOTICE](https://github.com/hyprbots/hyperapi-sdk/blob/main/NOTICE) for details.
 
 ## Links
 

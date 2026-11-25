@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        python: ["3.9", "3.10", "3.11", "3.12"]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -55,12 +55,25 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          # Full history, so the next step can prove the tag is on main.
+          fetch-depth: 0
+
+      - name: Verify the tagged commit is on main
+        # Only admins can create v* tags, but nothing else stops an admin from
+        # tagging a commit that never went through review on main.
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tagged commit $GITHUB_SHA is not on main. Tag a commit from main."
+            exit 1
+          fi
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install "build==1.6.1" "twine==7.0.0"
+      - name: Install build tools (hash-locked)
+        # build, setuptools, twine and their dependencies, each pinned by hash. With
+        # --no-isolation below, this setuptools is the one that builds the wheel.
+        run: pip install --require-hashes --no-deps -r .github/build-requirements.txt
 
       - name: Verify tag matches package version
         run: |
@@ -75,10 +88,11 @@ jobs:
           fi
 
       - name: Build wheel + sdist
-        run: python -m build
+        run: python -m build --no-isolation
 
-      - name: Validate metadata + README rendering
-        run: twine check dist/*
+      - name: Check the built files (twine check --strict)
+        # Metadata and README rendering, before anything reaches the publish job.
+        run: python -m twine check --strict dist/*
 
       - name: Upload built files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

@@ -141,3 +141,99 @@ def test_wait_for_batch_backs_off_on_429_then_completes(client, mock_api, monkey
 
     assert out["status"] == "completed"
     assert any(2.0 <= s < 3.0 for s in slept), slept   # Retry-After + jitter
+
+
+# ── error bodies ─────────────────────────────────────────────────────────────
+
+# The quota refusal on POST /v1/batch: the human-text slot of the envelope
+# holds an object, not a string.
+QUOTA_402 = {
+    "error": {
+        "code": "PAYMENT_REQUIRED",
+        "message": {
+            "error": "quota_exceeded",
+            "list_price_cents": 120,
+            "list_price_micros": 1200000,
+        },
+    }
+}
+
+
+def _assert_readable_quota_error(exc):
+    text = str(exc)
+    assert "quota_exceeded" in text
+    assert "{" not in text and "'" not in text      # no Python dict repr
+    assert exc.status_code == 402
+    assert exc.code == "PAYMENT_REQUIRED"
+    assert exc.details == QUOTA_402["error"]["message"]
+
+
+def test_create_batch_402_object_body_is_readable(client, mock_api):
+    mock_api.post("/v1/batch").mock(return_value=httpx.Response(402, json=QUOTA_402))
+    with pytest.raises(HyperAPIError) as ei:
+        client.create_batch(endpoint="/v1/parse", document_keys=["k1"])
+    _assert_readable_quota_error(ei.value)
+
+
+def test_batch_error_object_without_text_is_summarised(client, mock_api):
+    """No message/detail/error string inside: fall back to key=value pairs."""
+    mock_api.post("/v1/batch").mock(
+        return_value=httpx.Response(
+            402, json={"detail": {"list_price_cents": 120, "reason_code": 7, "extra": None}}
+        )
+    )
+    with pytest.raises(HyperAPIError) as ei:
+        client.create_batch(endpoint="/v1/parse", document_keys=["k1"])
+    assert str(ei.value).startswith("list_price_cents=120, reason_code=7")
+    assert "{" not in str(ei.value)
+    assert ei.value.details == {"list_price_cents": 120, "reason_code": 7, "extra": None}
+
+
+def test_batch_error_carries_code_and_details(client, mock_api):
+    mock_api.post("/v1/batch").mock(
+        return_value=httpx.Response(
+            400,
+            json={"error": {"code": "invalid_endpoint", "message": "Unsupported endpoint", "details": {"endpoint": "/v1/x"}}},
+        )
+    )
+    with pytest.raises(HyperAPIError, match="Unsupported endpoint") as ei:
+        client.create_batch(endpoint="/v1/x", document_keys=["k1"])
+    assert ei.value.code == "invalid_endpoint"
+    assert ei.value.details == {"endpoint": "/v1/x"}
+
+
+def test_create_batch_404_is_not_reported_as_batch_not_found(client, mock_api):
+    """POST /v1/batch addresses no batch, so a 404 there means something else."""
+    mock_api.post("/v1/batch").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Document not found: k1"}})
+    )
+    with pytest.raises(HyperAPIError) as ei:
+        client.create_batch(endpoint="/v1/parse", document_keys=["k1"])
+    assert ei.value.status_code == 404
+    assert "Batch not found" not in str(ei.value)
+    assert "Document not found: k1" in str(ei.value)
+    assert ei.value.code == "NOT_FOUND"
+
+
+def test_id_addressed_404_is_still_batch_not_found(client, mock_api):
+    mock_api.get("/v1/batch/missing").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Batch not found"}})
+    )
+    mock_api.delete("/v1/batch/missing").mock(
+        return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "Batch not found"}})
+    )
+    for call in (client.get_batch, client.cancel_batch):
+        with pytest.raises(HyperAPIError, match="Batch not found") as ei:
+            call("missing")
+        assert ei.value.status_code == 404
+        assert ei.value.code == "NOT_FOUND"
+
+
+def test_create_batch_accepts_the_advanced_extract_endpoint(client, mock_api):
+    route = mock_api.post("/v1/batch").mock(
+        return_value=httpx.Response(
+            202, json={"batch_id": "b2", "status": "queued", "total_items": 1}
+        )
+    )
+    client.create_batch(endpoint="/v1/extract-omni", document_keys=["k1"])
+    assert json.loads(route.calls.last.request.content)["endpoint"] == "/v1/extract-omni"

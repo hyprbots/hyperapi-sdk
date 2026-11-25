@@ -1,12 +1,10 @@
-"""Contract: extract-fast's ``schema`` template (#30 follow-up).
+"""Contract: the ``schema`` template on Basic extract.
 
 ``schema`` is a blank JSON object the result is filled into. It reaches the
-API as a ``schema`` form field on POST /v1/extract and only means anything
-on ``category="non_financial"`` — the API ignores it everywhere else.
-
-The gating tests matter more than the happy path: a template that is silently
-ignored produces plausible-looking output that answers a different question,
-with nothing to tell the caller their template did not apply.
+API as a ``schema`` form field on POST /v1/extract. With
+``category="non_financial"`` the template is filled directly; with
+``category="financial"`` the invoice extractor runs and its output is remapped
+into the template. Either way the SDK sends it — it never drops a template.
 """
 
 import json
@@ -109,11 +107,18 @@ class TestSchemaResolution:
 
 
 class TestSchemaGating:
-    """The API applies `schema` to non_financial only."""
+    """`schema` is sent with whichever category the caller chose."""
 
-    def test_schema_with_financial_category_is_rejected(self, client, tiny_pdf):
-        with pytest.raises(ValueError, match="non_financial"):
-            client.submit_extract(tiny_pdf, category="financial", schema=TEMPLATE)
+    def test_schema_with_financial_category_is_sent(self, mock_api, client, tiny_pdf):
+        """The API applies a template on financial too (the invoice extractor's
+        output is remapped into it), so the SDK must not refuse the pair."""
+        _seed_presigned(mock_api)
+        route = _seed_submit(mock_api)
+
+        client.submit_extract(tiny_pdf, category="financial", schema=TEMPLATE)
+
+        assert route.calls.last.request.url.params["category"] == "financial"
+        assert _sent_schema(route) == TEMPLATE
 
     def test_financial_without_schema_still_works(self, mock_api, client, tiny_pdf):
         _seed_presigned(mock_api)
@@ -151,6 +156,7 @@ class TestDocstrings:
             for name in ("submit_extract", "extract"):
                 doc = getattr(cls, name).__doc__ or ""
                 assert "extract_fast" not in doc, f"{cls.__name__}.{name}"
+                assert "extract-fast" not in doc, f"{cls.__name__}.{name}"
 
 
 class TestPathVsJsonHeuristic:
@@ -177,24 +183,28 @@ class TestPathVsJsonHeuristic:
                 tiny_pdf, category="non_financial", schema="just some words"
             )
 
-    def test_json_filename_that_is_missing_still_says_file_not_found(
-        self, client, tiny_pdf, tmp_path
-    ):
-        # A .json path is unambiguously a file reference, so this must stay a
-        # FileNotFoundError — the fix must not swallow the case #31 added.
-        with pytest.raises(FileNotFoundError):
+    def test_json_filename_as_str_points_at_pathlib(self, client, tiny_pdf, tmp_path):
+        # 0.7.1: a str schema is always JSON text, never a file name. A string
+        # ending in .json is the likeliest "meant a file" mistake, so the error
+        # must name the fix (pass pathlib.Path) rather than a bare parse error.
+        with pytest.raises(ValueError, match=r"ends in '\.json'.*pathlib\.Path"):
             client.submit_extract(
                 tiny_pdf, category="non_financial", schema=str(tmp_path / "nope.json")
             )
 
-    def test_existing_file_without_json_suffix_is_still_read(
+    def test_existing_file_is_read_only_as_path(
         self, mock_api, client, tiny_pdf, tmp_path
     ):
+        # Any suffix works when the caller passes a Path; the same location as
+        # a str is refused (it would otherwise let schema text read local files).
         _seed_presigned(mock_api)
         route = _seed_submit(mock_api)
         f = tmp_path / "template.txt"
         f.write_text(json.dumps(TEMPLATE))
 
-        client.submit_extract(tiny_pdf, category="non_financial", schema=str(f))
+        with pytest.raises(ValueError, match=r"pathlib\.Path"):
+            client.submit_extract(tiny_pdf, category="non_financial", schema=str(f))
+
+        client.submit_extract(tiny_pdf, category="non_financial", schema=f)
 
         assert _sent_schema(route) == TEMPLATE

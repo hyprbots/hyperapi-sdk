@@ -1,7 +1,7 @@
 """Async twin of test_contract_extract_schema.py.
 
 The sync client owns the exhaustive cases; this pins that the async client
-resolves and gates `schema` identically, since the two carry duplicated
+resolves and sends `schema` identically, since the two carry duplicated
 `_resolve_schema` implementations that can silently drift apart.
 """
 
@@ -67,11 +67,14 @@ async def test_async_omitted_schema_sends_no_field(mock_api, async_client, tiny_
 
 
 @pytest.mark.asyncio
-async def test_async_schema_with_financial_is_rejected(async_client, tiny_pdf):
-    with pytest.raises(ValueError, match="non_financial"):
-        await async_client.submit_extract(
-            tiny_pdf, category="financial", schema=TEMPLATE
-        )
+async def test_async_schema_with_financial_is_sent(mock_api, async_client, tiny_pdf):
+    _seed_presigned(mock_api)
+    route = _seed_submit(mock_api)
+
+    await async_client.submit_extract(tiny_pdf, category="financial", schema=TEMPLATE)
+
+    assert route.calls.last.request.url.params["category"] == "financial"
+    assert _sent_schema(route) == TEMPLATE
 
 
 @pytest.mark.asyncio

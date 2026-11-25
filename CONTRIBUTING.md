@@ -22,4 +22,4 @@ pytest tests/ -v
 - Update the README and changelog when the public API changes.
 
 By submitting a contribution, you agree that it is licensed under the
-repository's MIT License.
+repository's Apache License 2.0.
