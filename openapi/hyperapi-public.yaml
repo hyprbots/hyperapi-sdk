@@ -1,0 +1,2265 @@
+# Public description of the HyperAPI /v1 API used to generate hyperapi/types.
+openapi: 3.1.0
+info:
+  title: HyperAPI public /v1 API (response shapes)
+  version: '2026-11-26'
+  description: "Request and response shapes of the public HyperAPI /v1 API. The Python SDK's\nmodels in\
+    \ hyperapi/types are generated from this file.\n\nConventions:\n  * `required` lists only fields the\
+    \ API always sends.\n  * Nullable fields use `type: [X, \"null\"]`.\n  * Every object allows additional\
+    \ properties: the API adds fields over time.\n"
+servers:
+- url: https://apis.hyperbots.com
+security:
+- ApiKey: []
+paths:
+  /v1/documents/upload:
+    post:
+      summary: Get a presigned S3 PUT URL for a document
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadRequest'
+      responses:
+        '200':
+          description: Presigned upload slot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/limits:
+    get:
+      summary: This caller's per-task ceilings
+      responses:
+        '200':
+          description: Limits
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadLimits'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/parse:
+    post:
+      summary: Parse a document (OCR, layout, structure)
+      parameters:
+      - $ref: '#/components/parameters/XAsync'
+      - $ref: '#/components/parameters/CacheControl'
+      - $ref: '#/components/parameters/ForceRefresh'
+      - name: mode
+        in: query
+        schema:
+          type: string
+          enum:
+          - fast
+          - advanced
+      - name: include_boxes
+        in: query
+        schema:
+          type: string
+          enum:
+          - 'true'
+          - 'false'
+      - name: include_image
+        in: query
+        schema:
+          type: string
+          enum:
+          - 'true'
+          - 'false'
+      - name: include_layout
+        in: query
+        schema:
+          type: string
+          enum:
+          - 'true'
+          - 'false'
+      - name: parse_figures
+        in: query
+        description: Empty, `none`, or a comma list of `image`, `chart`, `table`.
+        schema:
+          type: string
+          pattern: ^(|none|(image|chart|table)(,(image|chart|table))*)$
+      - name: merge_tables
+        in: query
+        schema:
+          type: string
+          enum:
+          - 'true'
+          - 'false'
+      - name: groups_profile
+        in: query
+        description: '`A` (default) or `B`, case-insensitive; anything else is treated as `A`.'
+        schema:
+          type: string
+      requestBody:
+        $ref: '#/components/requestBodies/DocumentKeyForm'
+      responses:
+        '200':
+          description: 'Parse result (sync) or async acknowledgement (`X-Async: true`)'
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/ParseResponse'
+                - $ref: '#/components/schemas/AsyncJobAccepted'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/extract:
+    post:
+      summary: Extract structured data (Basic, caller-declared category)
+      parameters:
+      - $ref: '#/components/parameters/XAsync'
+      - $ref: '#/components/parameters/CacheControl'
+      - $ref: '#/components/parameters/ForceRefresh'
+      - name: parse_mode
+        in: query
+        schema:
+          type: string
+          enum:
+          - fast
+          - advanced
+      - name: category
+        in: query
+        schema:
+          type: string
+          enum:
+          - financial
+          - non_financial
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+              required:
+              - document_key
+              properties:
+                document_key:
+                  type: string
+                schema:
+                  type: string
+                  description: JSON object (as a string) — a blank template, same shape as the output.
+      responses:
+        '200':
+          description: Extract result (sync) or async acknowledgement
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/ExtractResponse'
+                - $ref: '#/components/schemas/AsyncJobAccepted'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/extract-omni:
+    post:
+      summary: Extract structured data (Advanced, auto-routed)
+      parameters:
+      - $ref: '#/components/parameters/XAsync'
+      - $ref: '#/components/parameters/CacheControl'
+      - $ref: '#/components/parameters/ForceRefresh'
+      - name: parse_mode
+        in: query
+        schema:
+          type: string
+          enum:
+          - fast
+          - advanced
+      requestBody:
+        $ref: '#/components/requestBodies/DocumentKeyForm'
+      responses:
+        '200':
+          description: Extract result (sync) or async acknowledgement
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/ExtractResponse'
+                - $ref: '#/components/schemas/AsyncJobAccepted'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/classify:
+    post:
+      summary: Classify a document
+      parameters:
+      - $ref: '#/components/parameters/XAsync'
+      - $ref: '#/components/parameters/CacheControl'
+      - $ref: '#/components/parameters/ForceRefresh'
+      - name: mode
+        in: query
+        schema:
+          type: string
+          pattern: ^[a-z][a-z0-9-]*$
+          default: default
+      requestBody:
+        $ref: '#/components/requestBodies/DocumentKeyOptionsForm'
+      responses:
+        '200':
+          description: Classify result (sync) or async acknowledgement
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/ClassifyResponse'
+                - $ref: '#/components/schemas/AsyncJobAccepted'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/split:
+    post:
+      summary: Split a page stream into document segments
+      parameters:
+      - $ref: '#/components/parameters/XAsync'
+      - $ref: '#/components/parameters/CacheControl'
+      - $ref: '#/components/parameters/ForceRefresh'
+      - name: mode
+        in: query
+        schema:
+          type: string
+          pattern: ^[a-z][a-z0-9-]*$
+          default: default
+      requestBody:
+        $ref: '#/components/requestBodies/DocumentKeyOptionsForm'
+      responses:
+        '200':
+          description: Split result (sync) or async acknowledgement
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/SplitResponse'
+                - $ref: '#/components/schemas/AsyncJobAccepted'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/redact:
+    post:
+      summary: Redact or deidentify PII
+      parameters:
+      - $ref: '#/components/parameters/XAsync'
+      - $ref: '#/components/parameters/CacheControl'
+      - $ref: '#/components/parameters/ForceRefresh'
+      - name: mode
+        in: query
+        schema:
+          type: string
+          enum:
+          - redact
+          - deidentify
+          default: redact
+      - name: include_logos
+        in: query
+        schema:
+          type: boolean
+          default: false
+      - name: output
+        in: query
+        description: '`urls` is accepted only while GET /v1/limits advertises `redact.urls_max_pages`.'
+        schema:
+          type: string
+          enum:
+          - inline
+          - urls
+          default: inline
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+              required:
+              - document_key
+              properties:
+                document_key:
+                  type: string
+                pii_config:
+                  type: string
+                  description: JSON object, as a string.
+      responses:
+        '200':
+          description: Redact result (sync) or async acknowledgement
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/RedactResponse'
+                - $ref: '#/components/schemas/AsyncJobAccepted'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/jobs/recent:
+    get:
+      summary: Recent async jobs of the calling org (summaries, no result body)
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 20
+        description: 1..100; out of range resets to 20.
+      - name: source
+        in: query
+        schema:
+          type: string
+          enum:
+          - api
+          - playground
+        description: Any other value means no filter.
+      responses:
+        '200':
+          description: Recent jobs, newest first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecentJobsResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/jobs/{job_id}:
+    parameters:
+    - name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+    get:
+      summary: Poll an async job
+      responses:
+        '200':
+          description: Job envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobEnvelope'
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      summary: Cancel an async job (idempotent)
+      responses:
+        '204':
+          description: Cancel requested, or nothing to cancel
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/batch:
+    post:
+      summary: Submit a batch
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchCreateRequest'
+      responses:
+        '202':
+          description: Batch accepted (also returned for an idempotent replay)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchCreateResponse'
+        default:
+          $ref: '#/components/responses/Error'
+    get:
+      summary: List the org's batches, newest first
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+      responses:
+        '200':
+          description: Batches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchListResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/batch/{batch_id}:
+    parameters:
+    - name: batch_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    get:
+      summary: Batch status
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          default: 200
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+      responses:
+        '200':
+          description: Status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchStatusResponse'
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      summary: Cancel a batch (queued items stop; in-flight items finish)
+      responses:
+        '200':
+          description: Status after cancellation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchStatusResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/batch/{batch_id}/items/{doc_index}/result:
+    parameters:
+    - name: batch_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    - name: doc_index
+      in: path
+      required: true
+      schema:
+        type: integer
+    get:
+      summary: Redirect to a fresh presigned URL for one item's result file
+      responses:
+        '307':
+          description: Redirect to a signed URL for the item's result (valid about 120 s)
+        default:
+          $ref: '#/components/responses/Error'
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  parameters:
+    XAsync:
+      name: X-Async
+      in: header
+      description: '`true` returns an AsyncJobAccepted immediately; poll GET /v1/jobs/{job_id}.'
+      schema:
+        type: string
+        default: 'false'
+    CacheControl:
+      name: Cache-Control
+      in: header
+      description: '`no-cache` bypasses the result cache (same as force_refresh=true).'
+      schema:
+        type: string
+    ForceRefresh:
+      name: force_refresh
+      in: query
+      schema:
+        type: boolean
+        default: false
+  requestBodies:
+    DocumentKeyForm:
+      required: true
+      content:
+        application/x-www-form-urlencoded:
+          schema:
+            type: object
+            additionalProperties: true
+            required:
+            - document_key
+            properties:
+              document_key:
+                type: string
+                description: Value returned by POST /v1/documents/upload.
+    DocumentKeyOptionsForm:
+      required: true
+      content:
+        application/x-www-form-urlencoded:
+          schema:
+            type: object
+            additionalProperties: true
+            required:
+            - document_key
+            properties:
+              document_key:
+                type: string
+              options:
+                type: string
+                description: JSON object (as a string) of service options.
+  responses:
+    Error:
+      description: Error envelope
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    ErrorEnvelope:
+      type: object
+      additionalProperties: true
+      description: Body of every error reply from the API.
+      required:
+      - error
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+    ErrorBody:
+      type: object
+      additionalProperties: true
+      required:
+      - code
+      - message
+      properties:
+        code:
+          type: string
+          description: Machine-readable reason, stable across wording changes (e.g. `page_quota_exceeded`,
+            `insufficient_credits`, `DOCUMENT_ENCRYPTED`, `DOCUMENT_UNREADABLE`, `SYNC_PAGE_LIMIT`), else
+            a status name such as BAD_REQUEST, UNAUTHORIZED or PAYMENT_REQUIRED.
+        message:
+          type:
+          - string
+          - object
+          additionalProperties: true
+          description: Human-readable text. Usually a string; the batch quota refusal (402 on POST /v1/batch)
+            sends an object with `error`, `list_price_cents` and `list_price_micros`.
+        details:
+          type: object
+          additionalProperties: true
+          description: Optional numbers behind a refusal; a quota refusal carries `pages_used`, `pages_limit`
+            and `pages_pending`.
+        data:
+          type: object
+          additionalProperties: true
+          description: Optional structured payload sent with some batch errors.
+    UploadRequest:
+      type: object
+      additionalProperties: true
+      required:
+      - filename
+      - content_length
+      properties:
+        filename:
+          type: string
+        content_type:
+          type: string
+          default: application/pdf
+          description: Must be an allowed type (PDF, common images, office text types, XPS) or the call
+            is a 415.
+        content_length:
+          type:
+          - integer
+          - 'null'
+          description: Declared byte size. Missing or < 1 is a 400 (the model types it optional; the handler
+            requires it).
+    UploadResponse:
+      type: object
+      additionalProperties: true
+      description: 'The upload URL is signed for server-side encryption and the declared content type:
+        the PUT must send `x-amz-server-side-encryption: AES256` and the same `Content-Type`.'
+      required:
+      - document_key
+      - upload_url
+      - expires_in
+      - limits
+      properties:
+        document_key:
+          type: string
+        upload_url:
+          type: string
+        expires_in:
+          type: integer
+          description: Seconds the upload_url stays valid.
+        limits:
+          anyOf:
+          - $ref: '#/components/schemas/UploadLimits'
+          - type: 'null'
+    UploadLimits:
+      type: object
+      additionalProperties: true
+      description: Absent capability blocks are serialized as null — null means "not offered", never "unlimited".
+      required:
+      - max_upload_bytes
+      - parse_fast
+      - parse_advanced
+      - bulk_parse
+      - extract_fast
+      - extract_advanced
+      - classify
+      - split
+      - redact
+      properties:
+        max_upload_bytes:
+          type: integer
+        parse_fast:
+          $ref: '#/components/schemas/TaskLimit'
+        parse_advanced:
+          $ref: '#/components/schemas/TaskLimit'
+        bulk_parse:
+          anyOf:
+          - $ref: '#/components/schemas/TaskLimit'
+          - type: 'null'
+        extract_fast:
+          $ref: '#/components/schemas/TaskLimit'
+        extract_advanced:
+          anyOf:
+          - $ref: '#/components/schemas/TaskLimit'
+          - type: 'null'
+        classify:
+          $ref: '#/components/schemas/TaskLimit'
+        split:
+          $ref: '#/components/schemas/TaskLimit'
+        redact:
+          $ref: '#/components/schemas/TaskLimit'
+    TaskLimit:
+      type: object
+      additionalProperties: true
+      required:
+      - max_bytes
+      - max_pages
+      - urls_max_pages
+      properties:
+        max_bytes:
+          type: integer
+        max_pages:
+          type:
+          - integer
+          - 'null'
+          description: null = no page rejection for this task.
+        urls_max_pages:
+          type:
+          - integer
+          - 'null'
+          description: Redact only, and only while `output=urls` is accepted; null elsewhere.
+    AsyncJobAccepted:
+      type: object
+      additionalProperties: true
+      description: 'Returned (HTTP 200) by every inference endpoint when the request sends `X-Async: true`.'
+      required:
+      - job_id
+      - status
+      - poll_url
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          const: pending
+        poll_url:
+          type: string
+          description: '`/v1/jobs/{job_id}`'
+    JobStatus:
+      type: string
+      enum:
+      - pending
+      - completed
+      - failed
+      description: A cancelled job reads `failed` with an `error` starting `cancelled:`. Only GET /v1/jobs/recent
+        reports `cancelled`.
+    JobEnvelope:
+      type: object
+      additionalProperties: true
+      description: 'GET /v1/jobs/{job_id}: the job''s state, and its full reply once completed.'
+      required:
+      - job_id
+      - status
+      - request_id
+      - created_at
+      - filename
+      - endpoint
+      - document_key
+      - source
+      - is_test
+      - result
+      - error
+      - status_code
+      - retry_after_seconds
+      properties:
+        job_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        request_id:
+          type: string
+        created_at:
+          type: number
+          description: Unix epoch seconds (float).
+        completed_at:
+          type: number
+          description: Unix epoch seconds; set when the job reaches completed or failed.
+        filename:
+          type:
+          - string
+          - 'null'
+        endpoint:
+          type:
+          - string
+          - 'null'
+          description: e.g. `/v1/parse`
+        document_key:
+          type:
+          - string
+          - 'null'
+        source:
+          type:
+          - string
+          - 'null'
+          description: 'Channel that created the job: `api` or `playground`.'
+        is_test:
+          type: boolean
+          description: True for hk_test_* keys.
+        result:
+          description: The operation's full reply when completed; null while pending and on failure. `result.task`
+            names the operation.
+          anyOf:
+          - $ref: '#/components/schemas/ParseResponse'
+          - $ref: '#/components/schemas/ExtractResponse'
+          - $ref: '#/components/schemas/ClassifyResponse'
+          - $ref: '#/components/schemas/SplitResponse'
+          - $ref: '#/components/schemas/RedactResponse'
+          - type: 'null'
+        error:
+          type:
+          - string
+          - 'null'
+          description: Human-readable failure reason (failed jobs).
+        error_code:
+          type:
+          - string
+          - 'null'
+          description: Machine-readable reason (e.g. `insufficient_credits`), present on failed jobs only;
+            null when the failure carried none.
+        status_code:
+          type:
+          - integer
+          - 'null'
+          description: HTTP status of the failure, when it had one.
+        retry_after_seconds:
+          type:
+          - integer
+          - 'null'
+          description: Backoff hint on a retryable failure (e.g. 429).
+        segments_total:
+          type: integer
+          description: Bulk parse only — segment progress while pending.
+        segments_done:
+          type: integer
+          description: Bulk parse only.
+        segments_failed:
+          type: integer
+          description: Bulk parse only.
+    RecentJobsResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - jobs
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecentJob'
+    RecentJob:
+      type: object
+      additionalProperties: true
+      required:
+      - job_id
+      - request_id
+      - status
+      - task
+      - endpoint
+      - pages
+      - filename
+      - document_key
+      - source
+      - is_test
+      - created_at
+      - completed_at
+      - error
+      properties:
+        job_id:
+          type:
+          - string
+          - 'null'
+        request_id:
+          type:
+          - string
+          - 'null'
+        status:
+          type:
+          - string
+          - 'null'
+          enum:
+          - pending
+          - completed
+          - failed
+          - cancelled
+          - null
+        task:
+          type:
+          - string
+          - 'null'
+        endpoint:
+          type:
+          - string
+          - 'null'
+        pages:
+          type:
+          - integer
+          - 'null'
+        filename:
+          type:
+          - string
+          - 'null'
+        document_key:
+          type:
+          - string
+          - 'null'
+        source:
+          type: string
+          enum:
+          - api
+          - playground
+        is_test:
+          type: boolean
+        created_at:
+          type:
+          - number
+          - 'null'
+        completed_at:
+          type:
+          - number
+          - 'null'
+        error:
+          type:
+          - string
+          - 'null'
+          description: Null for cancelled jobs.
+    ResponseMetadata:
+      type: object
+      additionalProperties: true
+      description: '`metadata` of every inference reply. Job replies carry fewer keys than sync replies
+        (no `content_type`; no `mode` on async classify and split).'
+      required:
+      - pages
+      properties:
+        pages:
+          type: integer
+          description: Page count processed.
+        source:
+          type: string
+          description: How the document was supplied (`document_key`).
+        filename:
+          type:
+          - string
+          - 'null'
+        file_size:
+          type: integer
+        content_type:
+          type: string
+          description: Sync responses only.
+        mode:
+          type: string
+          description: 'The `mode` query value (classify/split/extract: e.g. `default`; redact: `redact`|`deidentify`).'
+        parse_mode:
+          type:
+          - string
+          - 'null'
+          description: Extract only.
+        document_type:
+          type:
+          - string
+          - 'null'
+          description: Extract only.
+        groups_profile:
+          type: string
+          enum:
+          - A
+          - B
+          description: Parse only; present when a profile other than A was requested and an outline was
+            built.
+        assets_expire_at:
+          type: string
+          description: UTC ISO-8601 time at which the earliest signed URL in this reply expires. Absent
+            when the reply has no URL.
+        total_pages:
+          type: integer
+          description: Bulk parse only.
+        bulk:
+          type: boolean
+          description: Bulk parse only (true).
+        segments_total:
+          type: integer
+          description: Bulk parse only.
+        segments_failed:
+          type: integer
+          description: Bulk parse only.
+        gaps:
+          type: array
+          description: Bulk parse only — page ranges that failed; empty when every segment succeeded.
+          items:
+            $ref: '#/components/schemas/BulkGap'
+    BulkGap:
+      type: object
+      additionalProperties: true
+      properties:
+        page_start:
+          type: integer
+        page_end:
+          type: integer
+        reason:
+          type: string
+    PublicLayoutType:
+      type: string
+      description: What kind of component a block/region is (the public replacement for the deprecated
+        `label`).
+      enum:
+      - abstract
+      - aside
+      - caption
+      - chart
+      - code
+      - contents
+      - figure
+      - footer
+      - footnote
+      - formula
+      - formula_number
+      - header
+      - heading
+      - list
+      - other
+      - page_number
+      - reference
+      - stamp
+      - table
+      - text
+      - title
+    BBox:
+      type: array
+      description: '[left, top, right, bottom] in the page''s pixel space (`dimensions`).'
+      items:
+        type: number
+    ParseResponse:
+      type: object
+      additionalProperties: true
+      description: 'Reply of /v1/parse (sync, or a completed parse job). A bulk parse job (an oversized
+        advanced document, on plans that include bulk parse) completes with a summary instead: no `cached`,
+        `result` is a BulkParseResultSummary, and `result_url` points at the full result.'
+      required:
+      - status
+      - request_id
+      - task
+      - model_used
+      - result
+      - duration_ms
+      - metadata
+      properties:
+        status:
+          type: string
+          description: '`success` (bulk: `failed` when no segment succeeded).'
+        request_id:
+          type: string
+        task:
+          type: string
+          const: parse
+        model_used:
+          type: string
+        cached:
+          type: boolean
+          description: True when the OCR result came from cache (billed at $0). Absent on a bulk summary.
+        result:
+          anyOf:
+          - $ref: '#/components/schemas/ParseResult'
+          - $ref: '#/components/schemas/BulkParseResultSummary'
+        duration_ms:
+          type: integer
+        metadata:
+          $ref: '#/components/schemas/ResponseMetadata'
+        dashboard_url:
+          type: string
+          description: Deep link to this request in the dashboard, when snapshots are on.
+        result_url:
+          type: string
+          description: Bulk parse jobs only — presigned GET for the full stitched result (re-signed on
+            every poll).
+    BulkParseResultSummary:
+      type: object
+      additionalProperties: true
+      required:
+      - pages_processed
+      - model_version
+      properties:
+        pages_processed:
+          type: integer
+        model_version:
+          type: string
+          const: advanced
+    ParseResult:
+      type: object
+      additionalProperties: true
+      description: 'The parsed document: text, pages and components.'
+      required:
+      - ocr
+      - pages
+      - blocks
+      properties:
+        ocr:
+          type: string
+          description: Full text, pages joined by blank lines.
+        pages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParsePage'
+        blocks:
+          type: array
+          description: The document's components in reading order across all pages (empty when none were
+            found).
+          items:
+            $ref: '#/components/schemas/Block'
+        groups:
+          type: array
+          description: Outline over `blocks`. Present only when non-empty.
+          items:
+            $ref: '#/components/schemas/Group'
+        html:
+          type: string
+          description: The document as html (data-type attributes). Present only when non-empty.
+        css:
+          type: string
+          description: One style block shared by the html. Present only when non-empty.
+        canvas:
+          type: string
+          description: The document as html with pagination removed. Present only when non-empty.
+        layout_text:
+          type: string
+          description: Layout-aware text of every page, joined by form feed. Present when any page has
+            a layout.
+        content:
+          $ref: '#/components/schemas/ContentDescriptor'
+        figure_parse:
+          $ref: '#/components/schemas/FigureParseSummary'
+        cross_page_tables:
+          type: array
+          description: Present whenever merge_tables was in effect (empty list = none found).
+          items:
+            $ref: '#/components/schemas/CrossPageTable'
+        sheets:
+          type: array
+          description: 'Spreadsheet grid, xlsx only: one object per sheet ({name, index, rows, cols, cells[]}).'
+          items:
+            type: object
+            additionalProperties: true
+        workbook:
+          type: object
+          additionalProperties: true
+          description: Workbook-level structure, spreadsheets only (passed through).
+        email:
+          type: object
+          additionalProperties: true
+          description: Normalised message, .eml/.msg only (passed through).
+        assets:
+          $ref: '#/components/schemas/DocumentAssets'
+    ParsePage:
+      type: object
+      additionalProperties: true
+      description: One page of a parse result.
+      required:
+      - page_number
+      - text
+      properties:
+        page_number:
+          type: integer
+          description: 1-based.
+        text:
+          type: string
+        text_source:
+          type: string
+          enum:
+          - native
+          - ocr
+          description: Where the page's text came from. Present when the page has text boxes.
+        dimensions:
+          $ref: '#/components/schemas/PageDimensions'
+        page_size:
+          $ref: '#/components/schemas/PageSize'
+        background:
+          type: string
+          description: The page's own background colour (`#rrggbb`), when stated.
+        gaps:
+          type: array
+          description: Large empty vertical bands between consecutive blocks. Present only on pages that
+            have one.
+          items:
+            $ref: '#/components/schemas/PageGap'
+        boxes:
+          type: array
+          description: Line boxes. Present when include_boxes is on (fast-mode default).
+          items:
+            $ref: '#/components/schemas/TextBox'
+        word_boxes:
+          type: array
+          description: Word boxes with measured typography. Present exactly when `boxes` is.
+          items:
+            $ref: '#/components/schemas/TextBox'
+        image_url:
+          type: string
+          description: Presigned page image. Present when include_image is on and the page image was stored;
+            omitted if signing failed.
+        layout:
+          type: array
+          description: Layout regions in reading order (fast mode with include_layout).
+          items:
+            $ref: '#/components/schemas/LayoutRegion'
+        layout_text:
+          type: string
+          description: The page's text rebuilt around its layout regions.
+        structured:
+          $ref: '#/components/schemas/StructuredPage'
+    PageDimensions:
+      type: object
+      additionalProperties: true
+      description: The raster every `bbox` on the page is measured in.
+      required:
+      - width
+      - height
+      properties:
+        width:
+          type: number
+        height:
+          type: number
+    PageSize:
+      type: object
+      additionalProperties: true
+      description: The page's own size as stated by the document.
+      properties:
+        width:
+          type: number
+        height:
+          type: number
+        unit:
+          type: string
+          description: '`pt` where the source stated a page box, `px` for a bare image.'
+    PageGap:
+      type: object
+      additionalProperties: true
+      required:
+      - bbox
+      - height
+      - after
+      - before
+      - ratio
+      properties:
+        bbox:
+          $ref: '#/components/schemas/BBox'
+        height:
+          type: number
+        after:
+          type:
+          - string
+          - 'null'
+          description: Id of the block above.
+        before:
+          type:
+          - string
+          - 'null'
+          description: Id of the block below.
+        ratio:
+          type: number
+          description: Height over the page's usual spacing.
+    TextBox:
+      type: object
+      additionalProperties: true
+      description: One line (`boxes`) or word (`word_boxes`). Beyond the three required keys, a box carries
+        only the attributes the document stated or that were measured; their types vary.
+      required:
+      - text
+      - bbox
+      - confidence
+      properties:
+        text:
+          type: string
+        bbox:
+          $ref: '#/components/schemas/BBox'
+        confidence:
+          type:
+          - number
+          - 'null'
+        font:
+          description: Font family.
+        font_face:
+          description: The embedded face, e.g. a weight-qualified name.
+        size:
+          description: Size, in the unit of the page's `page_size`.
+        color: {}
+        bold: {}
+        italic: {}
+        superscript: {}
+        font_source:
+          description: '`document` or `model`.'
+        href:
+          description: Link target covering the run.
+        underline: {}
+        strikethrough: {}
+        background: {}
+        authored_font: {}
+        authored_size: {}
+        authored_color: {}
+        authored_background: {}
+        authored_bold: {}
+        authored_italic: {}
+        authored_underline: {}
+        authored_strikethrough: {}
+        authored_superscript: {}
+        source:
+          description: '`native` when the document supplied the text verbatim.'
+        kind:
+          description: What a non-text box is (e.g. `picture`).
+        asset:
+          description: Stored part a picture was rendered from.
+        px:
+          description: A picture's own pixel size.
+        fill:
+          description: A rect's fill colour.
+        font_asset:
+          description: Embedded font file the run was set in (joins assets.fonts).
+        content_id: {}
+    LayoutRegion:
+      type: object
+      additionalProperties: true
+      description: A layout region on the page. Keys with null values are left out.
+      required:
+      - bbox
+      - type
+      properties:
+        type:
+          $ref: '#/components/schemas/PublicLayoutType'
+        bbox:
+          $ref: '#/components/schemas/BBox'
+        order:
+          type: integer
+        score:
+          type: number
+        source: {}
+        content:
+          type: string
+          description: Parsed figure content (chart table as markdown, image caption, table html).
+        parse_status:
+          type: string
+        parse_type:
+          type: string
+        parse_sub_type:
+          type: string
+        parse_reason:
+          type: string
+        asset:
+          type: string
+          description: Part name of the region's stored crop (joins assets.images[].part). Dropped when
+            unservable.
+        table_id:
+          type: string
+          description: 'merge_tables: `t<n>`, document-wide.'
+        continues_from:
+          type: string
+        continues_to:
+          type: string
+        paint:
+          type: object
+          additionalProperties: true
+          description: '{index, asset} — paint order of the native picture shown.'
+    StructuredPage:
+      type: object
+      additionalProperties: true
+      description: Advanced mode's per-page layout. Figure images in `html`/`markdown` are signed URLs
+        or are left out.
+      required:
+      - html
+      - markdown
+      - regions
+      properties:
+        html:
+          type: string
+        markdown:
+          type: string
+        regions:
+          type: array
+          items:
+            $ref: '#/components/schemas/StructuredRegion'
+        figure_gaps:
+          type: array
+          description: Present only when figure understanding completed partially.
+          items: {}
+        figures_total:
+          type: integer
+        figures_described:
+          type: integer
+    StructuredRegion:
+      type: object
+      additionalProperties: true
+      description: An advanced-mode region.
+      properties:
+        type:
+          $ref: '#/components/schemas/PublicLayoutType'
+        bbox:
+          $ref: '#/components/schemas/BBox'
+    Block:
+      type: object
+      additionalProperties: true
+      description: One document component. Null and empty-object values are left out; `heading`, `group`
+        and `depth` place it in the document's structure.
+      properties:
+        id:
+          type: string
+          description: '`b<page>-<n>`'
+        order:
+          type: integer
+        page:
+          type: integer
+        type:
+          $ref: '#/components/schemas/PublicLayoutType'
+        bbox:
+          $ref: '#/components/schemas/BBox'
+        html:
+          type: string
+        furniture:
+          type: boolean
+          description: Running head/foot.
+        empty:
+          type: boolean
+          const: true
+          description: The markup holds nothing to read or see.
+        list:
+          type: object
+          additionalProperties: true
+        continued_item:
+          type: object
+          additionalProperties: true
+        style:
+          type: object
+          additionalProperties: true
+        paint:
+          type: object
+          additionalProperties: true
+        table_fallback:
+          type: object
+          additionalProperties: true
+        heading:
+          type: integer
+          minimum: 1
+          maximum: 6
+        group:
+          type: string
+          description: Innermost group id.
+        depth:
+          type: integer
+    Group:
+      type: object
+      additionalProperties: true
+      description: One node of the outline. Optional keys depend on `kind` and the grouping profile.
+      required:
+      - id
+      - kind
+      - pages
+      - children
+      - boxes
+      properties:
+        id:
+          type: string
+          description: '`g<n>`'
+        kind:
+          type: string
+          description: 'section, preamble, page_header, page_footer, figure, table, list, formula,
+
+            algorithm, note, aside, and mail-thread kinds (message, its envelope/body and field
+
+            groups). Open-ended.
+
+            '
+        pages:
+          type: array
+          items:
+            type:
+            - integer
+            - 'null'
+        children:
+          type: array
+          description: Block ids and group ids, in order.
+          items:
+            type: string
+        boxes:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupBox'
+        level:
+          type: integer
+          description: Sections only; depth clamped to 1..6.
+        depth:
+          type: integer
+          description: Sections only.
+        heading:
+          type: string
+          description: Sections only — the heading block id.
+        caption:
+          type: string
+          description: Caption block id (profile B).
+        table:
+          type: string
+        continues:
+          type: string
+          description: Group id of the table this one continues.
+        repeats:
+          type: string
+          description: Page header/footer — id of the first copy.
+        overlaps:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupOverlap'
+        thread:
+          type: object
+          additionalProperties: true
+          description: Root message of a mail chain.
+    GroupBox:
+      type: object
+      additionalProperties: true
+      required:
+      - page
+      - bbox
+      properties:
+        page:
+          type:
+          - integer
+          - 'null'
+        bbox:
+          $ref: '#/components/schemas/BBox'
+    GroupOverlap:
+      type: object
+      additionalProperties: true
+      required:
+      - with
+      - page
+      - iou
+      - cover
+      properties:
+        with:
+          type: string
+          description: The overlapping sibling's id.
+        page:
+          type:
+          - integer
+          - 'null'
+        iou:
+          type: number
+        cover:
+          type: number
+        above:
+          type: boolean
+        basis:
+          type: string
+          const: paint
+    CrossPageTable:
+      type: object
+      additionalProperties: true
+      required:
+      - id
+      - table_ids
+      - pages
+      - continuation
+      - html
+      - links
+      properties:
+        id:
+          type: string
+          description: '`x<n>`'
+        table_ids:
+          type: array
+          items:
+            type:
+            - string
+            - 'null'
+        pages:
+          type: array
+          description: 1-based, as pages[].page_number.
+          items:
+            type: integer
+        continuation:
+          type:
+          - string
+          - 'null'
+          description: e.g. `merged` or `linked`.
+        html:
+          type:
+          - string
+          - 'null'
+          description: Stitched table html (with figure parsing of tables).
+        header_rows_dropped: {}
+        split_rows_joined: {}
+        aligned: {}
+        links:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              from:
+                type:
+                - string
+                - 'null'
+              to:
+                type:
+                - string
+                - 'null'
+              decision:
+                type: string
+    FigureParseSummary:
+      type: object
+      additionalProperties: true
+      properties:
+        requested: {}
+        available: {}
+        reason: {}
+        blocks_total:
+          type: integer
+        blocks_parsed:
+          type: integer
+        blocks_skipped:
+          type: integer
+        gaps:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    ContentDescriptor:
+      type: object
+      additionalProperties: true
+      description: What kind of content this is.
+      properties:
+        kind:
+          type: string
+          description: '`sheets` | `blocks` | `pages` | `text`'
+        text_source: {}
+        counts:
+          type: object
+          additionalProperties: true
+    DocumentAssets:
+      type: object
+      additionalProperties: true
+      description: Container inventory for packaged formats (XPS); `images`, `fonts` and `attachments`
+        carry a signed `url`.
+      properties:
+        images:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentAsset'
+        fonts:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentAsset'
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentAsset'
+    DocumentAsset:
+      type: object
+      additionalProperties: true
+      properties:
+        part:
+          type: string
+          description: Part name inside the package.
+        url:
+          type: string
+          description: Presigned GET; absent if the upload or signing failed.
+    ExtractResponse:
+      type: object
+      additionalProperties: true
+      description: Sync response and async job body for /v1/extract and /v1/extract-omni.
+      required:
+      - status
+      - request_id
+      - task
+      - model_used
+      - cached
+      - result
+      - ocr_text
+      - duration_ms
+      - metadata
+      properties:
+        status:
+          type: string
+          const: success
+        request_id:
+          type: string
+        task:
+          type: string
+          enum:
+          - extract
+          - extract-omni
+        model_used:
+          type: string
+        cached:
+          type: boolean
+        result:
+          anyOf:
+          - $ref: '#/components/schemas/ExtractEntitiesResult'
+          - $ref: '#/components/schemas/ExtractTemplateResult'
+        ocr_text:
+          type: string
+        duration_ms:
+          type: integer
+        metadata:
+          $ref: '#/components/schemas/ResponseMetadata'
+        dashboard_url:
+          type: string
+    ExtractEntitiesResult:
+      type: object
+      additionalProperties: true
+      description: 'Extracted fields: `entities`, `line_items` and `summary`. If part of an extraction
+        fails, its fields are null.'
+      required:
+      - entities
+      - line_items
+      - summary
+      properties:
+        entities:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+          description: Header/party fields; keys depend on the document.
+        line_items:
+          type:
+          - array
+          - 'null'
+          items:
+            type: object
+            additionalProperties: true
+        summary:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+          description: Document-level fields (totals, tax, currency, document_type …); keys depend on
+            the document.
+        partial:
+          type: boolean
+          const: true
+          description: Present only when one leg failed.
+        leg_errors:
+          type: object
+          additionalProperties:
+            type: string
+          description: Present only with `partial` — failed leg name to exception type name.
+    ExtractTemplateResult:
+      type: object
+      additionalProperties: true
+      description: 'A template was filled in: the caller''s `schema`, or the organization''s stored template.'
+      required:
+      - data
+      - summary
+      properties:
+        data:
+          description: The template, filled in (same shape as the template).
+        summary:
+          type: object
+          additionalProperties: true
+    ClassifyResponse:
+      type: object
+      additionalProperties: true
+      description: Reply of /v1/classify (sync, or a completed classify job).
+      required:
+      - status
+      - request_id
+      - task
+      - model_used
+      - cached
+      - result
+      - ocr_text
+      - duration_ms
+      - metadata
+      properties:
+        status:
+          type: string
+          const: success
+        request_id:
+          type: string
+        task:
+          type: string
+          const: classify
+        model_used:
+          type: string
+        cached:
+          type: boolean
+        result:
+          $ref: '#/components/schemas/ClassifyResult'
+        ocr_text:
+          type: string
+        duration_ms:
+          type: integer
+        metadata:
+          $ref: '#/components/schemas/ResponseMetadata'
+        dashboard_url:
+          type: string
+    ClassifyResult:
+      type: object
+      additionalProperties: true
+      description: The classification result.
+      required:
+      - document_type
+      - initial_label
+      - early_exit
+      - early_exit_reason
+      - domain
+      - status
+      - raw_label
+      - other_hint
+      - subject_hint
+      - confidence
+      - needs_review
+      - rejection
+      - warnings
+      properties:
+        document_type:
+          type:
+          - string
+          - 'null'
+        initial_label:
+          type:
+          - string
+          - 'null'
+        early_exit:
+          type: boolean
+          description: True when the document was rejected.
+        early_exit_reason:
+          type: string
+        domain:
+          type: string
+          enum:
+          - financial
+          - non_financial
+        status:
+          type:
+          - string
+          - 'null'
+          description: Classifier outcome (e.g. `rejected`).
+        raw_label:
+          type:
+          - string
+          - 'null'
+        other_hint:
+          type:
+          - string
+          - 'null'
+        subject_hint:
+          type:
+          - string
+          - 'null'
+        confidence:
+          type:
+          - number
+          - 'null'
+        needs_review:
+          type:
+          - boolean
+          - 'null'
+        rejection:
+          type:
+          - object
+          - 'null'
+          additionalProperties: true
+        warnings:
+          type:
+          - array
+          - 'null'
+          items:
+            $ref: '#/components/schemas/ClassifyWarning'
+        details:
+          type: object
+          additionalProperties: true
+          description: Present only when requested via classifier_config.include_details.
+    ClassifyWarning:
+      type: object
+      additionalProperties: true
+      description: A non-fatal classifier configuration warning.
+      properties:
+        code:
+          type: string
+        field:
+          type:
+          - string
+          - 'null'
+        message:
+          type: string
+    SplitResponse:
+      type: object
+      additionalProperties: true
+      description: Reply of /v1/split (sync, or a completed split job).
+      required:
+      - status
+      - request_id
+      - task
+      - model_used
+      - cached
+      - result
+      - ocr_text
+      - duration_ms
+      - metadata
+      properties:
+        status:
+          type: string
+          const: success
+        request_id:
+          type: string
+        task:
+          type: string
+          const: split
+        model_used:
+          type: string
+        cached:
+          type: boolean
+        result:
+          anyOf:
+          - $ref: '#/components/schemas/SplitResult'
+          - $ref: '#/components/schemas/SplitNotRequired'
+        ocr_text:
+          type: string
+        duration_ms:
+          type: integer
+        metadata:
+          $ref: '#/components/schemas/ResponseMetadata'
+        dashboard_url:
+          type: string
+    SplitResult:
+      type: object
+      additionalProperties: true
+      required:
+      - segmentation
+      - metadata
+      properties:
+        segmentation:
+          type: object
+          additionalProperties: true
+          required:
+          - splits
+          properties:
+            splits:
+              type: array
+              items:
+                $ref: '#/components/schemas/SplitSegment'
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Currently always empty.
+    SplitSegment:
+      type: object
+      additionalProperties: true
+      required:
+      - split_label
+      - start_page
+      - end_page
+      - confidence
+      - identifying_features
+      - sub_documents
+      properties:
+        split_label:
+          type:
+          - string
+          - 'null'
+        start_page:
+          type:
+          - integer
+          - 'null'
+          description: 1-based, inclusive.
+        end_page:
+          type:
+          - integer
+          - string
+          - 'null'
+          description: 1-based, inclusive; a string only for an unfinished segment.
+        confidence:
+          type:
+          - integer
+          - number
+          - 'null'
+          description: 0-10.
+        identifying_features:
+          type:
+          - string
+          - 'null'
+        sub_documents:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              page:
+                type: integer
+              document_class:
+                type:
+                - string
+                - 'null'
+              fingerprint: {}
+              initiation_evidence: {}
+    SplitNotRequired:
+      type: object
+      additionalProperties: true
+      required:
+      - not_required
+      - reason
+      properties:
+        not_required:
+          type: boolean
+          const: true
+        reason:
+          type: string
+    RedactResponse:
+      type: object
+      additionalProperties: true
+      description: Reply of /v1/redact (sync, or a completed redact job). No `ocr_text`.
+      required:
+      - status
+      - request_id
+      - task
+      - model_used
+      - cached
+      - result
+      - duration_ms
+      - metadata
+      properties:
+        status:
+          type: string
+          const: success
+        request_id:
+          type: string
+        task:
+          type: string
+          const: redact
+        model_used:
+          type: string
+        cached:
+          type: boolean
+        result:
+          $ref: '#/components/schemas/RedactResult'
+        duration_ms:
+          type: integer
+        metadata:
+          $ref: '#/components/schemas/ResponseMetadata'
+        dashboard_url:
+          type: string
+    RedactResult:
+      type: object
+      additionalProperties: true
+      description: The redaction result, inline or as page image URLs (`output=urls`).
+      required:
+      - mode
+      - original_text_block
+      - updated_text_block
+      - updated_dictionary
+      - summary
+      properties:
+        mode:
+          type: string
+          enum:
+          - redact
+          - deidentify
+        original_text_block:
+          type: string
+        updated_text_block:
+          type: string
+        updated_dictionary:
+          type: object
+          additionalProperties: true
+        summary:
+          type: object
+          additionalProperties: true
+        images:
+          type: array
+          description: Inline mode — masked pages as base64 images.
+          items:
+            type: string
+        original_page_image_urls:
+          type: object
+          additionalProperties:
+            type: string
+          description: Inline mode — page number (string) to presigned URL of the original page.
+        output:
+          type: string
+          const: urls
+          description: output=urls only.
+        page_count:
+          type: integer
+          description: output=urls only.
+        pages:
+          type: array
+          description: output=urls only — masked pages as presigned links.
+          items:
+            $ref: '#/components/schemas/RedactPage'
+        content_kind:
+          type:
+          - string
+          - 'null'
+          description: Pixel-less formats only.
+        redacted_text:
+          type: string
+          description: Pixel-less text formats only.
+        redacted_spans:
+          type: array
+          items: {}
+        replacements:
+          type: array
+          items: {}
+        sheets:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: Pixel-less spreadsheet input only.
+    RedactPage:
+      type: object
+      additionalProperties: true
+      required:
+      - page_number
+      properties:
+        page_number:
+          type: integer
+        image_url:
+          type: string
+          description: Omitted if signing failed.
+    BatchCreateRequest:
+      type: object
+      additionalProperties: true
+      required:
+      - endpoint
+      - document_keys
+      properties:
+        endpoint:
+          type: string
+          enum:
+          - /v1/parse
+          - /v1/classify
+          - /v1/split
+          - /v1/redact
+          - /v1/extract
+          - /v1/extract-omni
+        document_keys:
+          type: array
+          minItems: 1
+          description: At most 1000 (413 above that).
+          items:
+            type: string
+        options:
+          type: object
+          additionalProperties: true
+        parse_mode:
+          type:
+          - string
+          - 'null'
+          enum:
+          - fast
+          - advanced
+          - null
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Opaque; echoed back.
+        webhook_url:
+          type:
+          - string
+          - 'null'
+        estimated_pages_per_doc:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 1
+    BatchCreateResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - batch_id
+      - status
+      - total_items
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/BatchStatus'
+        total_items:
+          type: integer
+    BatchStatus:
+      type: string
+      enum:
+      - queued
+      - processing
+      - completed
+      - completed_with_errors
+      - failed
+      - canceled
+    BatchCounts:
+      type: object
+      additionalProperties: true
+      required:
+      - total
+      - queued
+      - processing
+      - done
+      - failed
+      properties:
+        total:
+          type: integer
+        queued:
+          type: integer
+        processing:
+          type: integer
+        done:
+          type: integer
+        failed:
+          type: integer
+    BatchItemStatus:
+      type: object
+      additionalProperties: true
+      required:
+      - doc_index
+      - status
+      - error
+      - result_url
+      - result_expired
+      - filename
+      - request_id
+      - pages_processed
+      - tokens_used
+      properties:
+        doc_index:
+          type: integer
+        status:
+          type: string
+          enum:
+          - queued
+          - processing
+          - done
+          - failed
+        error:
+          type:
+          - string
+          - 'null'
+          description: '`canceled` for items stopped by a cancel.'
+        result_url:
+          type:
+          - string
+          - 'null'
+          description: Presigned GET for the item's result file, signed when the response was built.
+        result_expired:
+          type: boolean
+        filename:
+          type:
+          - string
+          - 'null'
+        request_id:
+          type:
+          - string
+          - 'null'
+          description: '`{batch_id}:{doc_index}`'
+        pages_processed:
+          type:
+          - integer
+          - 'null'
+        tokens_used:
+          type:
+          - integer
+          - 'null'
+    BatchStatusResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - batch_id
+      - status
+      - endpoint
+      - counts
+      - items
+      - created_at
+      - metadata
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/BatchStatus'
+        endpoint:
+          type: string
+        counts:
+          $ref: '#/components/schemas/BatchCounts'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchItemStatus'
+        created_at:
+          type: string
+          description: ISO-8601 (Python isoformat).
+        metadata:
+          type: object
+          additionalProperties: true
+    BatchListEntry:
+      type: object
+      additionalProperties: true
+      required:
+      - batch_id
+      - status
+      - endpoint
+      - total_items
+      - done_items
+      - failed_items
+      - created_at
+      - metadata
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/BatchStatus'
+        endpoint:
+          type: string
+        total_items:
+          type: integer
+        done_items:
+          type: integer
+        failed_items:
+          type: integer
+        created_at:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    BatchListResponse:
+      type: object
+      additionalProperties: true
+      required:
+      - batches
+      - limit
+      - offset
+      properties:
+        batches:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchListEntry'
+        limit:
+          type: integer
+        offset:
+          type: integer

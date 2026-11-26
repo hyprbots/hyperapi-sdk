@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperapi-sdk"
-version = "0.7.1"
+version = "0.8.0"
 description = "HyperAPI Python SDK - Document intelligence APIs (parse, extract, classify, split, redact)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -34,6 +34,7 @@ classifiers = [
 keywords = ["ocr", "document-processing", "invoice", "financial", "api"]
 dependencies = [
     "httpx>=0.28.1,<1.0",
+    "pydantic>=2.4,<3",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +45,11 @@ dev = [
     "respx>=0.20.0",
     "ruff==0.8.6",
     "pre-commit>=4.0.0",
+]
+# Regenerates hyperapi/types/_generated.py from openapi/hyperapi-public.yaml.
+codegen = [
+    "datamodel-code-generator==0.92.0",
+    "ruff==0.8.6",  # formats the generated file; a different ruff changes the output
 ]
 socks = [
     "httpx[socks]>=0.28.1,<1.0",
@@ -56,6 +62,12 @@ target-version = "py39"
 [tool.ruff.lint]
 select = ["E", "F", "N", "W", "UP"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Models (generated, and _sdk.py) keep Optional[...]/Union[...]: pydantic evaluates annotations
+# at runtime, and `X | Y` does not evaluate on Python 3.9.
+"hyperapi/types/_generated.py" = ["UP007"]
+"hyperapi/types/_sdk.py" = ["UP007"]
 
 [tool.pytest.ini_options]
 # asyncio_mode = "auto" lets async test functions run without per-test
