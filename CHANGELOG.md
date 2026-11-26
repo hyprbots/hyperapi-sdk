@@ -5,6 +5,31 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - unreleased
+
+### Added
+
+- **Typed responses.** Every method returns a pydantic v2 model (see
+  `hyperapi.types`): `parse()` → `ParseResponse`, `extract()` →
+  `ExtractResponse`, `get_job()` → `JobEnvelope`, and so on. Editors complete
+  field names; type checkers see the shapes.
+- The models are generated from `openapi/hyperapi-public.yaml`, a description
+  of the public API written from the production code.
+  `scripts/generate_types.py` regenerates them, and CI fails when they drift
+  from the spec.
+
+### Changed
+
+- **New runtime dependency: `pydantic>=2.4,<3`.**
+- Results are models, not `dict`s. Dict-style reads keep working
+  (`result["result"]["ocr"]`, `.get()`, `in`, `==` against a dict), so most 0.7
+  code runs unchanged. Code that needs a real `dict` calls `.to_dict()`:
+  `json.dumps(result)` becomes `json.dumps(result.to_dict())`, and
+  `isinstance(result, dict)` becomes `isinstance(result, HyperAPIModel)`.
+- A reply that does not match its model is returned as `GenericResponse`
+  (same data, same access) and logged once as `response_model_mismatch`; it
+  never raises.
+
 ## [0.7.1] - 2026-11-17
 
 First release on PyPI: `pip install hyperapi-sdk`.

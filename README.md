@@ -107,6 +107,46 @@ organization's default extract category is set to `non_financial`, the fields ar
 under `result["data"]["result"]["data"]` instead; call `client.extract(...,
 category="financial")` to choose explicitly.
 
+## Typed responses
+
+Every method returns a typed model (pydantic v2), so editors complete field
+names and type checkers catch typos. The models are generated from the API's
+OpenAPI description (`openapi/hyperapi-public.yaml`).
+
+```python
+from hyperapi import HyperAPIClient
+from hyperapi.types import ParseResponse
+
+client = HyperAPIClient()
+result: ParseResponse = client.parse("invoice.pdf")
+
+print(result.result.ocr)                  # typed attribute access
+for page in result.result.pages:
+    print(page.page_number, len(page.text))
+
+print(result["result"]["ocr"])            # dict-style access still works
+data = result.to_dict()                   # a plain dict (e.g. for json.dumps)
+```
+
+| Method | Returns |
+|---|---|
+| `parse()` | `ParseResponse` |
+| `extract()`, `extract_advanced()` | `ExtractResponse` |
+| `classify()` / `split()` / `redact()` | `ClassifyResponse` / `SplitResponse` / `RedactResponse` |
+| `process()` | `ProcessResult` (`.ocr`, `.data`) |
+| `get_job()` | `JobEnvelope` (`.result` is the operation's model) |
+| `list_recent_jobs()` | `list[RecentJob]` |
+| `get_limits()` | `UploadLimits` |
+| `create_batch()` / `get_batch()` / `list_batches()` | `BatchCreateResponse` / `BatchStatusResponse` / `BatchListResponse` |
+
+- **New fields are kept.** A field the API adds later is still on the model
+  (`result["new_field"]`) and in `to_dict()`.
+- **Nothing breaks on an unexpected reply.** If a reply does not match its
+  model, you get a `GenericResponse` with the same data and the same access
+  styles, and the SDK logs `response_model_mismatch` once.
+- **A JSON key that clashes with a method** gets a trailing underscore as an
+  attribute: `batch.items_` (the key is still `batch["items"]`).
+
 ## Two-Step Pipeline
 
 For more control, use parse and extract separately:

@@ -87,6 +87,7 @@ from .client import (
     _check_download_reply,
     _check_page_cap,
     _check_server_url,
+    _typed_result,
     _next_presigned_hop,
     _clean_api_key,
     _download_transport_error,
@@ -107,6 +108,23 @@ from .client import (
     _transient_delay,
     _server_message,
 )
+from .types import (
+    BatchCreateResponse,
+    BatchListResponse,
+    BatchStatusResponse,
+    ClassifyResponse,
+    ExtractResponse,
+    GenericResponse,
+    HyperAPIModel,
+    JobEnvelope,
+    ParseResponse,
+    ProcessResult,
+    RecentJob,
+    RedactResponse,
+    SplitResponse,
+    UploadLimits,
+)
+from .types._coerce import coerce
 from .exceptions import (
     AuthenticationError,
     DocumentUploadError,
@@ -392,7 +410,7 @@ class AsyncHyperAPIClient:
 
     # ── Limits ───────────────────────────────────────────────────────────
 
-    async def get_limits(self) -> dict:
+    async def get_limits(self) -> UploadLimits:
         """This key's per-task ceilings (``GET /v1/limits``) — a pure read.
 
         Limits vary by plan, so pre-flight against this rather than hard-coding
@@ -454,7 +472,7 @@ class AsyncHyperAPIClient:
             body = resp.json()
             if not isinstance(body, dict):
                 raise TypeError(f"body is {type(body).__name__}, expected object")
-            return body
+            return coerce(UploadLimits, body)
         except (json.JSONDecodeError, ValueError, TypeError) as e:
             raise HyperAPIError(
                 f"Malformed limits response: {e}",
@@ -697,7 +715,11 @@ class AsyncHyperAPIClient:
 
     # ── Polling ──────────────────────────────────────────────────────────
 
-    async def get_job(self, job_id: str) -> dict:
+    async def get_job(self, job_id: str) -> JobEnvelope:
+        """Single-shot poll; the job envelope as a :class:`~hyperapi.types.JobEnvelope`."""
+        return coerce(JobEnvelope, await self._get_job_raw(job_id))
+
+    async def _get_job_raw(self, job_id: str) -> dict:
         """Single-shot async poll. No retry, no waiting. Raises on 4xx; returns
         the raw envelope on 200 (``{status, result?, error?, ...}``)."""
         headers = self._get_headers()
@@ -741,7 +763,7 @@ class AsyncHyperAPIClient:
         *,
         limit: int = 20,
         source: str | None = None,
-    ) -> list[dict]:
+    ) -> list[RecentJob]:
         """List the org's recent jobs (summary rows, newest first).
 
         Args:
@@ -804,7 +826,7 @@ class AsyncHyperAPIClient:
             jobs = resp.json()["jobs"]
             if not isinstance(jobs, list):
                 raise TypeError(f"'jobs' is {type(jobs).__name__}, expected list")
-            return jobs
+            return [coerce(RecentJob, j) for j in jobs]
         except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
             raise HyperAPIError(
                 f"Malformed recent-jobs response: {e}",
@@ -913,7 +935,7 @@ class AsyncHyperAPIClient:
     ) -> dict:
         """One job poll with the transient-retry policy of :meth:`_retry_transient`."""
         return await self._retry_transient(
-            lambda: self.get_job(job_id),
+            lambda: self._get_job_raw(job_id),
             kind="Job",
             ident=job_id,
             deadline=deadline,
@@ -926,7 +948,7 @@ class AsyncHyperAPIClient:
         *,
         timeout: float | None = None,
         interval: float | None = None,
-    ) -> dict:
+    ) -> HyperAPIModel:
         """Poll a job until it completes, fails, or the timeout elapses.
 
         Yields to the event loop between polls (``await asyncio.sleep``)
@@ -1012,7 +1034,7 @@ class AsyncHyperAPIClient:
                 # `.get("result")` never hits None (a bare `["result"]` still
                 # KeyErrors, but never the old None TypeError). Matches wait_for_jobs.
                 res = envelope.get("result")
-                return res if isinstance(res, dict) else {}
+                return _typed_result(op, res)
             if status == "failed":
                 raise self._exception_for_failed_job(op, envelope, job_id)
 
@@ -1036,7 +1058,7 @@ class AsyncHyperAPIClient:
         *,
         timeout: float | None = None,
         interval: float | None = None,
-    ) -> list[dict]:
+    ) -> list[HyperAPIModel]:
         """Poll multiple jobs concurrently and return results in input order.
 
         Uses ``asyncio.gather`` for true concurrent polling — each job runs on
@@ -1083,10 +1105,9 @@ class AsyncHyperAPIClient:
         # `wait_for_job` returns the envelope's `result` payload ({} if missing
         # or null). Coerce non-dicts to {} so positional ordering is preserved
         # exactly like the sync version.
-        normalized: list[dict] = []
-        for res in results:
-            normalized.append(res if isinstance(res, dict) else {})
-        return normalized
+        return [
+            res if isinstance(res, HyperAPIModel) else GenericResponse() for res in results
+        ]
 
     def _exception_for_failed_job(
         self, op: str, envelope: dict, job_id: str
@@ -1577,7 +1598,7 @@ class AsyncHyperAPIClient:
         metadata: dict | None = None,
         estimated_pages_per_doc: int = 1,
         idempotency_key: str | None = None,
-    ) -> dict:
+    ) -> BatchCreateResponse:
         """Submit a batch of already-uploaded documents for async processing.
 
         Returns immediately with ``{batch_id, status, total_items}``; the work
@@ -1619,12 +1640,15 @@ class AsyncHyperAPIClient:
         if metadata is not None:
             body["metadata"] = metadata
         extra = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        return await self._batch_request(
-            "POST",
-            "/v1/batch",
-            json_body=body,
-            extra_headers=extra,
-            required=("batch_id",),
+        return coerce(
+            BatchCreateResponse,
+            await self._batch_request(
+                "POST",
+                "/v1/batch",
+                json_body=body,
+                extra_headers=extra,
+                required=("batch_id",),
+            ),
         )
 
     async def create_batch_from_files(
@@ -1633,7 +1657,7 @@ class AsyncHyperAPIClient:
         endpoint: str,
         file_paths: list[str | Path],
         **kwargs,
-    ) -> dict:
+    ) -> BatchCreateResponse:
         """Upload the files concurrently (presigned flow) then :meth:`create_batch`.
 
         At most 8 uploads run at once; if one fails the others are cancelled.
@@ -1647,24 +1671,38 @@ class AsyncHyperAPIClient:
 
     async def get_batch(
         self, batch_id: str, *, limit: int = 200, offset: int = 0
-    ) -> dict:
+    ) -> BatchStatusResponse:
         """Batch status: ``{status, counts, items:[{doc_index, status, ...}]}``."""
+        return coerce(
+            BatchStatusResponse,
+            await self._get_batch_raw(batch_id, limit=limit, offset=offset),
+        )
+
+    async def _get_batch_raw(
+        self, batch_id: str, *, limit: int = 200, offset: int = 0
+    ) -> dict:
         return await self._batch_request(
             "GET",
             f"/v1/batch/{_path_id(batch_id, name='batch_id')}",
             params={"limit": limit, "offset": offset},
         )
 
-    async def list_batches(self, *, limit: int = 50, offset: int = 0) -> dict:
+    async def list_batches(self, *, limit: int = 50, offset: int = 0) -> BatchListResponse:
         """List the org's batches, newest first."""
-        return await self._batch_request(
-            "GET", "/v1/batch", params={"limit": limit, "offset": offset}
+        return coerce(
+            BatchListResponse,
+            await self._batch_request(
+                "GET", "/v1/batch", params={"limit": limit, "offset": offset}
+            ),
         )
 
-    async def cancel_batch(self, batch_id: str) -> dict:
+    async def cancel_batch(self, batch_id: str) -> BatchStatusResponse:
         """Cancel a batch — stops queued items; in-flight items finish."""
-        return await self._batch_request(
-            "DELETE", f"/v1/batch/{_path_id(batch_id, name='batch_id')}"
+        return coerce(
+            BatchStatusResponse,
+            await self._batch_request(
+                "DELETE", f"/v1/batch/{_path_id(batch_id, name='batch_id')}"
+            ),
         )
 
     async def wait_for_batch(
@@ -1673,7 +1711,7 @@ class AsyncHyperAPIClient:
         *,
         timeout: float = 3600.0,
         poll_interval: float = 5.0,
-    ) -> dict:
+    ) -> BatchStatusResponse:
         """Poll :meth:`get_batch` until the batch reaches a terminal state.
 
         Raises :class:`JobTimeoutError` if ``timeout`` elapses (the batch keeps
@@ -1684,7 +1722,7 @@ class AsyncHyperAPIClient:
         while True:
             try:
                 status = await self._retry_transient(
-                    lambda: self.get_batch(batch_id),
+                    lambda: self._get_batch_raw(batch_id),
                     kind="Batch",
                     ident=batch_id,
                     deadline=deadline,
@@ -1705,7 +1743,7 @@ class AsyncHyperAPIClient:
                 await asyncio.sleep(wait)
                 continue
             if status.get("status") in self._BATCH_TERMINAL:
-                return status
+                return coerce(BatchStatusResponse, status)
             if time.monotonic() >= deadline:
                 raise JobTimeoutError(
                     f"Batch {batch_id} did not complete within {timeout}s.",
@@ -1733,7 +1771,7 @@ class AsyncHyperAPIClient:
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
-    ) -> dict:
+    ) -> ParseResponse:
         """Parse a document using OCR. Submits asynchronously and polls until done.
 
         The returned dict is the response envelope; the parse payload is nested
@@ -1826,7 +1864,7 @@ class AsyncHyperAPIClient:
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
-    ) -> dict:
+    ) -> ExtractResponse:
         """Extract structured data from a document.
 
         Submits asynchronously and polls until done. Bypasses any edge-timeout
@@ -1887,7 +1925,7 @@ class AsyncHyperAPIClient:
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
-    ) -> dict:
+    ) -> ExtractResponse:
         """Advanced extraction — auto-detects the document type, no ``category``.
 
         Invoice-family documents use the built-in invoice and receipt fields;
@@ -1916,7 +1954,7 @@ class AsyncHyperAPIClient:
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
-    ) -> dict:
+    ) -> ClassifyResponse:
         """Classify a document type (invoice, contract, receipt, etc.).
 
         ``options`` customizes the classifier (see :py:meth:`submit_classify`
@@ -1956,7 +1994,7 @@ class AsyncHyperAPIClient:
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
-    ) -> dict:
+    ) -> SplitResponse:
         """Split a multi-document PDF into individual document segments.
 
         ``options`` customizes the splitter (see :py:meth:`submit_split`):
@@ -1994,7 +2032,7 @@ class AsyncHyperAPIClient:
         use_presigned: bool = True,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
-    ) -> dict:
+    ) -> RedactResponse:
         """Redact or deidentify PII in a document. Submits async + polls until done.
 
 
@@ -2124,7 +2162,7 @@ class AsyncHyperAPIClient:
         image_path: str | Path | None = None,
         poll_timeout: float | None = None,
         poll_interval: float | None = None,
-    ) -> dict:
+    ) -> ProcessResult:
         """Parse and extract in one call.
 
         Uploads the document once, then submits the parse and extract legs
@@ -2163,10 +2201,10 @@ class AsyncHyperAPIClient:
             interval=poll_interval,
         )
         parse_result, extract_result = results
-        return {
-            "ocr": _parse_ocr_text(parse_result),
-            "data": extract_result if isinstance(extract_result, dict) else {},
-        }
+        return ProcessResult(
+            ocr=_parse_ocr_text(parse_result),
+            data=extract_result if isinstance(extract_result, HyperAPIModel) else GenericResponse(),
+        )
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
