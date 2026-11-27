@@ -44,6 +44,37 @@ jobs:
           name: coverage-xml
           path: coverage.xml
 
+  generated-models:
+    name: Generated models match the spec
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Install the pinned generator
+        run: pip install -e ".[codegen]"
+      - name: Regenerate and compare
+        # hyperapi/types/_generated.py must be exactly what the spec produces.
+        run: python scripts/generate_types.py --check
+
+  lowest-pydantic:
+    name: Tests on the lowest supported pydantic (2.4, Python 3.9)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.9"
+      - name: Install with pydantic pinned to the floor
+        run: pip install -e ".[dev]" "pydantic==2.4.2"
+      - name: Test
+        run: pytest tests/ -q
+
   dependency-audit:
     name: Dependency audit (pip-audit)
     runs-on: ubuntu-24.04
